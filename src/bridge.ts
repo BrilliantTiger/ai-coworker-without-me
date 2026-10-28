@@ -11,15 +11,24 @@ export const DEFAULT_PORTS: [number, number] = [7700, 7799]
 // 대화 하나에 주고받는 메시지 상한. 왕복 6번.
 export const MAX_MESSAGES_PER_THREAD = 12
 
+// 주소마다 다른 프로그램이 같은 포트로 떠 있을 수 있다. 받는 쪽 키로 만든 경로로 보내서,
+// 엉뚱한 곳(예: 같은 포트를 쓰는 이 PC의 다른 브릿지)이 답하면 「여기 아님」으로 알 수 있게 한다.
+export const routeId = (key: string) => Buffer.from(key, 'base64').toString('base64url').slice(0, 16)
+const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' || addr === 'localhost'
+
 // directFailed: 이쪽에서 상대로 바로 보내지 못했다. lastPollAt: 상대가 메시지를 가져가려고 마지막으로 접속한 때.
 export type Peer = { key: string; name: string; addrs: string[]; port: number; lastAddr?: string; directFailed?: boolean; lastPollAt?: number }
 
-export type ThreadStatus = 'waiting_for_peer' | 'your_turn' | 'needs_human'
+// checking_with_your_human: 결정이 필요해 이쪽 사람에게 묻는 중. peer_checking_with_their_human: 상대가 자기 사람에게 묻는 중.
+export type ThreadStatus = 'waiting_for_peer' | 'your_turn' | 'checking_with_your_human' | 'peer_checking_with_their_human' | 'needs_human'
+
+// note 는 「사람에게 확인 중」 같은 알림이다. 왕복 횟수에 세지 않는다.
+export type MessageKind = 'question' | 'answer' | 'note'
 
 export type ThreadMessage = {
   id: string
   from: 'me' | 'peer'
-  kind: 'question' | 'answer'
+  kind: MessageKind
   text: string
   context?: string
   at: string
@@ -37,11 +46,11 @@ export type Thread = {
 
 export type BridgeEvent =
   | { type: 'connected'; peer: string; at: string }
-  | { type: 'message'; thread: string; from: string; kind: 'question' | 'answer'; text: string; context?: string; status: ThreadStatus; at: string }
+  | { type: 'message'; thread: string; from: string; kind: MessageKind; text: string; context?: string; status: ThreadStatus; at: string }
   | { type: 'peer_closed'; peer: string; at: string }
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
 
-type WireMessage = { id: string; thread: string; subject?: string; kind: 'question' | 'answer'; text: string; context?: string; at: string }
+type WireMessage = { id: string; thread: string; subject?: string; kind: MessageKind; text: string; context?: string; at: string }
 
 type Payload =
   | { type: 'hello'; token: string; name: string; addrs: string[]; port: number }
@@ -51,10 +60,11 @@ type Payload =
   | { type: 'ping' }
   | { type: 'pong' }
   | { type: 'bye' }
-  | { type: 'poll'; wait: number }
-  | { type: 'batch'; items: Payload[] }
+  | { type: 'poll'; wait: number; ack?: string[] }
+  | { type: 'batch'; items: { id: string; payload: Payload }[] }
 
-type Outgoing = { peer: string; payload: Payload; thread?: string; since: number }
+// 상대가 가져간 뒤 「받았다」고 알려 와야 줄에서 지운다. 가져가던 연결이 끊겨도 다음에 다시 넘긴다.
+type Outgoing = { id: string; peer: string; payload: Payload; thread?: string; since: number }
 
 class DeliveryError extends Error {
   constructor(readonly reason: 'unreachable' | 'rejected', message: string) {
@@ -78,10 +88,12 @@ const now = () => new Date().toISOString()
 // 상대가 이 시간 안에 가져가러 왔으면, 상대는 이쪽 메시지를 스스로 가져가는 중이다.
 const POLL_FRESH_MS = 60_000
 const firstLine = (text: string) => text.trim().split('\n')[0]!.slice(0, 80)
+const counted = (t: Thread) => t.messages.filter(m => m.kind !== 'note').length
 
 export class Bridge {
   readonly keys: KeyPair = newKeyPair()
   readonly key = toB64(this.keys.publicKey)
+  private readonly route = routeId(this.key)
   name: string
   port = 0
   readonly peers = new Map<string, Peer>()
@@ -199,7 +211,20 @@ export class Bridge {
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, at: msg.at })
-    thread.status = thread.messages.length >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'waiting_for_peer'
+    thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'waiting_for_peer'
+    const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
+    return { thread: thread.id, to: peer.name, delivery, status: thread.status }
+  }
+
+  // 결정이 필요해 이쪽 사람에게 묻는 동안, 상대가 막연히 기다리지 않게 알린다.
+  async hold(threadId: string, note: string) {
+    const thread = this.threads.get(threadId)
+    if (!thread) throw new Error(`no conversation with id ${threadId}`)
+    const peer = this.peers.get(thread.peer)
+    if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'note', text: note, at: now() }
+    thread.messages.push({ id: msg.id, from: 'me', kind: 'note', text: note, at: msg.at })
+    thread.status = 'checking_with_your_human'
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
   }
@@ -251,7 +276,7 @@ export class Bridge {
         with: t.peerName,
         subject: t.subject,
         status: t.status,
-        messages: t.messages.length,
+        messages: counted(t),
         last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
       }
     })
@@ -306,7 +331,7 @@ export class Bridge {
   }
 
   private async handle(req: Request, server: Server<undefined>): Promise<Response> {
-    if (req.method !== 'POST' || new URL(req.url).pathname !== '/v1') return new Response('not found', { status: 404 })
+    if (req.method !== 'POST' || new URL(req.url).pathname !== `/v1/${this.route}`) return new Response('not found', { status: 404 })
     const sealed = await req.json().catch(() => null)
     const payload = open(sealed, this.keys) as Payload | null
     if (!payload) return new Response('forbidden', { status: 403 })
@@ -317,7 +342,10 @@ export class Bridge {
     if (!peer) {
       if (payload.type !== 'hello' || !this.takeToken(payload.token)) return new Response('forbidden', { status: 403 })
       const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, '')
-      const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...payload.addrs])]
+      // 다른 PC에서 왔으면 상대가 적어 보낸 127.0.0.1 은 이 PC를 가리키므로 뺀다.
+      const remote = !!seenAt && !isLoopback(seenAt)
+      const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
+      const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
       this.peers.set(from, { key: from, name: payload.name, addrs, port: payload.port })
       this.emit({ type: 'connected', peer: payload.name, at: now() })
       void this.pollLoop(from)
@@ -326,7 +354,9 @@ export class Bridge {
 
     if (payload.type === 'poll') {
       peer.lastPollAt = Date.now()
-      const items = await this.takeQueued(peer.key, Math.min(Math.max(payload.wait, 0), 25_000))
+      const acked = new Set(Array.isArray(payload.ack) ? payload.ack : [])
+      if (acked.size) this.outbox = this.outbox.filter(o => !(o.peer === peer.key && acked.has(o.id)))
+      const items = await this.pending(peer.key, Math.min(Math.max(payload.wait, 0), 25_000))
       return answer({ type: 'batch', items })
     }
     const reply = this.process(peer, payload)
@@ -365,7 +395,7 @@ export class Bridge {
 
   // 상대가 가져갈 수 있게 줄에 세우고, 실제로 가져갈 때까지 잠깐 기다린다.
   private async handOver(peer: Peer, payload: Payload, waitMs: number, thread?: string): Promise<boolean> {
-    const item: Outgoing = { peer: peer.key, payload, thread, since: Date.now() }
+    const item: Outgoing = { id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() }
     this.outbox.push(item)
     this.wakePoll(peer.key)
     for (let waited = 0; waited < waitMs && this.outbox.includes(item); waited += 50) await Bun.sleep(50)
@@ -376,13 +406,9 @@ export class Bridge {
     for (const wake of [...(this.pollWaiters.get(key) ?? [])]) wake()
   }
 
-  // 상대가 가져가러 왔을 때: 쌓인 것을 순서대로 넘기고, 없으면 새로 생길 때까지 붙잡아 둔다.
-  private async takeQueued(key: string, waitMs: number): Promise<Payload[]> {
-    const take = () => {
-      const mine = this.outbox.filter(o => o.peer === key)
-      if (mine.length) this.outbox = this.outbox.filter(o => o.peer !== key)
-      return mine.map(o => o.payload)
-    }
+  // 상대가 가져가러 왔을 때: 아직 「받았다」를 못 들은 것을 순서대로 넘기고, 없으면 새로 생길 때까지 붙잡아 둔다.
+  private async pending(key: string, waitMs: number): Promise<{ id: string; payload: Payload }[]> {
+    const take = () => this.outbox.filter(o => o.peer === key).map(o => ({ id: o.id, payload: o.payload }))
     const ready = take()
     if (ready.length || waitMs === 0 || !this.server) return ready
     await new Promise<void>(resolve => {
@@ -406,19 +432,25 @@ export class Bridge {
     let backoff = this.opts.retryMs
     // 막 연결된 직후에는 상대가 아직 이쪽을 등록하기 전이라 거절할 수 있다. 여러 번 거절하면 그때 끊는다.
     let refusals = 0
+    let ack: string[] = []
     try {
       while (this.server && !this.abort.signal.aborted) {
         const peer = this.peers.get(key)
         if (!peer) break
         try {
           if (!peer.lastAddr) await this.deliver(peer, { type: 'ping' })
-          const body = JSON.stringify(seal({ type: 'poll', wait: this.opts.pollWaitMs }, fromB64(peer.key), this.keys))
+          const body = JSON.stringify(seal({ type: 'poll', wait: this.opts.pollWaitMs, ack }, fromB64(peer.key), this.keys))
           const reply = await this.deliverTo(peer, peer.lastAddr!, body, this.opts.pollWaitMs + 5000)
           if (reply === 'refused') throw new DeliveryError('rejected', 'refused')
           if (!reply) throw new DeliveryError('unreachable', 'no answer')
           backoff = this.opts.retryMs
           refusals = 0
-          if (reply.type === 'batch') for (const item of reply.items) this.process(peer, item)
+          ack = []
+          if (reply.type === 'batch')
+            for (const item of reply.items) {
+              this.process(peer, item.payload)
+              ack.push(item.id)
+            }
         } catch (e) {
           if (this.abort.signal.aborted) break
           if (e instanceof DeliveryError && e.reason === 'rejected' && ++refusals >= 3) {
@@ -437,7 +469,7 @@ export class Bridge {
 
   private receive(peer: Peer, msg: WireMessage) {
     if (!msg || typeof msg.id !== 'string' || typeof msg.thread !== 'string' || typeof msg.text !== 'string') return
-    if (msg.kind !== 'question' && msg.kind !== 'answer') return
+    if (msg.kind !== 'question' && msg.kind !== 'answer' && msg.kind !== 'note') return
     if (this.seen.has(msg.id)) return
     this.seen.add(msg.id)
     let thread = this.threads.get(msg.thread)
@@ -457,7 +489,8 @@ export class Bridge {
     }
     const context = typeof msg.context === 'string' ? msg.context : undefined
     thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text: msg.text, context, at: now() })
-    thread.status = thread.messages.length >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'your_turn'
+    if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
+    else thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'your_turn'
     this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text: msg.text, context, status: thread.status, at: now() })
   }
 
@@ -507,7 +540,7 @@ export class Bridge {
   private async deliverTo(peer: Peer, addr: string, body: string, timeoutMs: number): Promise<Payload | 'refused' | null> {
     let res: Response
     try {
-      res = await fetch(`http://${hostForUrl(addr)}:${peer.port}/v1`, {
+      res = await fetch(`http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body,
@@ -538,7 +571,7 @@ export class Bridge {
       }
     }
     if (this.isPulling(peer)) return (await this.handOver(peer, payload, 3000, thread)) ? 'delivered' : 'queued'
-    this.outbox.push({ peer: peer.key, payload, thread, since: Date.now() })
+    this.outbox.push({ id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() })
     return 'queued'
   }
 

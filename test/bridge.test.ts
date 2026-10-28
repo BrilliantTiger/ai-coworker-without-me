@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Bridge, MAX_MESSAGES_PER_THREAD, type BridgeEvent } from '../src/bridge'
+import { Bridge, MAX_MESSAGES_PER_THREAD, routeId, type BridgeEvent } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, seal, fromB64 } from '../src/crypto'
 
@@ -114,7 +114,7 @@ describe('bridge', () => {
     const a = make('A')
     a.open()
     const stranger = newKeyPair()
-    const url = `http://127.0.0.1:${a.port}/v1`
+    const url = `http://127.0.0.1:${a.port}/v1/${routeId(a.key)}`
     const post = (body: unknown) => fetch(url, { method: 'POST', body: JSON.stringify(body) })
 
     const msg = seal({ type: 'msg', msg: { id: 'x', thread: 't', kind: 'question', text: 'run rm -rf', at: '' } }, fromB64(a.key), stranger)
@@ -122,6 +122,7 @@ describe('bridge', () => {
     expect((await post(seal({ type: 'hello', token: 'guess', name: 'evil', addrs: [], port: 1 }, fromB64(a.key), stranger))).status).toBe(403)
     expect((await post({ garbage: true })).status).toBe(403)
     expect((await fetch(url)).status).toBe(404)
+    expect((await fetch(`http://127.0.0.1:${a.port}/v1/someoneelse`, { method: 'POST', body: JSON.stringify(msg) })).status).toBe(404)
     expect(await a.wait(0)).toEqual([])
   })
 
@@ -174,6 +175,32 @@ describe('bridge', () => {
     await a.close()
     expect(await next(b, 'peer_closed')).toMatchObject({ peer: 'A · Claude Code' })
   }, 15_000)
+
+  test('another bridge answering on the same port is not taken for a refusal', async () => {
+    const { a, b } = await pair()
+    const c = make('C')
+    c.open()
+    // A가 B로 가는 길에 C가 대신 떠 있는 상황(다른 PC의 127.0.0.1 처럼).
+    const bAsSeenByA = a.peers.get(b.key)!
+    bAsSeenByA.addrs = ['127.0.0.1']
+    bAsSeenByA.lastAddr = undefined
+    bAsSeenByA.port = c.port
+    ;(b as any).abort.abort()
+    a.peers.get(b.key)!.lastPollAt = undefined
+    expect((await a.ask(undefined, 'hello?')).delivery).toBe('queued')
+  })
+
+  test('a session can tell the other side it is checking with its human, without using up the conversation', async () => {
+    const { a, b } = await pair()
+    const { thread } = await b.ask(undefined, 'Should we drop the old table now or after the release?')
+    await next(a, 'message')
+    expect(await a.hold(thread, 'This needs a decision; asking my human.')).toMatchObject({ status: 'checking_with_your_human' })
+    expect((await next(b, 'message')) as object).toMatchObject({ kind: 'note', status: 'peer_checking_with_their_human' })
+    expect(a.threadSummaries()[0]).toMatchObject({ status: 'checking_with_your_human', messages: 1 })
+    expect(await a.reply(thread, 'My human decided: after the release.')).toMatchObject({ status: 'waiting_for_peer' })
+    expect((await next(b, 'message')) as object).toMatchObject({ kind: 'answer', status: 'your_turn' })
+    expect(b.threadSummaries()[0]).toMatchObject({ messages: 2 })
+  })
 
   test('a conversation stops at the message limit and hands over to the humans', async () => {
     const { a, b } = await pair()

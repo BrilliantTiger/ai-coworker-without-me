@@ -60,6 +60,15 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   expect(answer).toMatchObject({ type: 'message', kind: 'answer', text: '4' })
 
   expect((await codex('inbox')).conversations[0]).toMatchObject({ id: asked.thread, status: 'your_turn', messages: 2 })
+
+  // 결정이 필요한 질문: 받은 쪽이 사람에게 묻는 중이라고 알리고, 사람의 결정을 답으로 보낸다.
+  const decide = await codex('send_question', { question: 'Release on Friday or Monday?' })
+  const dq = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
+  expect(dq).toMatchObject({ kind: 'question', thread: decide.thread })
+  expect(await claude('check_with_human', { thread: dq.thread })).toMatchObject({ status: 'checking_with_your_human' })
+  expect((await codex('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ kind: 'note', status: 'peer_checking_with_their_human' })
+  await claude('reply', { thread: dq.thread, text: 'My human decided: Monday.' })
+  expect((await codex('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ kind: 'answer', text: 'My human decided: Monday.' })
   expect((await claude('read_conversation', { thread: asked.thread })).messages).toHaveLength(2)
   expect((await codex('list_connections')).peers[0]).toMatchObject({ name: opened.name, reachable: true })
 
