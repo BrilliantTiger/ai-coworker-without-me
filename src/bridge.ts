@@ -11,7 +11,8 @@ export const DEFAULT_PORTS: [number, number] = [7700, 7799]
 // 대화 하나에 주고받는 메시지 상한. 왕복 6번.
 export const MAX_MESSAGES_PER_THREAD = 12
 
-export type Peer = { key: string; name: string; addrs: string[]; port: number; lastAddr?: string }
+// directFailed: 이쪽에서 상대로 바로 보내지 못했다. lastPollAt: 상대가 메시지를 가져가려고 마지막으로 접속한 때.
+export type Peer = { key: string; name: string; addrs: string[]; port: number; lastAddr?: string; directFailed?: boolean; lastPollAt?: number }
 
 export type ThreadStatus = 'waiting_for_peer' | 'your_turn' | 'needs_human'
 
@@ -50,6 +51,8 @@ type Payload =
   | { type: 'ping' }
   | { type: 'pong' }
   | { type: 'bye' }
+  | { type: 'poll'; wait: number }
+  | { type: 'batch'; items: Payload[] }
 
 type Outgoing = { peer: string; payload: Payload; thread?: string; since: number }
 
@@ -68,9 +71,12 @@ export type BridgeOptions = {
   expireMs?: number
   tokenTtlMs?: number
   connectTimeoutMs?: number
+  pollWaitMs?: number
 }
 
 const now = () => new Date().toISOString()
+// 상대가 이 시간 안에 가져가러 왔으면, 상대는 이쪽 메시지를 스스로 가져가는 중이다.
+const POLL_FRESH_MS = 60_000
 const firstLine = (text: string) => text.trim().split('\n')[0]!.slice(0, 80)
 
 export class Bridge {
@@ -90,6 +96,9 @@ export class Bridge {
   private waiters: Array<() => void> = []
   private flushing = false
   private lastCode?: string
+  private polling = new Set<string>()
+  private pollWaiters = new Map<string, Set<() => void>>()
+  private abort = new AbortController()
   private readonly opts: Required<Omit<BridgeOptions, 'home'>> & { home?: string }
 
   constructor(options: BridgeOptions) {
@@ -101,6 +110,7 @@ export class Bridge {
       expireMs: 30 * 60_000,
       tokenTtlMs: 60 * 60_000,
       connectTimeoutMs: 2000,
+      pollWaitMs: 20_000,
       ...options,
     }
   }
@@ -126,6 +136,7 @@ export class Bridge {
       for (let p = min; p <= max && !this.server; p++) this.listen(p)
       if (!this.server) throw new Error(`no free port between ${min} and ${max}`)
     }
+    this.abort = new AbortController()
     this.timer = setInterval(() => void this.flush(), this.opts.retryMs)
     this.timer.unref?.()
     this.writeState()
@@ -157,6 +168,7 @@ export class Bridge {
     if (reply.type !== 'hello_ack') throw new Error('unexpected answer from the other session')
     peer.name = reply.name
     this.peers.set(peer.key, peer)
+    void this.pollLoop(peer.key)
     return peer
   }
 
@@ -211,14 +223,19 @@ export class Bridge {
   async connections() {
     const peers = await Promise.all(
       [...this.peers.values()].map(async peer => {
-        let reachable = false
+        let direct = false
         try {
-          reachable = (await this.deliver(peer, { type: 'ping' })).type === 'pong'
+          direct = (await this.deliver(peer, { type: 'ping' })).type === 'pong'
         } catch {}
+        const pulling = this.isPulling(peer)
         return {
           name: peer.name,
-          reachable,
-          via: reachable ? `${peer.lastAddr}:${peer.port}` : undefined,
+          reachable: direct || pulling,
+          via: direct
+            ? `${peer.lastAddr}:${peer.port}`
+            : pulling
+              ? 'the other side cannot be reached directly, so it comes here to pick up messages'
+              : undefined,
           queued: this.outbox.filter(o => o.peer === peer.key).length,
         }
       }),
@@ -247,12 +264,22 @@ export class Bridge {
   // 연결된 세션에 끝났다고 알리고 포트를 닫는다.
   async close() {
     if (!this.server) return
-    await Promise.all([...this.peers.values()].map(p => this.deliver(p, { type: 'bye' }).catch(() => {})))
+    await Promise.all(
+      [...this.peers.values()].map(async p => {
+        try {
+          await this.deliver(p, { type: 'bye' })
+        } catch {
+          if (this.isPulling(p)) await this.handOver(p, { type: 'bye' }, 2000)
+        }
+      }),
+    )
     this.shutdown()
   }
 
   // 알리지 않고 바로 닫는다. 프로세스가 끝날 때 쓴다.
   shutdown() {
+    this.abort.abort()
+    for (const wakers of this.pollWaiters.values()) for (const wake of [...wakers]) wake()
     clearInterval(this.timer)
     this.server?.stop(true)
     this.server = undefined
@@ -268,6 +295,7 @@ export class Bridge {
         port,
         hostname: '0.0.0.0',
         maxRequestBodySize: 1 << 20,
+        idleTimeout: 60,
         fetch: (req, server) => this.handle(req, server),
       })
       this.port = port
@@ -292,26 +320,118 @@ export class Bridge {
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...payload.addrs])]
       this.peers.set(from, { key: from, name: payload.name, addrs, port: payload.port })
       this.emit({ type: 'connected', peer: payload.name, at: now() })
+      void this.pollLoop(from)
       return answer({ type: 'hello_ack', name: this.name })
     }
 
+    if (payload.type === 'poll') {
+      peer.lastPollAt = Date.now()
+      const items = await this.takeQueued(peer.key, Math.min(Math.max(payload.wait, 0), 25_000))
+      return answer({ type: 'batch', items })
+    }
+    const reply = this.process(peer, payload)
+    return reply ? answer(reply) : new Response('bad request', { status: 400 })
+  }
+
+  // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
+  private process(peer: Peer, payload: Payload): Payload | null {
     switch (payload.type) {
       case 'ping':
-        return answer({ type: 'pong' })
+        return { type: 'pong' }
       case 'msg':
         this.receive(peer, payload.msg)
-        return answer({ type: 'ok' })
+        return { type: 'ok' }
       case 'bye':
-        this.peers.delete(peer.key)
-        this.outbox = this.outbox.filter(o => o.peer !== peer.key)
-        this.emit({ type: 'peer_closed', peer: peer.name, at: now() })
-        return answer({ type: 'ok' })
+        this.dropPeer(peer)
+        return { type: 'ok' }
       case 'hello':
         peer.addrs = payload.addrs
         peer.port = payload.port
-        return answer({ type: 'hello_ack', name: this.name })
+        return { type: 'hello_ack', name: this.name }
       default:
-        return new Response('bad request', { status: 400 })
+        return null
+    }
+  }
+
+  private dropPeer(peer: Peer) {
+    if (!this.peers.delete(peer.key)) return
+    this.outbox = this.outbox.filter(o => o.peer !== peer.key)
+    this.emit({ type: 'peer_closed', peer: peer.name, at: now() })
+  }
+
+  private isPulling(peer: Peer) {
+    return !!peer.lastPollAt && Date.now() - peer.lastPollAt < POLL_FRESH_MS
+  }
+
+  // 상대가 가져갈 수 있게 줄에 세우고, 실제로 가져갈 때까지 잠깐 기다린다.
+  private async handOver(peer: Peer, payload: Payload, waitMs: number, thread?: string): Promise<boolean> {
+    const item: Outgoing = { peer: peer.key, payload, thread, since: Date.now() }
+    this.outbox.push(item)
+    this.wakePoll(peer.key)
+    for (let waited = 0; waited < waitMs && this.outbox.includes(item); waited += 50) await Bun.sleep(50)
+    return !this.outbox.includes(item)
+  }
+
+  private wakePoll(key: string) {
+    for (const wake of [...(this.pollWaiters.get(key) ?? [])]) wake()
+  }
+
+  // 상대가 가져가러 왔을 때: 쌓인 것을 순서대로 넘기고, 없으면 새로 생길 때까지 붙잡아 둔다.
+  private async takeQueued(key: string, waitMs: number): Promise<Payload[]> {
+    const take = () => {
+      const mine = this.outbox.filter(o => o.peer === key)
+      if (mine.length) this.outbox = this.outbox.filter(o => o.peer !== key)
+      return mine.map(o => o.payload)
+    }
+    const ready = take()
+    if (ready.length || waitMs === 0 || !this.server) return ready
+    await new Promise<void>(resolve => {
+      const done = () => {
+        clearTimeout(timer)
+        this.pollWaiters.get(key)?.delete(done)
+        resolve()
+      }
+      const timer = setTimeout(done, waitMs)
+      if (!this.pollWaiters.has(key)) this.pollWaiters.set(key, new Set())
+      this.pollWaiters.get(key)!.add(done)
+    })
+    return take()
+  }
+
+  // 이쪽이 상대에게 가서 이쪽 앞으로 온 메시지를 가져온다.
+  // 이쪽 PC로 들어오는 연결이 방화벽에 막혀 있어도 대화가 되게 하는 길이다.
+  private async pollLoop(key: string) {
+    if (this.polling.has(key)) return
+    this.polling.add(key)
+    let backoff = this.opts.retryMs
+    // 막 연결된 직후에는 상대가 아직 이쪽을 등록하기 전이라 거절할 수 있다. 여러 번 거절하면 그때 끊는다.
+    let refusals = 0
+    try {
+      while (this.server && !this.abort.signal.aborted) {
+        const peer = this.peers.get(key)
+        if (!peer) break
+        try {
+          if (!peer.lastAddr) await this.deliver(peer, { type: 'ping' })
+          const body = JSON.stringify(seal({ type: 'poll', wait: this.opts.pollWaitMs }, fromB64(peer.key), this.keys))
+          const reply = await this.deliverTo(peer, peer.lastAddr!, body, this.opts.pollWaitMs + 5000)
+          if (reply === 'refused') throw new DeliveryError('rejected', 'refused')
+          if (!reply) throw new DeliveryError('unreachable', 'no answer')
+          backoff = this.opts.retryMs
+          refusals = 0
+          if (reply.type === 'batch') for (const item of reply.items) this.process(peer, item)
+        } catch (e) {
+          if (this.abort.signal.aborted) break
+          if (e instanceof DeliveryError && e.reason === 'rejected' && ++refusals >= 3) {
+            this.dropPeer(peer)
+            break
+          }
+          peer.lastAddr = undefined
+          await Bun.sleep(backoff)
+          backoff = Math.min(backoff * 2, 30_000)
+        }
+      }
+    } finally {
+      this.polling.delete(key)
     }
   }
 
@@ -374,25 +494,9 @@ export class Bridge {
     const addrs = [...new Set([...(peer.lastAddr ? [peer.lastAddr] : []), ...peer.addrs])]
     let refused = false
     for (const addr of addrs) {
-      let res: Response
-      try {
-        res = await fetch(`http://${hostForUrl(addr)}:${peer.port}/v1`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body,
-          signal: AbortSignal.timeout(this.opts.connectTimeoutMs),
-        })
-      } catch {
-        continue
-      }
-      if (res.status === 403) {
-        refused = true
-        continue
-      }
-      if (!res.ok) continue
-      const sealed = (await res.json().catch(() => null)) as { from?: string } | null
-      const reply = sealed?.from === peer.key ? (open(sealed, this.keys) as Payload | null) : null
-      if (!reply) continue
+      const reply = await this.deliverTo(peer, addr, body, this.opts.connectTimeoutMs)
+      if (reply === 'refused') refused = true
+      if (!reply || reply === 'refused') continue
       peer.lastAddr = addr
       return reply
     }
@@ -400,17 +504,40 @@ export class Bridge {
     throw new DeliveryError('unreachable', `${peer.name} is not reachable right now`)
   }
 
+  private async deliverTo(peer: Peer, addr: string, body: string, timeoutMs: number): Promise<Payload | 'refused' | null> {
+    let res: Response
+    try {
+      res = await fetch(`http://${hostForUrl(addr)}:${peer.port}/v1`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+        signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), this.abort.signal]),
+      })
+    } catch {
+      return null
+    }
+    if (res.status === 403) return 'refused'
+    if (!res.ok) return null
+    const sealed = (await res.json().catch(() => null)) as { from?: string } | null
+    return sealed?.from === peer.key ? (open(sealed, this.keys) as Payload | null) : null
+  }
+
   private async sendOrQueue(peer: Peer, payload: Payload, thread?: string): Promise<'delivered' | 'queued'> {
     // 앞에 밀린 것이 있으면 순서를 지키려고 뒤에 줄 세운다.
-    if (!this.outbox.some(o => o.peer === peer.key)) {
+    // 바로 못 보내는 상대가 스스로 가져가는 중이면, 바로 보내기는 건너뛴다.
+    const skipDirect = peer.directFailed && this.isPulling(peer)
+    if (!skipDirect && !this.outbox.some(o => o.peer === peer.key)) {
       try {
         await this.deliver(peer, payload)
+        peer.directFailed = false
         return 'delivered'
       } catch (e) {
         if (e instanceof DeliveryError && e.reason === 'rejected')
           throw new Error(`${peer.name} refused the message; its bridge may have been closed and reopened. Exchange a new connection code`)
+        peer.directFailed = true
       }
     }
+    if (this.isPulling(peer)) return (await this.handOver(peer, payload, 3000, thread)) ? 'delivered' : 'queued'
     this.outbox.push({ peer: peer.key, payload, thread, since: Date.now() })
     return 'queued'
   }

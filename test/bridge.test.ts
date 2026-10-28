@@ -133,12 +133,16 @@ describe('bridge', () => {
   test('messages wait in the outbox while the other side is away, then arrive in order', async () => {
     const { a, b } = await pair()
     const port = a.port
+    // A가 완전히 사라진 상황: 받지도 않고, B에게 가져가러 오지도 않는다.
     ;(a as any).server.stop(true)
+    ;(a as any).abort.abort()
+    b.peers.get(a.key)!.lastPollAt = undefined
 
     expect((await b.ask(undefined, 'first')).delivery).toBe('queued')
     expect((await b.ask(undefined, 'second')).delivery).toBe('queued')
     expect((await b.connections()).peers[0]).toMatchObject({ reachable: false, queued: 2 })
 
+    ;(a as any).abort = new AbortController()
     expect((a as any).listen(port)).toBe(true)
     const texts: string[] = []
     for (let i = 0; i < 20 && texts.length < 2; i++)
@@ -146,6 +150,30 @@ describe('bridge', () => {
     expect(texts).toEqual(['first', 'second'])
     expect((await b.connections()).peers[0]).toMatchObject({ reachable: true, queued: 0 })
   })
+
+  test('a side that cannot be reached still gets its messages by coming to pick them up', async () => {
+    const { a, b } = await pair()
+    // A에서 B로 가는 길이 막힌 상황. B는 A에 닿을 수 있다(Windows 방화벽이 들어오는 연결만 막을 때와 같다).
+    const bAsSeenByA = a.peers.get(b.key)!
+    bAsSeenByA.addrs = ['192.0.2.1']
+    bAsSeenByA.lastAddr = undefined
+    for (let i = 0; i < 40 && !bAsSeenByA.lastPollAt; i++) await Bun.sleep(50)
+    expect(bAsSeenByA.lastPollAt).toBeDefined()
+
+    const { thread } = await b.ask(undefined, 'can you hear me?')
+    expect((await next(a, 'message')) as { text: string }).toMatchObject({ text: 'can you hear me?' })
+    expect(await a.reply(thread, 'yes, through the pickup')).toMatchObject({ delivery: 'delivered' })
+    expect((await next(b, 'message')) as { text: string }).toMatchObject({ kind: 'answer', text: 'yes, through the pickup' })
+    expect(await a.reply(thread, 'and again, fast')).toMatchObject({ delivery: 'delivered' })
+    expect((await next(b, 'message')) as { text: string }).toMatchObject({ text: 'and again, fast' })
+
+    const conns = await a.connections()
+    expect(conns.peers[0]).toMatchObject({ name: 'B · Codex', reachable: true, queued: 0 })
+    expect(conns.peers[0]!.via).toContain('pick up')
+
+    await a.close()
+    expect(await next(b, 'peer_closed')).toMatchObject({ peer: 'A · Claude Code' })
+  }, 15_000)
 
   test('a conversation stops at the message limit and hands over to the humans', async () => {
     const { a, b } = await pair()
