@@ -1,0 +1,21 @@
+{
+  "name": "ai-coworker-without-me",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network or VPN.",
+  "scripts": {
+    "mcp": "bun src/mcp.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "tweetnacl": "^1.0.3",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
