@@ -35,6 +35,9 @@
 - 2026-10-29에 중계 서버를 도커로 Mac에 띄우고, Windows PC의 Claude Code(채널)와 Mac의 상대를 중계 서버로만 이었다. Mac 쪽 상대는 바로 닿는 주소를 하나도 내놓지 않았고, Mac에서 Windows로 바로 들어가는 길은 방화벽에 막혀 있었다. 연결, 채널로 들어온 질문, 답, 합의문, 닫기가 모두 중계 서버로 오갔다. Caddy로 HTTPS를 붙인 배포 파일도 도커 안에서 확인했다.
 - 2026-10-29에 Windows PC가 브릿지를 열고 Mac이 붙어 봤다. 그 PC는 방화벽에 bun을 막는 규칙(개인·공용)이 이미 있어서 Mac은 2초 만에 「닿지 않는다」는 오류를 받았다. 허용 창에서 「취소」를 누르면 생기는 규칙이다. README에 확인하고 푸는 방법을 적었다. 그 PC에는 WSL이 없어서 WSL 미러 모드는 시험하지 못했다.
 - 2026-10-29에 Claude Code는 응답도 진행 알림도 없이 30분이 지난 MCP 호출을 끊는다는 것을 확인했다(stdio 서버 기본값, 시험에서는 15~30초로 줄여 재현). 채널 없이 켠 세션의 시간 제한 없는 기다리기가 여기에 걸린다. 이제 기다리는 동안 5분마다 진행 알림을 보낸다. 끊는 시간을 30초로 줄인 실제 세션이 70초 뒤에 온 질문을 끊기지 않고 받아 3초 만에 답했다.
+- 2026-10-29에 GitHub에 올린 뒤 README 명령 그대로 플러그인을 설치해 시험했다. Claude Code는 `claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me`, Codex는 `codex plugin marketplace add`와 `codex plugin add`다. 고친 것이 둘이다.
+  - 예전에 직접 등록한 coworker가 남은 PC에서 플러그인을 채널로 켜면 coworker가 두 개 뜬다. 직접 등록한 쪽도 실행 인자에서 개발용 채널 옵션을 보고 자기도 채널이라고 알았다. AI가 그쪽 `connect`를 고르자 Claude Code가 그 서버의 알림을 버렸고(디버그 로그 「coworker not in --channels list」), 연결 직후 온 질문을 놓쳤다. 이제 플러그인으로 뜬 서버(`CLAUDE_PLUGIN_ROOT`가 있다)는 `plugin:coworker@…`일 때만, 직접 등록한 서버는 `server:coworker`일 때만 채널로 본다. 고친 뒤 실제 세션에서 플러그인 쪽은 채널로, 직접 등록한 쪽은 기다리기 도구로 받아 둘 다 답했다.
+  - Codex는 설치 뒤 첫 세션을 켤 때 이미 띄운 MCP의 플러그인 폴더를 같은 경로의 새 폴더로 바꾼다(0.165.0). 지워진 폴더에 남은 MCP에서 `process.cwd()`가 `uv_cwd` 오류를 내 `connect`가 두 번 다 실패했다. 그 세션에서 깐 패키지도 옛 폴더와 함께 사라졌다. 두 번째 세션부터는 폴더가 그대로다. 이제 작업 폴더를 못 읽으면 셸의 `PWD`를 쓰고, 패키지를 깐 뒤 사라졌으면 다시 깐다.
 
 ## 흐름
 
@@ -69,7 +72,7 @@
 
 | 도구 | 방법 |
 |---|---|
-| Claude Code | **Channels를 쓴다.** 플러그인으로 설치했으면 `claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me`, 직접 등록했으면 `claude --dangerously-load-development-channels server:coworker`로 켠다. `--channels`는 Anthropic이 승인한 채널만 받아서 쓸 수 없다. 메시지가 오면 세션에 바로 들어가고 AI가 반응한다. 기다리는 동안에는 사용량이 들지 않는다. 다만 직접 만든 채널이라 켤 때마다 개발용 옵션을 붙여야 하고 경고 화면이 한 번 뜬다. Claude Code는 MCP를 채널로 등록했는지 알려 주지 않고, 채널로 등록되지 않은 세션에 보낸 알림은 오류 없이 버린다. 그래서 MCP는 자기를 띄운 Claude Code의 개발용 채널 옵션에 `server:coworker`나 `plugin:coworker@…`가 있을 때만 채널로 보낸다(2026-10-29) |
+| Claude Code | **Channels를 쓴다.** 플러그인으로 설치했으면 `claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me`, 직접 등록했으면 `claude --dangerously-load-development-channels server:coworker`로 켠다. `--channels`는 Anthropic이 승인한 채널만 받아서 쓸 수 없다. 메시지가 오면 세션에 바로 들어가고 AI가 반응한다. 기다리는 동안에는 사용량이 들지 않는다. 다만 직접 만든 채널이라 켤 때마다 개발용 옵션을 붙여야 하고 경고 화면이 한 번 뜬다. Claude Code는 MCP를 채널로 등록했는지 알려 주지 않고, 채널로 등록되지 않은 세션에 보낸 알림은 오류 없이 버린다. 그래서 MCP는 자기를 띄운 Claude Code의 개발용 채널 옵션에 자기가 적혀 있을 때만 채널로 보낸다. 플러그인으로 뜬 서버는 `plugin:coworker@…`, 직접 등록한 서버는 `server:coworker`다(2026-10-29) |
 | Codex | **대기 도구를 쓴다.** AI가 「메시지 기다리기」를 호출해 두면 메시지가 왔을 때 돌아온다. Codex는 도구 호출을 60초까지만 기다려서 50초(최대 55초)마다 다시 호출하고, 그때마다 사용량이 조금씩 든다 |
 | Channels 없이 켠 Claude Code | **대기 도구를 쓰되 시간 제한 없이 기다린다(2026-10-29).** 2분쯤 지나면 Claude Code가 그 호출을 백그라운드로 넘기고 차례를 끝낸다. 메시지가 와서 호출이 끝나면 Claude Code가 AI에게 알리고 AI가 반응한다. 빈 결과로 끝나는 일이 없어서 사람에게 빈 알림이 가지 않는다. Claude Code가 30분 동안 조용한 호출을 끊지 않게 5분마다 진행 알림을 보낸다 |
 
@@ -126,5 +129,5 @@
 | 1. 브릿지·연결·암호화 | 됐다. 같은 PC, 집 Mac↔같은 네트워크의 Windows, 집 Mac↔회사 Mac mini(Tailscale)까지 시험했다. **회사에서 동료 PC와 실제 사내망·VPN 시험은 아직 못 했다** |
 | 2. 메시지가 오면 반응 | 됐다. Claude Code는 Channels(직접 등록·플러그인 둘 다), Codex는 대기 도구. Mac과 Windows에서 실제 세션으로 시험했다 |
 | 3. 합의문·왕복 상한·비밀값 막기 | 됐다. 합의문 쓰기 도구, 메시지 12개(왕복 6번) 상한, 보내기 전 비밀값 막기. 실제 Claude Code·Codex 세션으로 시험했다 |
-| 4. 플러그인 | 됐다. Claude Code(`.claude-plugin/`)와 Codex(`.codex-plugin/`, `.agents/plugins/`) 플러그인. 로컬 마켓플레이스로 설치해 시험했다. **GitHub에서 바로 설치하는 것은 올린 뒤에 시험한다** |
+| 4. 플러그인 | 됐다. Claude Code(`.claude-plugin/`)와 Codex(`.codex-plugin/`, `.agents/plugins/`) 플러그인. 로컬 마켓플레이스와 GitHub에서 설치해 시험했다 |
 | 5. 외부망 | 됐다. 중계 서버(`src/relay.ts`)와 배포 파일(`relay/`). 중계 서버만으로 Windows↔Mac을 이어 시험했다. **실제 인터넷에 띄운 중계 서버로 집↔회사 시험은 아직 못 했다** |

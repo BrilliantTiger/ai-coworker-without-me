@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { existsSync, mkdtempSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -190,6 +190,28 @@ test('a session not started as a channel does not claim to be one', async () => 
   await session('claude-code', {}, client)
   expect(client.getServerCapabilities()?.experimental).toBeUndefined()
   expect(client.getInstructions()).toMatch(/call wait_for_message, handle what arrives/)
+})
+
+test('Codex replacing the plugin folder under a running server does not break it', async () => {
+  // Codex 는 설치 뒤 첫 세션에서 플러그인 폴더를 같은 경로의 새 폴더로 바꾼다. 이 서버는 그 폴더 안에서 떠 있다.
+  const pluginDir = join(home, 'plugins', 'cache', 'mkt', 'coworker', '0.1.0')
+  mkdirSync(pluginDir, { recursive: true })
+  const client = new Client({ name: 'codex-mcp-client', version: '1.0.0' })
+  await client.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [join(import.meta.dir, '..', 'src', 'mcp.ts')],
+      cwd: pluginDir,
+      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', PWD: '/work/billing-api' } as Record<string, string>,
+      stderr: 'inherit',
+    }),
+  )
+  clients.push(client)
+  rmSync(pluginDir, { recursive: true })
+  mkdirSync(pluginDir)
+  const res = (await client.callTool({ name: 'open_bridge', arguments: {} })) as { isError?: boolean; content: { text: string }[] }
+  expect(res.isError).toBeFalsy()
+  expect(JSON.parse(res.content[0]!.text).name).toStartWith('billing-api · Codex @ ')
 })
 
 test('three sessions join one group and one question goes to everyone', async () => {

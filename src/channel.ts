@@ -12,7 +12,10 @@ const CHANNEL_FLAG = '--dangerously-load-development-channels'
 
 // 실행 인자 한 줄에서 이 서버를 채널로 켰는지 본다.
 // 예: claude --dangerously-load-development-channels server:coworker
-export function channelRequested(commandLine: string, server = 'coworker'): boolean {
+// 플러그인으로 깐 서버는 plugin:coworker@… 로만, 직접 등록한 서버는 server:coworker 로만 채널이 된다.
+// 둘 다 깔린 PC에서 플러그인을 채널로 켜면 직접 등록한 서버도 같은 실행 인자를 본다. 그 서버까지 채널로 알면
+// AI가 그쪽 도구를 골랐을 때 Claude Code 가 알림을 버려(「coworker not in --channels list」) 메시지를 놓친다(2026-10-29).
+export function channelRequested(commandLine: string, asPlugin = false, server = 'coworker'): boolean {
   const args = commandLine.trim().split(/\s+/)
   // -p 처럼 사람 없이 돌리면 Claude Code 가 채널 옵션을 무시한다.
   if (args.some(a => a === '-p' || a === '--print')) return false
@@ -22,7 +25,8 @@ export function channelRequested(commandLine: string, server = 'coworker'): bool
     const entries = inline !== undefined ? [inline] : []
     for (let j = i + 1; inline === undefined && j < args.length && !args[j]!.startsWith('-'); j++) entries.push(args[j]!)
     const names = entries.flatMap(e => e.split(','))
-    if (names.some(n => n === `server:${server}` || n === `plugin:${server}` || n.startsWith(`plugin:${server}@`))) return true
+    const mine = (n: string) => (asPlugin ? n === `plugin:${server}` || n.startsWith(`plugin:${server}@`) : n === `server:${server}`)
+    if (names.some(mine)) return true
   }
   return false
 }
@@ -89,5 +93,6 @@ export function detectChannel(env = process.env): boolean {
   // Claude Code 가 띄운 MCP 에는 CLAUDECODE=1 이 붙는다. 없으면 실행 인자를 읽지 않는다(Windows 에서 1초를 아낀다).
   if (env.CLAUDECODE !== '1') return false
   const launcher = launcherCommandLine(ancestorCommandLines())
-  return !!launcher && channelRequested(launcher)
+  // Claude Code 는 플러그인이 띄운 MCP 에만 CLAUDE_PLUGIN_ROOT 를 붙인다.
+  return !!launcher && channelRequested(launcher, !!env.CLAUDE_PLUGIN_ROOT)
 }

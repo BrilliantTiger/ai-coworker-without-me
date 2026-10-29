@@ -95,10 +95,20 @@ const LISTEN = channel
 function projectFolder() {
   const given = process.env.COWORKER_PROJECT_DIR
   if (given && !given.includes('${')) return basename(given)
-  const cwd = process.cwd()
-  if (!/[\\/]plugins[\\/]cache[\\/]/.test(cwd)) return basename(cwd)
+  const cwd = workingDir()
+  if (cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(cwd)) return basename(cwd)
   const pwd = process.env.PWD
   return pwd && pwd !== cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(pwd) ? basename(pwd) : undefined
+}
+
+// Codex 는 플러그인을 깐 뒤 첫 세션을 켤 때, 이미 띄운 MCP 의 플러그인 폴더를 같은 경로의 새 폴더로 바꾼다
+// (2026-10-29, codex-cli 0.165.0). 그러면 지워진 폴더에 머문 이 프로세스에서 process.cwd() 가 uv_cwd 오류를 낸다.
+function workingDir() {
+  try {
+    return process.cwd()
+  } catch {
+    return undefined
+  }
 }
 
 function getBridge() {

@@ -6,7 +6,19 @@ test('a Claude Code started with this server as a development channel is a chann
   expect(channelRequested('claude --model haiku --dangerously-load-development-channels server:coworker --resume')).toBe(true)
   expect(channelRequested('claude --dangerously-load-development-channels=server:coworker')).toBe(true)
   expect(channelRequested('claude --dangerously-load-development-channels server:other server:coworker')).toBe(true)
-  expect(channelRequested('claude --dangerously-load-development-channels plugin:coworker@mine')).toBe(true)
+  expect(channelRequested('claude --dangerously-load-development-channels plugin:coworker@mine', true)).toBe(true)
+  expect(channelRequested('claude --dangerously-load-development-channels plugin:coworker', true)).toBe(true)
+})
+
+test('with both a plugin and a directly added server, only the one named in the channel list is a channel', () => {
+  // 플러그인을 채널로 켜도 직접 등록한 서버는 채널이 아니다. Claude Code 가 그 서버의 알림을 버린다.
+  const plugin = 'claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me'
+  expect(channelRequested(plugin, true)).toBe(true)
+  expect(channelRequested(plugin, false)).toBe(false)
+  const server = 'claude --dangerously-load-development-channels server:coworker'
+  expect(channelRequested(server, false)).toBe(true)
+  expect(channelRequested(server, true)).toBe(false)
+  expect(channelRequested('claude --dangerously-load-development-channels plugin:coworker2@mine', true)).toBe(false)
 })
 
 test('anything else is not a channel session', () => {
