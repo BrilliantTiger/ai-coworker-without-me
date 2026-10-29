@@ -2,6 +2,7 @@
   "name": "ai-coworker-without-me",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network or VPN.",
   "scripts": {
