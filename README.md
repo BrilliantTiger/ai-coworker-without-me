@@ -57,6 +57,8 @@ AI 둘이 서로 맞장구치다 틀린 결론에 합의하지 않도록, 합의
 
 필요한 것은 [Bun](https://bun.sh) 하나다. 플러그인으로 설치하면 Claude Code와 Codex에 한 번에 들어간다.
 
+Bun은 최신으로 쓴다(`bun upgrade`, chocolatey로 깔았으면 관리자 PowerShell에서 `choco upgrade bun -y`). 1.3.x 같은 예전 Bun은 이 저장소의 `bun.lock`을 읽지 못한다. 그래도 플러그인은 package.json대로 깔고 켜지지만, 직접 받은 저장소에서 `bun install`을 하면 `bun.lock`이 바뀐 파일로 나온다.
+
 ### Claude Code: 플러그인
 
 ```

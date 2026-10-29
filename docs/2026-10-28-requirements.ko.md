@@ -38,6 +38,7 @@
 - 2026-10-29에 GitHub에 올린 뒤 README 명령 그대로 플러그인을 설치해 시험했다. Claude Code는 `claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me`, Codex는 `codex plugin marketplace add`와 `codex plugin add`다. 고친 것이 둘이다.
   - 예전에 직접 등록한 coworker가 남은 PC에서 플러그인을 채널로 켜면 coworker가 두 개 뜬다. 직접 등록한 쪽도 실행 인자에서 개발용 채널 옵션을 보고 자기도 채널이라고 알았다. AI가 그쪽 `connect`를 고르자 Claude Code가 그 서버의 알림을 버렸고(디버그 로그 「coworker not in --channels list」), 연결 직후 온 질문을 놓쳤다. 이제 플러그인으로 뜬 서버(`CLAUDE_PLUGIN_ROOT`가 있다)는 `plugin:coworker@…`일 때만, 직접 등록한 서버는 `server:coworker`일 때만 채널로 본다. 고친 뒤 실제 세션에서 플러그인 쪽은 채널로, 직접 등록한 쪽은 기다리기 도구로 받아 둘 다 답했다.
   - Codex는 설치 뒤 첫 세션을 켤 때 이미 띄운 MCP의 플러그인 폴더를 같은 경로의 새 폴더로 바꾼다(0.165.0). 지워진 폴더에 남은 MCP에서 `process.cwd()`가 `uv_cwd` 오류를 내 `connect`가 두 번 다 실패했다. 그 세션에서 깐 패키지도 옛 폴더와 함께 사라졌다. 두 번째 세션부터는 폴더가 그대로다. 이제 작업 폴더를 못 읽으면 셸의 `PWD`를 쓰고, 패키지를 깐 뒤 사라졌으면 다시 깐다.
+- 2026-10-29에 Windows PC의 Bun 1.3.7은 새 Bun(1.4.x)이 만든 `bun.lock`(`lockfileVersion` 2)을 읽지 못했다(「Unknown lockfile version」). 플러그인이 처음 켤 때 하는 `bun install --frozen-lockfile --production`이 실패해서, Bun이 오래된 PC에서는 플러그인이 켜지지 않았다. `--production`도 lock 파일을 고정한 것처럼 다뤄 같이 실패했다. 이제 실패하면 `bun install --omit=dev`로 package.json의 범위대로 깐다. 같은 PC에서 이렇게 깔리고 서버가 뜨는 것을 확인했다. 직접 받은 저장소에서 오래된 Bun으로 `bun install`을 하면 `bun.lock`이 옛 형식으로 다시 써져 바뀐 파일로 나온다.
 
 ## 흐름
 
