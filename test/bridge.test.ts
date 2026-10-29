@@ -239,6 +239,17 @@ describe('bridge', () => {
     await expect(a.reply(thread, 'more')).rejects.toThrow('let the humans decide')
   })
 
+  test('a wait with no time limit stays open until something arrives', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    let done = false
+    const waiting = a.wait(Infinity).then(events => ((done = true), events))
+    await Bun.sleep(300)
+    expect(done).toBe(false)
+    await b.ask(undefined, 'are you there?')
+    expect(await waiting).toEqual([expect.objectContaining({ type: 'message', text: 'are you there?' })])
+  })
+
   test('closing tells the other side', async () => {
     const { a, b } = await pair()
     await b.close()

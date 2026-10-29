@@ -189,15 +189,14 @@ server.registerTool(
     title: 'Wait for message',
     annotations: { readOnlyHint: true, openWorldHint: true },
     description:
-      'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving), up to timeout_sec. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop. If nothing arrived, say nothing to your human and call it again.',
+      'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code it waits until something arrives, with no time limit: the call moves to the background and you are told when it returns, so leave it running and do not call it again meanwhile. In Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop. If nothing arrived, say nothing to your human and call it again.',
     inputSchema: {
       timeout_sec: z
         .number()
         .int()
         .min(0)
-        .max(300)
         .optional()
-        .describe('How long to wait. Default 50 for Codex (it allows at most 60), 110 otherwise (Claude Code moves calls over 120 seconds to the background). Longer values are cut to those limits.'),
+        .describe('Leave it out to wait until something arrives (Codex: 50 seconds, at most 55). Give it only when you want the wait to end sooner.'),
     },
   },
   tool(async ({ timeout_sec }: { timeout_sec?: number }, { signal }) => {

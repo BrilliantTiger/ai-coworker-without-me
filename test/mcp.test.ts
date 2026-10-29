@@ -108,9 +108,10 @@ test('ending the session closes its bridge and removes its state file', async ()
   expect(res).toBeNull()
 }, 15_000)
 
-test('a wait ends before Claude Code pushes it to the background or Codex gives up on it', () => {
-  expect(waitSeconds(undefined, false)).toBe(110)
-  expect(waitSeconds(300, false)).toBe(110)
+test('Claude Code waits until something arrives; Codex ends before it gives up on the call', () => {
+  expect(waitSeconds(undefined, false)).toBe(Infinity)
+  expect(waitSeconds(0, false)).toBe(Infinity)
+  expect(waitSeconds(300, false)).toBe(300)
   expect(waitSeconds(30, false)).toBe(30)
   expect(waitSeconds(undefined, true)).toBe(50)
   expect(waitSeconds(300, true)).toBe(55)

@@ -254,7 +254,8 @@ export class Bridge {
           this.waiters = this.waiters.filter(w => w !== done)
           resolve()
         }
-        const timer = setTimeout(done, deadline - Date.now())
+        // 정한 시간 없이 기다릴 때는 타이머를 걸지 않는다(setTimeout 은 너무 큰 값을 1ms 로 바꾼다).
+        const timer = Number.isFinite(deadline) ? setTimeout(done, deadline - Date.now()) : undefined
         signal?.addEventListener('abort', done)
         this.waiters.push(done)
       })
