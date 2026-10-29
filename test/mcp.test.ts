@@ -49,6 +49,11 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   expect(joined.connected).toBe(opened.name)
   expect(joined.myName).toMatch(/ · Codex @ /)
   expect(joined.myPort).not.toBe(opened.port)
+  // 연 쪽과 연결한 쪽이 저마다 자기 링크를 받고, AI에게 주는 안내에도 그 링크가 들어 있다.
+  expect(joined.viewer).toStartWith('http://127.0.0.1:')
+  expect(joined.viewer).not.toBe(opened.viewer)
+  expect(opened.next).toContain(opened.viewer)
+  expect(joined.next).toContain(joined.viewer)
 
   expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'connected', peer: joined.myName })
 

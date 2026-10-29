@@ -156,7 +156,9 @@ function viewerUrl() {
   viewer ??= new Viewer(getBridge())
   return viewer.start()
 }
-const VIEWER = 'Also give your human the viewer link: it shows, in a browser on this PC, every question and answer, with whom and when.'
+// 연 쪽과 연결한 쪽 모두 자기 PC의 링크를 받는다. 링크를 안내 문장에 넣어야 AI가 다른 일을 이어 할 때도 빠뜨리지 않는다.
+const viewerNote = (url: string) =>
+  `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself: ${url}`
 
 // 중계 서버를 쓰면 우편함이 열릴 때까지 잠깐 기다리고, 안 열렸으면 사람에게 알리게 한다.
 async function relayStatus(b: Bridge) {
@@ -223,7 +225,7 @@ server.registerTool(
       relay: relayInfo,
       group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
       viewer: viewerUrl(),
-      next: `Show the code to your human so they can send it to the coworker. The code works once.${warn} ${VIEWER} ${LISTEN}`,
+      next: `Show the code to your human so they can send it to the coworker. The code works once.${warn} ${viewerNote(viewerUrl())} ${LISTEN}`,
     }
   }),
 )
@@ -253,7 +255,7 @@ server.registerTool(
       myPort: b.port,
       relay: relayInfo,
       viewer: viewerUrl(),
-      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.${warn} ${VIEWER} ${LISTEN}`,
+      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}`,
     }
   }),
 )
