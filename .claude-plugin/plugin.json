@@ -1,0 +1,44 @@
+{
+  "name": "coworker",
+  "displayName": "AI Co-worker Without Me",
+  "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network, VPN or a relay.",
+  "author": { "name": "BrilliantTiger" },
+  "homepage": "https://github.com/BrilliantTiger/ai-coworker-without-me",
+  "repository": "https://github.com/BrilliantTiger/ai-coworker-without-me",
+  "license": "MIT",
+  "keywords": ["mcp", "channel", "codex", "collaboration"],
+  "mcpServers": {
+    "coworker": {
+      "command": "bun",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/start.ts"],
+      "env": {
+        "COWORKER_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
+        "COWORKER_PORTS": "${user_config.ports}",
+        "COWORKER_RELAY": "${user_config.relay}",
+        "COWORKER_RELAY_KEY": "${user_config.relay_key}"
+      }
+    }
+  },
+  "channels": [{ "server": "coworker", "displayName": "Coworker" }],
+  "userConfig": {
+    "ports": {
+      "type": "string",
+      "title": "Port range",
+      "description": "Ports a bridge may open, like 7700-7799. Change it only if your company allows another range.",
+      "default": "7700-7799"
+    },
+    "relay": {
+      "type": "string",
+      "title": "Relay server",
+      "description": "Only for coworkers outside the office network and VPN: the relay URL, like https://relay.example.com. Leave empty otherwise.",
+      "default": ""
+    },
+    "relay_key": {
+      "type": "string",
+      "title": "Relay key",
+      "description": "The key set by whoever runs the relay. Leave empty if there is no relay.",
+      "sensitive": true,
+      "default": ""
+    }
+  }
+}

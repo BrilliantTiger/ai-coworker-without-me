@@ -254,6 +254,78 @@ describe('bridge', () => {
     await expect(a.reply(thread, 'more')).rejects.toThrow('let the humans decide')
   })
 
+  test('an agreement goes to both sides and is saved on both PCs, with facts kept apart from guesses', async () => {
+    const homeA = mkdtempSync(join(tmpdir(), 'coworker-a-'))
+    const homeB = mkdtempSync(join(tmpdir(), 'coworker-b-'))
+    const a = make('A · Claude Code', { home: homeA })
+    const b = make('B · Codex', { home: homeB })
+    await b.connect(a.newCode())
+    const { thread } = await b.ask(undefined, 'Which port does the dev API use?')
+    await next(a, 'message')
+    await a.reply(thread, '18001, from docker-compose.yml line 12')
+    await next(b, 'message')
+
+    const wrote = await b.agree(thread, {
+      conclusion: 'The dev API listens on 18001.',
+      facts: [
+        { fact: 'docker-compose.yml maps 18001', evidence: 'docker-compose.yml:12', checkedBy: 'them' },
+        { fact: 'the client calls 18001', evidence: 'rg 18001 src/ → src/api.ts:3', checkedBy: 'me' },
+      ],
+      guesses: ['18000 is probably the old port'],
+      forHumans: ['Remove 18000 from the docs?'],
+    })
+    expect(wrote).toMatchObject({ delivery: 'delivered', status: 'agreed' })
+    const got = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    expect(got).toMatchObject({ kind: 'agreement', status: 'agreed', agreement: { by: 'B · Codex', conclusion: 'The dev API listens on 18001.' } })
+    // 누가 확인했는지는 이름으로 남는다. 상대가 알려 주기만 한 것은 상대 이름이다.
+    expect(got.agreement!.facts.map(f => f.checkedBy)).toEqual(['A · Claude Code', 'B · Codex'])
+
+    for (const file of [wrote.file!, got.file!]) {
+      const text = readFileSync(file, 'utf8')
+      expect(text).toContain('# 합의문: Which port does the dev API use?')
+      expect(text).toContain('## 확인한 사실과 근거')
+      expect(text).toContain('## 추측 (아무도 확인하지 않음)\n\n- 18000 is probably the old port')
+      expect(text).toContain('## 의견이 갈린 점\n\n- 없음')
+      expect(text).toContain('### 답 · ')
+    }
+    expect(wrote.file!.startsWith(join(homeB, 'agreements'))).toBe(true)
+    expect(got.file!.startsWith(join(homeA, 'agreements'))).toBe(true)
+
+    // 끝난 대화에는 더 답하지 않는다. 동의하지 않으면 자기 판을 쓴다.
+    await expect(a.reply(thread, 'one more thing')).rejects.toThrow('an agreement was written')
+    await a.agree(thread, { conclusion: 'Mostly agree.', disagreements: ['18000 is still used by the worker'] })
+    expect(((await next(b, 'message')) as { agreement: { by: string } }).agreement.by).toBe('A · Claude Code')
+    const both = readFileSync(wrote.file!, 'utf8')
+    expect(both).toContain('# 합의문 · A · Claude Code 작성')
+    expect(both).toContain('# 합의문 · B · Codex 작성')
+    expect(a.threadSummaries()[0]).toMatchObject({ status: 'agreed', messages: 2 })
+  })
+
+  test('an agreement can be written after the message limit, and when the other side has left', async () => {
+    const { a, b } = await pair()
+    const { thread } = await b.ask(undefined, 'q')
+    for (let n = 2; n <= MAX_MESSAGES_PER_THREAD; n++) await (n % 2 === 0 ? a : b).reply(thread, `turn ${n}`)
+    await Bun.sleep(50)
+    expect(await b.agree(thread, { conclusion: 'Not settled.', forHumans: ['Pick one'] })).toMatchObject({ status: 'agreed' })
+    await b.close()
+    await next(a, 'peer_closed')
+    expect(await a.agree(thread, { conclusion: 'Agreed to disagree.' })).toMatchObject({ delivery: expect.stringContaining('no longer connected') })
+  })
+
+  test('anything that looks like a secret is refused before it leaves', async () => {
+    const { a, b } = await pair()
+    const key = ['AKIA', 'Q3EGZ7YBLHPX4K2M'].join('')
+    await expect(b.ask(undefined, 'Why does this fail?', `aws configure with ${key}`)).rejects.toThrow('nothing was sent')
+    expect(b.threads.size).toBe(0)
+    const { thread } = await b.ask(undefined, 'Which database do we use?')
+    await next(a, 'message')
+    await expect(a.reply(thread, 'postgres://app:S3cr3t!x@db.internal/main')).rejects.toThrow('password in a URL')
+    await expect(a.hold(thread, 'password=hunter2!')).rejects.toThrow('nothing was sent')
+    await expect(a.agree(thread, { conclusion: 'ok', facts: [{ fact: 'it works', evidence: `ran with ${key}`, checkedBy: 'me' }] })).rejects.toThrow('AWS access key')
+    expect(a.threads.get(thread)!.messages).toHaveLength(1)
+    expect(await a.reply(thread, 'Postgres; the password is in the team vault.')).toMatchObject({ delivery: 'delivered' })
+  })
+
   test('a wait with no time limit stays open until something arrives', async () => {
     const { a, b } = await pair()
     await next(a, 'connected')

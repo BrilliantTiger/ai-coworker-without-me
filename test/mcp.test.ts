@@ -139,6 +139,52 @@ test('a Claude Code started as a channel gets messages pushed in, without waitin
   expect((await next('peer_closed')).meta).toEqual({ type: 'peer_closed', peer: joined.myName })
 })
 
+test('the asking side writes the agreement, and secrets never leave', async () => {
+  const claude = await session('claude-code')
+  const codex = await session('codex-mcp-client')
+  const opened = await claude('open_bridge', {})
+  await codex('connect', { code: opened.code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+
+  const token = ['gh', 'p_', 'Q7w'.repeat(12)].join('')
+  await expect(codex('send_question', { question: 'Why does the clone fail?', context: `git clone https://x:${token}@github.com/a/b` })).rejects.toThrow(
+    /nothing was sent/,
+  )
+  const asked = await codex('send_question', { question: 'Which branch do we release from?' })
+  const q = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
+  await claude('reply', { thread: q.thread, text: 'main, per docs/release.md' })
+  await codex('wait_for_message', { timeout_sec: 5 })
+
+  const wrote = await codex('write_agreement', {
+    thread: asked.thread,
+    conclusion: 'Releases go out from main.',
+    facts: [{ fact: 'docs/release.md says main', evidence: 'docs/release.md:4', checked_by: 'them' }],
+    for_humans: ['Keep the release branch?'],
+  })
+  expect(wrote).toMatchObject({ status: 'agreed', delivery: 'delivered', file: expect.stringContaining(join(home, 'agreements')) })
+  const got = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
+  expect(got).toMatchObject({ kind: 'agreement', status: 'agreed', agreement: { conclusion: 'Releases go out from main.' } })
+  expect(existsSync(got.file)).toBe(true)
+  // Windows 의 Bun 1.3.7 에서는 여기서 rejects.toThrow 가 이미 끝난 거절을 놓치고 시험 시간을 다 쓴다. 거절 글을 받아서 본다.
+  expect(await claude('reply', { thread: q.thread, text: 'also tags' }).catch(e => String(e))).toMatch(/write_agreement/)
+  expect(await claude('send_question', { question: 'Anything else for the release?' })).toMatchObject({ delivery: 'delivered' })
+}, 20_000)
+
+test('a long wait in Claude Code keeps reporting progress, so Claude Code does not cut it off', async () => {
+  const client = new Client({ name: 'claude-code', version: '1.0.0' })
+  const claude = await session('claude-code', { COWORKER_KEEPALIVE_MS: '100' }, client)
+  const codex = await session('codex-mcp-client')
+  await codex('connect', { code: (await claude('open_bridge', {})).code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  const beats: number[] = []
+  const waiting = client.callTool({ name: 'wait_for_message', arguments: {} }, undefined, { onprogress: p => void beats.push(p.progress) })
+  await Bun.sleep(450)
+  await codex('send_question', { question: 'Still there?' })
+  const res = (await waiting) as { content: { text: string }[] }
+  expect(JSON.parse(res.content[0]!.text).events[0]).toMatchObject({ kind: 'question', text: 'Still there?' })
+  expect(beats.length).toBeGreaterThanOrEqual(3)
+}, 20_000)
+
 test('a session not started as a channel does not claim to be one', async () => {
   const client = new Client({ name: 'claude-code', version: '1.0.0' })
   await session('claude-code', {}, client)

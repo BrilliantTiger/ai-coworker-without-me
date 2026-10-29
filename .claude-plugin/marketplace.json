@@ -1,0 +1,14 @@
+{
+  "name": "ai-coworker-without-me",
+  "description": "AI Co-worker Without Me: an MCP and channel that lets coworkers' AI sessions ask and answer each other directly.",
+  "owner": {
+    "name": "BrilliantTiger"
+  },
+  "plugins": [
+    {
+      "name": "coworker",
+      "source": "./",
+      "description": "Let coworkers' AI sessions ask and answer each other directly."
+    }
+  ]
+}

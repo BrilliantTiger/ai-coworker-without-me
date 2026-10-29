@@ -1,0 +1,21 @@
+{
+  "name": "coworker",
+  "version": "0.1.0",
+  "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network, VPN or a relay.",
+  "mcpServers": {
+    "coworker": {
+      "command": "bun",
+      "args": ["./src/start.ts"],
+      "cwd": ".",
+      "startup_timeout_sec": 60,
+      "tool_timeout_sec": 70,
+      "env_vars": ["PWD", "COWORKER_PORTS", "COWORKER_RELAY", "COWORKER_RELAY_KEY", "COWORKER_HOME"],
+      "tools": {
+        "wait_for_message": { "approval_mode": "approve" },
+        "inbox": { "approval_mode": "approve" },
+        "list_connections": { "approval_mode": "approve" },
+        "read_conversation": { "approval_mode": "approve" }
+      }
+    }
+  }
+}

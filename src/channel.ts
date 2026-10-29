@@ -5,7 +5,10 @@ import { platform } from 'node:os'
 // 채널로 등록되지 않은 세션에 보낸 알림은 오류 없이 버려지므로, 확실할 때만 채널로 보낸다.
 // 그래서 이 MCP 를 띄운 Claude Code 의 실행 인자에 채널 옵션과 이 서버 이름이 함께 있는지 본다.
 
-const CHANNEL_FLAGS = ['--dangerously-load-development-channels', '--channels']
+// 직접 만든 채널은 이 옵션으로 켤 때만 받는다. --channels 는 Anthropic 이 승인한 플러그인만 받는다.
+// --channels server:coworker 로 켜면 Claude Code 가 「server: entries need --dangerously-load-development-channels」를 띄우고
+// 채널을 켜지 않는다(2026-10-29, 2.1.312). 그때 채널로 알면 보낸 알림이 버려지고 AI는 기다리지도 않아 메시지를 놓친다.
+const CHANNEL_FLAG = '--dangerously-load-development-channels'
 
 // 실행 인자 한 줄에서 이 서버를 채널로 켰는지 본다.
 // 예: claude --dangerously-load-development-channels server:coworker
@@ -15,7 +18,7 @@ export function channelRequested(commandLine: string, server = 'coworker'): bool
   if (args.some(a => a === '-p' || a === '--print')) return false
   for (let i = 0; i < args.length; i++) {
     const [flag, inline] = args[i]!.split(/=(.*)/s, 2)
-    if (!CHANNEL_FLAGS.includes(flag!)) continue
+    if (flag !== CHANNEL_FLAG) continue
     const entries = inline !== undefined ? [inline] : []
     for (let j = i + 1; inline === undefined && j < args.length && !args[j]!.startsWith('-'); j++) entries.push(args[j]!)
     const names = entries.flatMap(e => e.split(','))

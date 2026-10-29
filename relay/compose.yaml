@@ -1,0 +1,28 @@
+# 인터넷에 공개된 서버 한 대에서 중계 서버를 HTTPS 로 띄운다.
+# 먼저 도메인(예: relay.example.com)이 그 서버의 IP를 가리키게 하고, 80·443 포트를 연다.
+#   cd relay
+#   printf 'DOMAIN=relay.example.com\nRELAY_KEY=%s\n' "$(openssl rand -hex 24)" > .env
+#   docker compose up -d
+# .env 는 git 에 올라가지 않는다. 쓰는 사람은 COWORKER_RELAY=https://relay.example.com 과 같은 키를 등록에 넣는다.
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    environment:
+      RELAY_KEY: ${RELAY_KEY:?RELAY_KEY 를 정한다}
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    depends_on: [relay]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN 을 정한다}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    restart: unless-stopped
+volumes:
+  caddy-data:

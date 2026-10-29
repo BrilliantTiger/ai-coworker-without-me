@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# 중계 서버의 도메인과 키
+relay/.env

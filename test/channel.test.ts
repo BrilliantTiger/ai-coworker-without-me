@@ -6,7 +6,7 @@ test('a Claude Code started with this server as a development channel is a chann
   expect(channelRequested('claude --model haiku --dangerously-load-development-channels server:coworker --resume')).toBe(true)
   expect(channelRequested('claude --dangerously-load-development-channels=server:coworker')).toBe(true)
   expect(channelRequested('claude --dangerously-load-development-channels server:other server:coworker')).toBe(true)
-  expect(channelRequested('claude --channels plugin:coworker@mine')).toBe(true)
+  expect(channelRequested('claude --dangerously-load-development-channels plugin:coworker@mine')).toBe(true)
 })
 
 test('anything else is not a channel session', () => {
@@ -17,6 +17,8 @@ test('anything else is not a channel session', () => {
   // 사람 없이 돌리면 Claude Code 가 채널 옵션을 무시한다.
   expect(channelRequested('claude -p hi --dangerously-load-development-channels server:coworker')).toBe(false)
   expect(channelRequested('codex')).toBe(false)
+  // --channels 는 승인된 플러그인만 받는다. 이 서버를 적으면 Claude Code 가 거절하고 채널을 켜지 않는다.
+  expect(channelRequested('claude --channels server:coworker')).toBe(false)
 })
 
 test('only the program that started this server counts, not a Claude Code further up', () => {

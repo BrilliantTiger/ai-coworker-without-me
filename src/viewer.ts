@@ -71,6 +71,7 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 .msg { border-left: 3px solid var(--line); padding: 6px 10px; margin: 8px 0; border-radius: 0 6px 6px 0; background: var(--in); }
 .msg.mine { background: var(--out); }
 .msg.note { background: var(--note); }
+.msg.agreement { border-left-color: var(--accent); }
 .who { font-size: 13px; font-weight: 600; }
 .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
 details { margin-top: 4px; font-size: 13px; color: var(--muted); }
@@ -85,7 +86,7 @@ details .text { color: var(--text); }
 <div id="list"></div>
 </main>
 <script>
-const KIND = { question: '질문', answer: '답', note: '알림', closed: '마감' }
+const KIND = { question: '질문', answer: '답', note: '알림', closed: '마감', agreement: '합의문' }
 const STATUS = {
   waiting_for_peer: '상대 차례',
   your_turn: '이쪽 차례',
@@ -93,6 +94,7 @@ const STATUS = {
   peer_checking_with_their_human: '상대가 자기 사람에게 확인 중',
   needs_human: '상한에 닿음 · 사람이 정할 차례',
   closed: '마감 · 다른 사람이 먼저 답함',
+  agreed: '합의문 작성됨',
 }
 const ANSWERS = { all: '모두 답', one: '한 명만 답' }
 const time = at => new Date(at).toLocaleString('ko-KR', { hour12: false })
@@ -119,7 +121,7 @@ function render(data) {
     const group = c.ask ? ' · 함께 받은 사람: ' + c.ask.to.join(', ') + ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
     card.append(head, el('div', 'meta', (mine ? '받는 쪽: ' : '보낸 쪽: ') + where + (first ? ' · 시작 ' + time(first.at) : '') + group))
     for (const m of c.messages) {
-      const box = el('div', 'msg' + (m.from === 'me' ? ' mine' : '') + (m.kind === 'note' || m.kind === 'closed' ? ' note' : ''))
+      const box = el('div', 'msg' + (m.from === 'me' ? ' mine' : '') + (m.kind === 'note' || m.kind === 'closed' ? ' note' : '') + (m.kind === 'agreement' ? ' agreement' : ''))
       const who = m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'
       box.append(el('div', 'who', (KIND[m.kind] ?? m.kind) + ' · ' + who), el('div', 'time', time(m.at)), el('div', 'text', m.text))
       if (m.context) {

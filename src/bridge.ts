@@ -2,9 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Server } from 'bun'
+import { isAgreement, renderAgreement, type Agreement } from './agreement'
 import { decodeCode, encodeCode } from './code'
 import { fromB64, newKeyPair, open, randomToken, seal, toB64, type KeyPair } from './crypto'
 import { hostForUrl, localAddresses } from './net'
+import { boxOf } from './relay'
+import { assertNoSecrets } from './secrets'
 
 // 사내 방화벽에 열어 달라고 요청하기 쉽게 정해 둔 범위.
 export const DEFAULT_PORTS: [number, number] = [7700, 7799]
@@ -26,6 +29,8 @@ export const MAX_MESSAGES_PER_THREAD = 12
 // 엉뚱한 곳(예: 같은 포트를 쓰는 이 PC의 다른 브릿지)이 답하면 「여기 아님」으로 알 수 있게 한다.
 export const routeId = (key: string) => Buffer.from(key, 'base64').toString('base64url').slice(0, 16)
 const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' || addr === 'localhost'
+// 주소 목록에서 http(s):// 로 시작하는 것은 중계 서버의 우편함이다. 나머지는 IP나 컴퓨터 이름이다.
+export const isRelayAddr = (addr: string) => /^https?:\/\//.test(addr)
 
 // directFailed: 이쪽에서 상대로 바로 보내지 못했다. lastPollAt: 상대가 메시지를 가져가려고 마지막으로 접속한 때.
 // private: 개인용 코드로 이어진 상대. 그룹의 다른 세션에 소개하지 않고, 이 상대가 소개하는 세션도 받지 않는다.
@@ -47,12 +52,20 @@ type Member = { key: string; name: string; addrs: string[]; port: number }
 type Invite = Member & { by: string; expires: number; nextTry: number; backoff: number; trying?: boolean }
 
 // checking_with_your_human: 결정이 필요해 이쪽 사람에게 묻는 중. peer_checking_with_their_human: 상대가 자기 사람에게 묻는 중.
-// closed: 여럿에게 한 명만 답하면 되는 질문을 했고, 다른 사람이 먼저 답했다.
-export type ThreadStatus = 'waiting_for_peer' | 'your_turn' | 'checking_with_your_human' | 'peer_checking_with_their_human' | 'needs_human' | 'closed'
+// closed: 여럿에게 한 명만 답하면 되는 질문을 했고, 다른 사람이 먼저 답했다. agreed: 어느 한쪽이 합의문을 썼다.
+export type ThreadStatus =
+  | 'waiting_for_peer'
+  | 'your_turn'
+  | 'checking_with_your_human'
+  | 'peer_checking_with_their_human'
+  | 'needs_human'
+  | 'closed'
+  | 'agreed'
 
-// note 는 「사람에게 확인 중」 같은 알림, closed 는 「다른 사람이 먼저 답했다」는 알림이다. 둘 다 왕복 횟수에 세지 않는다.
-export type MessageKind = 'question' | 'answer' | 'note' | 'closed'
-const KINDS: MessageKind[] = ['question', 'answer', 'note', 'closed']
+// note 는 「사람에게 확인 중」 같은 알림, closed 는 「다른 사람이 먼저 답했다」는 알림, agreement 는 합의문이다.
+// 셋 다 왕복 횟수에 세지 않는다.
+export type MessageKind = 'question' | 'answer' | 'note' | 'closed' | 'agreement'
+const KINDS: MessageKind[] = ['question', 'answer', 'note', 'closed', 'agreement']
 
 // 한 질문을 여러 세션에 보냈을 때. 받는 사람마다 대화가 따로 생기고, 같은 ask id 로 묶인다.
 // answers: all 이면 모두 답하고, one 이면 먼저 온 답 하나로 끝낸다.
@@ -66,6 +79,7 @@ export type ThreadMessage = {
   kind: MessageKind
   text: string
   context?: string
+  agreement?: Agreement
   at: string
 }
 
@@ -96,12 +110,33 @@ export type BridgeEvent =
       context?: string
       status: ThreadStatus
       ask?: AskInfo | AskProgress
+      agreement?: Agreement
+      file?: string
       at: string
     }
   | { type: 'peer_closed'; peer: string; at: string }
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
 
-type WireMessage = { id: string; thread: string; subject?: string; kind: MessageKind; text: string; context?: string; ask?: AskInfo; at: string }
+type WireMessage = {
+  id: string
+  thread: string
+  subject?: string
+  kind: MessageKind
+  text: string
+  context?: string
+  ask?: AskInfo
+  agreement?: Agreement
+  at: string
+}
+
+// 합의문 쓰기 도구로 받는 것. checkedBy 는 이쪽(me)이 확인했는지, 상대(them)가 알려 주기만 했는지다.
+export type AgreementInput = {
+  conclusion: string
+  facts?: { fact: string; evidence: string; checkedBy: 'me' | 'them' }[]
+  guesses?: string[]
+  disagreements?: string[]
+  forHumans?: string[]
+}
 
 // hello 는 연결 코드의 토큰을 들고 오거나, 그룹 안의 누군가가 이쪽에 소개해 둔 세션이 토큰 없이 온다.
 type Payload =
@@ -135,7 +170,15 @@ export type BridgeOptions = {
   tokenTtlMs?: number
   connectTimeoutMs?: number
   pollWaitMs?: number
+  // 중계 서버 주소(예: https://relay.example.com). 정하면 브릿지를 열 때 거기에 우편함을 연다.
+  relay?: string
+  relayKey?: string
+  // 중계 서버를 거치면 상대가 우편함에서 꺼내 처리할 때까지 기다려야 해서, 바로 보낼 때보다 오래 기다린다.
+  relayTimeoutMs?: number
 }
+
+// 중계 서버의 우편함 상태. off: 중계 서버를 쓰지 않는다.
+export type RelayState = 'off' | 'connecting' | 'ok' | { error: string }
 
 const now = () => new Date().toISOString()
 // 상대가 이 시간 안에 가져가러 왔으면, 상대는 이쪽 메시지를 스스로 가져가는 중이다.
@@ -160,9 +203,11 @@ const isAskInfo = (a: unknown): a is AskInfo => {
   const v = a as AskInfo
   return !!v && typeof v.id === 'string' && Array.isArray(v.to) && v.to.every(n => typeof n === 'string') && (v.answers === 'all' || v.answers === 'one')
 }
+// 사람에게 보여 줄 상대 위치. 중계 서버를 거치면 그 서버 이름을 붙인다.
+const placeOf = (addr: string, port: number) => (isRelayAddr(addr) ? `${new URL(addr).host} (relay)` : `${hostForUrl(addr)}:${port}`)
 const whereIs = (p: Peer) => {
   const addr = p.lastAddr ?? p.addrs[0]
-  return addr ? `${hostForUrl(addr)}:${p.port}` : undefined
+  return addr ? placeOf(addr, p.port) : undefined
 }
 
 export class Bridge {
@@ -191,7 +236,11 @@ export class Bridge {
   private polling = new Set<string>()
   private pollWaiters = new Map<string, Set<() => void>>()
   private abort = new AbortController()
-  private readonly opts: Required<Omit<BridgeOptions, 'home'>> & { home?: string }
+  private relaySecret?: string
+  private relayBox?: string
+  relayState: RelayState = 'off'
+  private relayWaiters: Array<() => void> = []
+  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey'>> & { home?: string; relay?: string; relayKey?: string }
 
   constructor(options: BridgeOptions) {
     this.name = options.name
@@ -203,7 +252,9 @@ export class Bridge {
       tokenTtlMs: 60 * 60_000,
       connectTimeoutMs: 2000,
       pollWaitMs: 20_000,
+      relayTimeoutMs: 15_000,
       ...options,
+      relay: options.relay?.trim().replace(/\/+$/, '') || undefined,
     }
   }
 
@@ -212,7 +263,8 @@ export class Bridge {
   }
 
   addrs() {
-    return this.opts.addrs()
+    const relay = this.relayBox ? [`${this.opts.relay}/v1/box/${this.relayBox}`] : []
+    return [...this.opts.addrs(), ...relay]
   }
 
   // 포트를 열고 받기 시작한다. 포트를 지정하지 않으면 정해 둔 범위에서 비어 있는 번호를 쓴다.
@@ -229,6 +281,12 @@ export class Bridge {
       if (!this.server) throw new Error(`no free port between ${min} and ${max}`)
     }
     this.abort = new AbortController()
+    if (this.opts.relay) {
+      this.relaySecret = randomToken()
+      this.relayBox = boxOf(this.relaySecret)
+      this.relayState = 'connecting'
+      void this.relayLoop()
+    }
     this.timer = setInterval(() => {
       void this.flush()
       void this.tryInvites()
@@ -300,6 +358,7 @@ export class Bridge {
   }
 
   private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo) {
+    assertNoSecrets({ question, context })
     const thread: Thread = {
       id: randomUUID().slice(0, 8),
       peer: peer.key,
@@ -326,6 +385,7 @@ export class Bridge {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     this.assertOpen(thread)
+    assertNoSecrets({ answer: text })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, at: now() }
@@ -340,6 +400,7 @@ export class Bridge {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     this.assertOpen(thread)
+    assertNoSecrets({ note })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'note', text: note, at: now() }
@@ -347,6 +408,39 @@ export class Bridge {
     thread.status = 'checking_with_your_human'
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
+  }
+
+  // 대화를 마치고 합의문을 쓴다. 상대에게 보내고, 양쪽 PC에 파일로 남긴다.
+  // 상대가 먼저 썼어도 이쪽 판을 따로 쓸 수 있다. 같은 쪽이 다시 쓰면 앞의 것을 고친 판이 된다.
+  // 상대가 이미 떠났으면 이쪽에만 남긴다.
+  async agree(threadId: string, input: AgreementInput) {
+    const thread = this.threads.get(threadId)
+    if (!thread) throw new Error(`no conversation with id ${threadId}`)
+    if (thread.status === 'closed') this.assertOpen(thread)
+    const facts = input.facts ?? []
+    assertNoSecrets({
+      conclusion: input.conclusion,
+      facts: facts.map(f => `${f.fact}\n${f.evidence}`).join('\n'),
+      guesses: input.guesses?.join('\n'),
+      disagreements: input.disagreements?.join('\n'),
+      for_humans: input.forHumans?.join('\n'),
+    })
+    const agreement: Agreement = {
+      by: this.name,
+      conclusion: input.conclusion,
+      facts: facts.map(f => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy === 'me' ? this.name : thread.peerName })),
+      guesses: input.guesses ?? [],
+      disagreements: input.disagreements ?? [],
+      forHumans: input.forHumans ?? [],
+    }
+    if (!isAgreement(agreement)) throw new Error('the agreement is too long or has an empty item')
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'agreement', text: renderAgreement(agreement), agreement, at: now() }
+    thread.messages.push({ id: msg.id, from: 'me', kind: 'agreement', text: msg.text, agreement, at: msg.at })
+    thread.status = 'agreed'
+    const file = this.saveAgreement(thread)
+    const peer = this.peers.get(thread.peer)
+    const delivery = peer ? await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`
+    return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file }
   }
 
   // 새 소식이 올 때까지 기다린다. 이미 쌓여 있으면 바로 돌려준다.
@@ -388,7 +482,7 @@ export class Bridge {
           group: !peer.private,
           reachable: direct || pulling,
           via: direct
-            ? `${peer.lastAddr}:${peer.port}`
+            ? placeOf(peer.lastAddr!, peer.port)
             : pulling
               ? 'the other side cannot be reached directly, so it comes here to pick up messages'
               : undefined,
@@ -415,7 +509,19 @@ export class Bridge {
   }
 
   describe() {
-    return { name: this.name, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined }
+    const relay = this.opts.relay ? { url: this.opts.relay, status: this.relayState } : undefined
+    return { name: this.name, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay }
+  }
+
+  // 중계 서버에 우편함이 열릴 때까지 잠깐 기다린다. 연결 코드를 넘기기 전에 상대가 닿을 수 있게 한다.
+  async relayReady(timeoutMs: number) {
+    const deadline = Date.now() + timeoutMs
+    while (this.relayState === 'connecting' && Date.now() < deadline)
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, Math.max(deadline - Date.now(), 0))
+        this.relayWaiters.push(() => (clearTimeout(timer), resolve()))
+      })
+    return this.relayState
   }
 
   // 연결된 세션에 끝났다고 알리고 포트를 닫는다.
@@ -440,6 +546,9 @@ export class Bridge {
     clearInterval(this.timer)
     this.server?.stop(true)
     this.server = undefined
+    this.relaySecret = undefined
+    this.relayBox = undefined
+    if (this.opts.relay) this.relayState = 'off'
     this.removeState()
     this.peers.clear()
     this.tokens.clear()
@@ -466,21 +575,28 @@ export class Bridge {
   private async handle(req: Request, server: Server<undefined>): Promise<Response> {
     if (req.method !== 'POST' || new URL(req.url).pathname !== `/v1/${this.route}`) return new Response('not found', { status: 404 })
     const sealed = await req.json().catch(() => null)
+    const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, '')
+    const { status, body } = await this.respond(sealed, seenAt)
+    return new Response(body, { status, headers: { 'content-type': status === 200 ? 'application/json' : 'text/plain' } })
+  }
+
+  // 바로 온 요청이든 중계 서버의 우편함에서 꺼낸 요청이든 같게 처리한다. seenAt 은 바로 왔을 때 상대의 IP다.
+  private async respond(sealed: unknown, seenAt: string | undefined, relayed = false): Promise<{ status: number; body: string }> {
     const payload = open(sealed, this.keys) as Payload | null
-    if (!payload) return new Response('forbidden', { status: 403 })
+    if (!payload) return { status: 403, body: 'forbidden' }
     const from = (sealed as { from: string }).from
-    const answer = (p: Payload) => Response.json(seal(p, fromB64(from), this.keys))
+    const answer = (p: Payload) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) })
+    const forbidden = { status: 403, body: 'forbidden' }
 
     const peer = this.peers.get(from)
     if (!peer) {
-      if (payload.type !== 'hello' || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port)) return new Response('forbidden', { status: 403 })
+      if (payload.type !== 'hello' || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port)) return forbidden
       const invite = this.invites.get(from)
       const invited = !!invite && invite.expires > Date.now()
       const token = invited ? undefined : this.takeToken(payload.token)
-      if (!invited && !token) return new Response('forbidden', { status: 403 })
-      const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, '')
-      // 다른 PC에서 왔으면 상대가 적어 보낸 127.0.0.1 은 이 PC를 가리키므로 뺀다.
-      const remote = !!seenAt && !isLoopback(seenAt)
+      if (!invited && !token) return forbidden
+      // 다른 PC에서 왔으면 상대가 적어 보낸 127.0.0.1 은 이 PC를 가리키므로 뺀다. 중계 서버로 온 것도 다른 PC로 본다.
+      const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
       const added: Peer = { key: from, name: payload.name, addrs, port: payload.port, private: token?.private }
@@ -499,7 +615,63 @@ export class Bridge {
       return answer({ type: 'batch', items })
     }
     const reply = this.process(peer, payload)
-    return reply ? answer(reply) : new Response('bad request', { status: 400 })
+    return reply ? answer(reply) : { status: 400, body: 'bad request' }
+  }
+
+  // 중계 서버의 우편함에서 이쪽 앞으로 온 요청을 꺼내 처리하고, 답을 돌려준다.
+  // 이 PC로 들어오는 연결을 받을 수 없어도(공유기 아래, 방화벽) 나가는 연결만으로 받는다.
+  private async relayLoop() {
+    const base = `${this.opts.relay}/v1`
+    const box = this.relayBox!
+    const signal = this.abort.signal
+    const headers = { authorization: `Bearer ${this.relaySecret}`, 'content-type': 'application/json', ...(this.opts.relayKey ? { 'x-relay-key': this.opts.relayKey } : {}) }
+    const setState = (state: RelayState) => {
+      this.relayState = state
+      for (const wake of this.relayWaiters.splice(0)) wake()
+    }
+    let backoff = this.opts.retryMs
+    // 처음에는 기다리지 않고 바로 돌아와 우편함이 열린 것을 확인한다. 그다음부터 새 요청이 올 때까지 붙잡아 둔다.
+    let wait = 0
+    while (!signal.aborted && this.relayBox === box) {
+      try {
+        const res = await fetch(`${base}/inbox/${box}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ wait }),
+          signal: AbortSignal.any([AbortSignal.timeout(35_000), signal]),
+        })
+        if (res.status === 401) {
+          setState({ error: 'the relay refused this session: wrong or missing relay key (COWORKER_RELAY_KEY)' })
+          return
+        }
+        if (!res.ok) throw new Error(`the relay answered ${res.status}`)
+        const { items } = (await res.json()) as { items: { id: string; body: string }[] }
+        setState('ok')
+        wait = 25_000
+        backoff = this.opts.retryMs
+        for (const item of items) void this.answerRelayed(base, box, headers, item)
+      } catch (e) {
+        if (signal.aborted) return
+        setState({ error: `cannot reach the relay ${this.opts.relay}: ${e instanceof Error ? e.message : String(e)}` })
+        wait = 0
+        await Bun.sleep(backoff)
+        backoff = Math.min(backoff * 2, 30_000)
+      }
+    }
+  }
+
+  private async answerRelayed(base: string, box: string, headers: Record<string, string>, item: { id: string; body: string }) {
+    let sealed: unknown = null
+    try {
+      sealed = JSON.parse(item.body)
+    } catch {}
+    const { status, body } = await this.respond(sealed, undefined, true)
+    await fetch(`${base}/reply/${box}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ id: item.id, status, body }),
+      signal: AbortSignal.any([AbortSignal.timeout(10_000), this.abort.signal]),
+    }).catch(() => {})
   }
 
   // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
@@ -584,6 +756,10 @@ export class Bridge {
       const notice = thread.messages.findLast(m => m.kind === 'closed')
       throw new Error(notice?.text ?? 'this question is closed. No answer is needed.')
     }
+    if (thread.status === 'agreed')
+      throw new Error(
+        'this conversation is finished: an agreement was written. If you disagree with it, write your own version with write_agreement; for anything new, send a new question',
+      )
   }
 
   // 한 명만 답하면 되는 질문에 첫 답이 오면, 나머지 사람에게 답하지 않아도 된다고 알린다.
@@ -713,17 +889,32 @@ export class Bridge {
       return
     }
     const context = typeof msg.context === 'string' ? msg.context : undefined
-    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text: msg.text, context, at: now() })
+    // 합의문은 상대가 적어 보낸 글 대신 받은 내용으로 이쪽에서 다시 쓴다. 쓴 사람 이름은 상대 이름으로 둔다.
+    const got = msg.kind === 'agreement' && isAgreement(msg.agreement) ? msg.agreement : undefined
+    const agreement: Agreement | undefined = got && {
+      by: peer.name,
+      conclusion: got.conclusion,
+      facts: got.facts.map(f => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy })),
+      guesses: got.guesses,
+      disagreements: got.disagreements,
+      forHumans: got.forHumans,
+    }
+    if (msg.kind === 'agreement' && !agreement) return
+    const text = agreement ? renderAgreement(agreement) : msg.text
+    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, at: now() })
     // 이미 마감한 질문에 늦게 온 답은 남기기만 하고, 마감 상태는 그대로 둔다.
     if (thread.status === 'closed' || msg.kind === 'closed') thread.status = 'closed'
+    else if (agreement) thread.status = 'agreed'
     else if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
-    else thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'your_turn'
+    // 합의문을 쓴 뒤에 늦게 온 답도 남기기만 한다.
+    else if (thread.status !== 'agreed') thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'your_turn'
+    const file = agreement ? this.saveAgreement(thread) : undefined
     let ask: AskInfo | AskProgress | undefined = thread.ask
     if (thread.ask && thread.startedBy === 'me') {
       if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer.name, thread.id)
       ask = this.askProgress(thread.ask)
     }
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text: msg.text, context, status: thread.status, ask, at: now() })
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, at: now() })
   }
 
   private emit(event: BridgeEvent) {
@@ -781,13 +972,15 @@ export class Bridge {
   }
 
   private async deliverTo(peer: Peer, addr: string, body: string, timeoutMs: number): Promise<Payload | 'refused' | null> {
+    const relayed = isRelayAddr(addr)
+    const url = relayed ? addr : `http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`
     let res: Response
     try {
-      res = await fetch(`http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`, {
+      res = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body,
-        signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), this.abort.signal]),
+        signal: AbortSignal.any([AbortSignal.timeout(relayed ? Math.max(timeoutMs, this.opts.relayTimeoutMs) : timeoutMs), this.abort.signal]),
       })
     } catch {
       return null
@@ -848,6 +1041,35 @@ export class Bridge {
       }
     } finally {
       this.flushing = false
+    }
+  }
+
+  // 합의문 파일. 대화마다 하나이고, 양쪽이 쓴 마지막 판과 대화 기록을 담는다. 세션이 끝나도 남는다.
+  private saveAgreement(thread: Thread): string | undefined {
+    if (!this.opts.home) return undefined
+    const dir = join(this.opts.home, 'agreements')
+    const started = thread.messages[0]?.at ?? now()
+    const path = join(dir, `${started.slice(0, 10)}-${thread.id}.md`)
+    const latest = new Map<string, ThreadMessage>()
+    for (const m of thread.messages) if (m.agreement) latest.set(m.agreement.by, m)
+    const who = (m: ThreadMessage) => (m.from === 'me' ? `${this.name} → ${thread.peerName}` : `${thread.peerName} → ${this.name}`)
+    const label: Record<MessageKind, string> = { question: '질문', answer: '답', note: '알림', closed: '마감', agreement: '합의문' }
+    const versions = [...latest.values()].map(m => `# 합의문 · ${m.agreement!.by} 작성 (${m.at})\n\n${m.text}`)
+    const log = thread.messages
+      .filter(m => m.kind !== 'agreement')
+      .map(m => `### ${label[m.kind]} · ${who(m)} · ${m.at}\n\n${m.text}${m.context ? `\n\n배경:\n\n${m.context}` : ''}`)
+    const text = [
+      `# 합의문: ${thread.subject}`,
+      `- 대화: ${thread.id}\n- 사이: ${this.name} ↔ ${thread.peerName}${thread.peerAddr ? ` (${thread.peerAddr})` : ''}\n- 시작: ${started}`,
+      ...versions,
+      `# 대화 기록\n\n${log.join('\n\n')}`,
+    ].join('\n\n')
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      writeFileSync(path, `${text}\n`, { mode: 0o600 })
+      return path
+    } catch {
+      return undefined
     }
   }
 

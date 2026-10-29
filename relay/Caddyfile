@@ -1,0 +1,4 @@
+# Caddy 가 DOMAIN 의 HTTPS 인증서를 자동으로 받아 붙이고, 중계 서버로 넘긴다.
+{$DOMAIN} {
+	reverse_proxy relay:8787
+}
