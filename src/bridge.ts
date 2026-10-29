@@ -183,6 +183,8 @@ export class Bridge {
   private outbox: Outgoing[] = []
   private events: BridgeEvent[] = []
   private waiters: Array<() => void> = []
+  // 새 일이 생길 때마다 불린다. Claude Code 를 Channels 로 켰으면 여기서 바로 세션에 밀어 넣는다.
+  onEvent?: () => void
   private waiting = 0
   private flushing = false
   private lastCode?: string
@@ -727,6 +729,7 @@ export class Bridge {
   private emit(event: BridgeEvent) {
     this.events.push(event)
     for (const wake of [...this.waiters]) wake()
+    this.onEvent?.()
   }
 
   private takeToken(token: unknown) {

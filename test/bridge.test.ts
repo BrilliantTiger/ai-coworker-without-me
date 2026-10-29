@@ -55,6 +55,18 @@ describe('connection code', () => {
     expect(() => decodeCode('cw1.@@@')).toThrow('damaged')
     expect(() => decodeCode(encodeCode({ ...code, port: 0 }))).toThrow('damaged')
   })
+
+  test('catches a code copied with one character wrong', () => {
+    const code = { v: 1 as const, name: 'x', addrs: ['10.0.0.2'], port: 7700, key: 'nLhjH3gE+OVawkREk4xTkkIXXeVr79+494UYISzKyCk=', token: 't' }
+    const text = encodeCode(code)
+    const dot = text.lastIndexOf('.')
+    const flip = (s: string, i: number) => s.slice(0, i) + (s[i] === 'A' ? 'B' : 'A') + s.slice(i + 1)
+    // 한 글자만 바뀌면 JSON 은 멀쩡할 수 있어서, 예전에는 상대가 거절할 때까지 몰랐다.
+    expect(() => decodeCode(flip(text, dot - 10))).toThrow('copied wrong')
+    expect(() => decodeCode(flip(text, text.length - 1))).toThrow('copied wrong')
+    // 예전 판이 만든, 확인용 글자 없는 코드도 받는다.
+    expect(decodeCode(text.slice(0, dot))).toEqual(code)
+  })
 })
 
 describe('crypto', () => {

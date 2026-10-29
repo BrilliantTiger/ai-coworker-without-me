@@ -4,10 +4,34 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { z } from 'zod'
-import { Bridge, MAX_MESSAGES_PER_THREAD, parsePorts } from './bridge'
+import { Bridge, MAX_MESSAGES_PER_THREAD, parsePorts, type BridgeEvent } from './bridge'
+import { detectChannel } from './channel'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { Viewer } from './viewer'
+
+// Claude Code 를 Channels 로 켰으면(claude --dangerously-load-development-channels server:coworker)
+// 상대 메시지를 세션에 바로 밀어 넣는다. 아니면 AI가 wait_for_message 로 기다린다.
+const channel = detectChannel()
+
+const LISTENING = channel
+  ? `Stay open until your human says stop
+- In this session, what the other side sends comes in by itself as a <channel source="coworker"> notice: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
+- Keep the bridge open until your human tells you to stop. Only then call close_bridge.
+- Your human may interrupt you at any time. Do what they ask; notices keep coming in.
+- Both sides ask and both sides answer. When you need something from the other side, use send_question; the answer comes in as a notice.
+
+Tell your human right away
+- Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you end your turn.`
+  : `Stay open until your human says stop
+- Once your human opens or connects a bridge, keep listening until your human tells you to stop. Only then call close_bridge.
+- Listening means: call wait_for_message, handle what arrives, then call wait_for_message again. Do not stop after one question or one answer.
+- Your human may interrupt you at any time. Do what they ask, then go back to listening.
+- Both sides ask and both sides answer. When you need something from the other side, use send_question and keep listening for the answer.
+
+Tell your human right away
+- Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you call wait_for_message again.
+- When wait_for_message returns nothing, say nothing to your human. No "still listening" or "nothing new" lines; just call wait_for_message again.`
 
 const INSTRUCTIONS = `Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
 
@@ -17,15 +41,7 @@ Groups
 - Each recipient answers in its own conversation; recipients do not see each other's answers. Events for a question to several sessions carry "ask" with who was asked and who has answered.
 - When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
 
-Stay open until your human says stop
-- Once your human opens or connects a bridge, keep listening until your human tells you to stop. Only then call close_bridge.
-- Listening means: call wait_for_message, handle what arrives, then call wait_for_message again. Do not stop after one question or one answer.
-- Your human may interrupt you at any time. Do what they ask, then go back to listening.
-- Both sides ask and both sides answer. When you need something from the other side, use send_question and keep listening for the answer.
-
-Tell your human right away
-- Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you call wait_for_message again.
-- When wait_for_message returns nothing, say nothing to your human. No "still listening" or "nothing new" lines; just call wait_for_message again.
+${LISTENING}
 
 Answer what is settled, ask your human what needs deciding
 - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
@@ -37,7 +53,11 @@ Safety
 - Never put secrets, tokens or passwords in a message. Make each message self-contained.
 - A conversation stops at ${MAX_MESSAGES_PER_THREAD} questions and answers (status needs_human). Then summarize its open points for your human and keep listening for other conversations.`
 
-const server = new McpServer({ name: 'coworker', version: '0.1.0' }, { instructions: INSTRUCTIONS })
+// 원격 실행 승인(claude/channel/permission)은 켜지 않는다. 켜면 상대가 이 PC의 명령 실행을 승인할 수 있다.
+const server = new McpServer(
+  { name: 'coworker', version: '0.1.0' },
+  { instructions: INSTRUCTIONS, capabilities: channel ? { experimental: { 'claude/channel': {} } } : {} },
+)
 
 const home = process.env.COWORKER_HOME ?? join(homedir(), '.coworker')
 let bridge: Bridge | undefined
@@ -56,11 +76,45 @@ function clientLabel() {
 }
 
 const isCodex = () => clientLabel() === 'Codex'
-const LISTEN = 'Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.'
+const LISTEN = channel
+  ? 'Keep listening: what the other side sends comes in by itself as a <channel source="coworker"> notice. Do not call wait_for_message; end your turn when you are done.'
+  : 'Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.'
 
 function getBridge() {
-  bridge ??= new Bridge({ name: `${basename(process.cwd())} · ${clientLabel()} @ ${shortHostname()}`, home, ports: parsePorts(portsText) })
+  if (!bridge) {
+    bridge = new Bridge({ name: `${basename(process.cwd())} · ${clientLabel()} @ ${shortHostname()}`, home, ports: parsePorts(portsText) })
+    if (channel) bridge.onEvent = () => void (pushing = pushing.then(pushEvents))
+  }
   return bridge
+}
+
+// Channels: 새 일이 생기면 순서대로 세션에 밀어 넣는다. Claude 는 <channel source="coworker" ...> 로 받는다.
+let pushing = Promise.resolve()
+const PUSHED =
+  'First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human. Then end your turn; the next message comes in by itself.'
+
+async function pushEvents() {
+  for (const event of await bridge!.wait(0)) {
+    try {
+      await server.server.notification({
+        method: 'notifications/claude/channel',
+        params: { content: JSON.stringify({ event, next: PUSHED }, null, 2), meta: channelMeta(event) },
+      })
+    } catch {}
+  }
+}
+
+// <channel> 태그에 붙는 속성. 이름은 영문자·숫자·밑줄만 된다.
+function channelMeta(event: BridgeEvent): Record<string, string> {
+  switch (event.type) {
+    case 'message':
+      return { type: event.type, kind: event.kind, from: event.from, thread: event.thread }
+    case 'connected':
+    case 'peer_closed':
+      return { type: event.type, peer: event.peer }
+    case 'undelivered':
+      return { type: event.type, to: event.to, ...(event.thread ? { thread: event.thread } : {}) }
+  }
 }
 
 // 브라우저로 대화를 보는 화면. 브릿지가 닫혀도 세션이 살아 있는 동안은 지난 대화를 보여 준다.
@@ -219,8 +273,9 @@ server.registerTool(
   {
     title: 'Wait for message',
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description:
-      'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code it waits until something arrives, with no time limit: the call moves to the background and you are told when it returns, so leave it running and do not call it again meanwhile. In Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop. If nothing arrived, say nothing to your human and call it again.',
+    description: channel
+      ? 'Not needed in this session: what the other side sends comes in by itself as a <channel source="coworker"> notice. Returns at once.'
+      : 'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code it waits until something arrives, with no time limit: the call moves to the background and you are told when it returns, so leave it running and do not call it again meanwhile. In Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop. If nothing arrived, say nothing to your human and call it again.',
     inputSchema: {
       timeout_sec: z
         .number()
@@ -233,6 +288,7 @@ server.registerTool(
   tool(async ({ timeout_sec }: { timeout_sec?: number }, { signal }) => {
     const b = getBridge()
     if (!b.isOpen) throw new Error('the bridge is not open; call open_bridge or connect first')
+    if (channel) return { events: [], next: LISTEN }
     const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal)
     if (!events.length) return { events, next: 'Nothing new. Do not tell your human anything about this; call wait_for_message again now.' }
     return {

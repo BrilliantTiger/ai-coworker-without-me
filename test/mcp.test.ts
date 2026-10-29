@@ -4,19 +4,20 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { existsSync, mkdtempSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { z } from 'zod'
 import { waitSeconds } from '../src/limits'
 
 // 실제 MCP 서버 두 개를 띄워, Claude Code 쪽과 Codex 쪽이 도구만으로 주고받는지 본다.
 const home = mkdtempSync(join(tmpdir(), 'coworker-mcp-'))
 const clients: Client[] = []
 
-async function session(clientName: string, env: Record<string, string> = {}) {
-  const client = new Client({ name: clientName, version: '1.0.0' })
+async function session(clientName: string, env: Record<string, string> = {}, client = new Client({ name: clientName, version: '1.0.0' })) {
   await client.connect(
     new StdioClientTransport({
       command: process.execPath,
       args: [join(import.meta.dir, '..', 'src', 'mcp.ts')],
-      env: { ...process.env, COWORKER_HOME: home, ...env } as Record<string, string>,
+      // 시험을 채널로 켠 Claude Code 안에서 돌려도 채널로 바뀌지 않게 정해 둔다.
+      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', ...env } as Record<string, string>,
       stderr: 'inherit',
     }),
   )
@@ -95,6 +96,54 @@ test('a Claude Code session and a Codex session talk through the tools', async (
 
   await codex('close_bridge')
   expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'peer_closed' })
+})
+
+test('a Claude Code started as a channel gets messages pushed in, without waiting', async () => {
+  const client = new Client({ name: 'claude-code', version: '1.0.0' })
+  const pushed: { content: string; meta: Record<string, string> }[] = []
+  client.setNotificationHandler(
+    z.object({ method: z.literal('notifications/claude/channel'), params: z.object({ content: z.string(), meta: z.record(z.string(), z.string()) }) }),
+    ({ params }) => void pushed.push(params),
+  )
+  const claude = await session('claude-code', { COWORKER_CHANNEL: 'on' }, client)
+  const codex = await session('codex-mcp-client')
+  const next = async (type: string) => {
+    for (let i = 0; i < 50; i++) {
+      const found = pushed.find(p => p.meta.type === type)
+      if (found) return pushed.splice(pushed.indexOf(found), 1)[0]!
+      await Bun.sleep(50)
+    }
+    throw new Error(`nothing pushed: ${type}`)
+  }
+
+  // 채널만 켜고, 상대가 이 PC의 명령 실행을 승인할 수 있는 원격 승인은 켜지 않는다.
+  expect(client.getServerCapabilities()?.experimental).toEqual({ 'claude/channel': {} })
+  expect(client.getInstructions()).toMatch(/Do not call wait_for_message/)
+
+  const opened = await claude('open_bridge', {})
+  expect(opened.next).toMatch(/comes in by itself/)
+  const joined = await codex('connect', { code: opened.code })
+  expect((await next('connected')).meta).toEqual({ type: 'connected', peer: joined.myName })
+
+  const asked = await codex('send_question', { question: 'What is 2+2?' })
+  const q = await next('message')
+  expect(q.meta).toEqual({ type: 'message', kind: 'question', from: joined.myName, thread: asked.thread })
+  expect(JSON.parse(q.content).event).toMatchObject({ text: 'What is 2+2?', status: 'your_turn' })
+
+  // 밀어 넣은 것은 기다리기로 한 번 더 오지 않는다.
+  expect(await claude('wait_for_message', {})).toMatchObject({ events: [] })
+  await claude('reply', { thread: asked.thread, text: '4' })
+  expect((await codex('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ kind: 'answer', text: '4' })
+
+  await codex('close_bridge')
+  expect((await next('peer_closed')).meta).toEqual({ type: 'peer_closed', peer: joined.myName })
+})
+
+test('a session not started as a channel does not claim to be one', async () => {
+  const client = new Client({ name: 'claude-code', version: '1.0.0' })
+  await session('claude-code', {}, client)
+  expect(client.getServerCapabilities()?.experimental).toBeUndefined()
+  expect(client.getInstructions()).toMatch(/call wait_for_message, handle what arrives/)
 })
 
 test('three sessions join one group and one question goes to everyone', async () => {
