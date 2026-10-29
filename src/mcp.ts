@@ -4,12 +4,18 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { z } from 'zod'
-import { Bridge, MAX_MESSAGES_PER_THREAD } from './bridge'
+import { Bridge, MAX_MESSAGES_PER_THREAD, parsePorts } from './bridge'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { Viewer } from './viewer'
 
-const INSTRUCTIONS = `Coworker links this AI session to a coworker's AI session (Claude Code or Codex, on another PC or this one). The two AIs ask and answer each other directly; the humans watch and make the decisions.
+const INSTRUCTIONS = `Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
+
+Groups
+- A connection code from open_bridge is a group code by default: whoever joins with it is also connected, automatically, with every session already in this session's group. You get a "connected" event for each, with "via" naming who introduced them. A private code (open_bridge with private: true) links only the two sessions.
+- send_question can go to one session, to several (a list of names), or to "everyone". With several, set answers: "all" (default) to get everyone's answer, or "one" when the first answer is enough; the others are then told the question is closed.
+- Each recipient answers in its own conversation; recipients do not see each other's answers. Events for a question to several sessions carry "ask" with who was asked and who has answered.
+- When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
 
 Stay open until your human says stop
 - Once your human opens or connects a bridge, keep listening until your human tells you to stop. Only then call close_bridge.
@@ -35,6 +41,12 @@ const server = new McpServer({ name: 'coworker', version: '0.1.0' }, { instructi
 
 const home = process.env.COWORKER_HOME ?? join(homedir(), '.coworker')
 let bridge: Bridge | undefined
+// 회사가 다른 범위만 열어 주면 MCP 등록 설정의 환경변수로 기본 범위를 바꾼다.
+const portsText = process.env.COWORKER_PORTS
+const portRange = () => {
+  const [min, max] = parsePorts(portsText)
+  return min === max ? `${min}` : `${min}-${max}`
+}
 
 function clientLabel() {
   const name = server.server.getClientVersion()?.name ?? ''
@@ -47,7 +59,7 @@ const isCodex = () => clientLabel() === 'Codex'
 const LISTEN = 'Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.'
 
 function getBridge() {
-  bridge ??= new Bridge({ name: `${basename(process.cwd())} · ${clientLabel()} @ ${shortHostname()}`, home })
+  bridge ??= new Bridge({ name: `${basename(process.cwd())} · ${clientLabel()} @ ${shortHostname()}`, home, ports: parsePorts(portsText) })
   return bridge
 }
 
@@ -77,21 +89,30 @@ server.registerTool(
     title: 'Open bridge',
     annotations: { readOnlyHint: false, openWorldHint: true },
     description:
-      'Open this session to a coworker\'s AI session and get a one-time connection code. The human sends the code to the coworker (for example over a messenger), and the coworker\'s AI calls connect with it. Call again to get a fresh code for another session.',
+      'Open this session to coworkers\' AI sessions and get a one-time connection code. The human sends the code to a coworker (for example over a messenger), and the coworker\'s AI calls connect with it. By default whoever joins is also connected with everyone already in this session\'s group. Call again to get a fresh code for each further session.',
     inputSchema: {
-      port: z.number().int().min(1024).max(65535).optional().describe('Port to listen on. Leave empty to use a free port between 7700 and 7799.'),
+      port: z
+        .number()
+        .int()
+        .min(1024)
+        .max(65535)
+        .optional()
+        .describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range).`),
       name: z.string().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> · <tool> @ <computer>".'),
+      private: z.boolean().optional().describe('true: the code links only this session and the one who joins; they are not connected with the rest of the group.'),
     },
   },
-  tool(async ({ port, name }: { port?: number; name?: string }) => {
+  tool(async ({ port, name, private: only }: { port?: number; name?: string; private?: boolean }) => {
     const b = getBridge()
     if (name) b.name = name
     b.open(port)
     return {
-      code: b.newCode(),
+      code: b.newCode({ private: only }),
+      kind: only ? 'private: links only this session and the one who joins' : 'group: whoever joins is also connected with everyone in this group',
       name: b.name,
       port: b.port,
       addresses: b.addrs(),
+      group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
       viewer: viewerUrl(),
       next: `Show the code to your human so they can send it to the coworker. The code works once. ${VIEWER} ${LISTEN}`,
     }
@@ -109,12 +130,14 @@ server.registerTool(
   tool(async ({ code }: { code: string }) => {
     const b = getBridge()
     const peer = await b.connect(code)
+    const joining = b.connecting().map(c => c.name)
     return {
       connected: peer.name,
+      joining,
       myName: b.name,
       myPort: b.port,
       viewer: viewerUrl(),
-      next: `Tell your human you are connected to ${peer.name}. ${VIEWER} ${LISTEN}`,
+      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}. ${VIEWER} ${LISTEN}`,
     }
   }),
 )
@@ -135,16 +158,24 @@ server.registerTool(
   {
     title: 'Send question',
     annotations: { readOnlyHint: false, openWorldHint: true },
-    description: 'Start a new conversation by sending a question to a connected session. The answer arrives later through wait_for_message or inbox.',
+    description:
+      'Send a question to one connected session, to several, or to everyone. Each recipient gets its own conversation. Answers arrive later through wait_for_message or inbox.',
     inputSchema: {
       question: z.string().min(1).max(20000).describe('The question, self-contained.'),
       context: z.string().max(20000).optional().describe('What you already know or tried, so the other AI does not repeat it.'),
-      to: z.string().optional().describe('Name of the connected session. Needed only when several sessions are connected.'),
+      to: z
+        .union([z.string(), z.array(z.string()).min(1)])
+        .optional()
+        .describe('Who to ask: a session name, a list of names, or "everyone". Leave it out when only one session is connected.'),
+      answers: z
+        .enum(['all', 'one'])
+        .optional()
+        .describe('Only when asking several: "all" (default) to get an answer from each, or "one" when the first answer is enough; the others are then told they need not answer.'),
     },
   },
-  tool(async ({ question, context, to }: { question: string; context?: string; to?: string }) => ({
-    ...(await getBridge().ask(to, question, context)),
-    next: `Tell your human what you asked. ${LISTEN}`,
+  tool(async ({ question, context, to, answers }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one' }) => ({
+    ...(await getBridge().askMany(to, question, context, answers)),
+    next: `Tell your human what you asked and whom. ${LISTEN}`,
   })),
 )
 

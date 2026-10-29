@@ -8,6 +8,17 @@ import { hostForUrl, localAddresses } from './net'
 
 // 사내 방화벽에 열어 달라고 요청하기 쉽게 정해 둔 범위.
 export const DEFAULT_PORTS: [number, number] = [7700, 7799]
+
+// 「9000-9010」이나 「9000」. 회사가 다른 범위만 열어 줄 때 기본 범위를 바꾼다.
+export function parsePorts(text: string | undefined): [number, number] {
+  if (!text?.trim()) return DEFAULT_PORTS
+  const m = text.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/)
+  const min = Number(m?.[1])
+  const max = Number(m?.[2] ?? m?.[1])
+  if (!m || min < 1024 || max > 65535 || min > max)
+    throw new Error(`COWORKER_PORTS must look like "9000-9010" or "9000", between 1024 and 65535 (got "${text}")`)
+  return [min, max]
+}
 // 대화 하나에 주고받는 메시지 상한. 왕복 6번.
 export const MAX_MESSAGES_PER_THREAD = 12
 
@@ -17,13 +28,37 @@ export const routeId = (key: string) => Buffer.from(key, 'base64').toString('bas
 const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' || addr === 'localhost'
 
 // directFailed: 이쪽에서 상대로 바로 보내지 못했다. lastPollAt: 상대가 메시지를 가져가려고 마지막으로 접속한 때.
-export type Peer = { key: string; name: string; addrs: string[]; port: number; lastAddr?: string; directFailed?: boolean; lastPollAt?: number }
+// private: 개인용 코드로 이어진 상대. 그룹의 다른 세션에 소개하지 않고, 이 상대가 소개하는 세션도 받지 않는다.
+export type Peer = {
+  key: string
+  name: string
+  addrs: string[]
+  port: number
+  lastAddr?: string
+  directFailed?: boolean
+  lastPollAt?: number
+  private?: boolean
+}
+
+// 그룹의 다른 세션에 소개할 때 넘기는 것.
+type Member = { key: string; name: string; addrs: string[]; port: number }
+
+// 소개받은 세션. 양쪽이 서로를 기다리다가 먼저 닿는 쪽이 인사한다.
+type Invite = Member & { by: string; expires: number; nextTry: number; backoff: number; trying?: boolean }
 
 // checking_with_your_human: 결정이 필요해 이쪽 사람에게 묻는 중. peer_checking_with_their_human: 상대가 자기 사람에게 묻는 중.
-export type ThreadStatus = 'waiting_for_peer' | 'your_turn' | 'checking_with_your_human' | 'peer_checking_with_their_human' | 'needs_human'
+// closed: 여럿에게 한 명만 답하면 되는 질문을 했고, 다른 사람이 먼저 답했다.
+export type ThreadStatus = 'waiting_for_peer' | 'your_turn' | 'checking_with_your_human' | 'peer_checking_with_their_human' | 'needs_human' | 'closed'
 
-// note 는 「사람에게 확인 중」 같은 알림이다. 왕복 횟수에 세지 않는다.
-export type MessageKind = 'question' | 'answer' | 'note'
+// note 는 「사람에게 확인 중」 같은 알림, closed 는 「다른 사람이 먼저 답했다」는 알림이다. 둘 다 왕복 횟수에 세지 않는다.
+export type MessageKind = 'question' | 'answer' | 'note' | 'closed'
+const KINDS: MessageKind[] = ['question', 'answer', 'note', 'closed']
+
+// 한 질문을 여러 세션에 보냈을 때. 받는 사람마다 대화가 따로 생기고, 같은 ask id 로 묶인다.
+// answers: all 이면 모두 답하고, one 이면 먼저 온 답 하나로 끝낸다.
+export type AnswerMode = 'all' | 'one'
+export type AskInfo = { id: string; to: string[]; answers: AnswerMode }
+export const EVERYONE = ['everyone', 'all']
 
 export type ThreadMessage = {
   id: string
@@ -43,20 +78,36 @@ export type Thread = {
   subject: string
   startedBy: 'me' | 'peer'
   status: ThreadStatus
+  ask?: AskInfo
   messages: ThreadMessage[]
 }
 
+// 여럿에게 보낸 질문에 답이 오면, 몇 명이 답했고 몇 명이 남았는지 함께 알린다.
+export type AskProgress = { id: string; answers: AnswerMode; asked: string[]; answered: string[]; closedBy?: string }
+
 export type BridgeEvent =
-  | { type: 'connected'; peer: string; at: string }
-  | { type: 'message'; thread: string; from: string; kind: MessageKind; text: string; context?: string; status: ThreadStatus; at: string }
+  | { type: 'connected'; peer: string; via?: string; at: string }
+  | {
+      type: 'message'
+      thread: string
+      from: string
+      kind: MessageKind
+      text: string
+      context?: string
+      status: ThreadStatus
+      ask?: AskInfo | AskProgress
+      at: string
+    }
   | { type: 'peer_closed'; peer: string; at: string }
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
 
-type WireMessage = { id: string; thread: string; subject?: string; kind: MessageKind; text: string; context?: string; at: string }
+type WireMessage = { id: string; thread: string; subject?: string; kind: MessageKind; text: string; context?: string; ask?: AskInfo; at: string }
 
+// hello 는 연결 코드의 토큰을 들고 오거나, 그룹 안의 누군가가 이쪽에 소개해 둔 세션이 토큰 없이 온다.
 type Payload =
-  | { type: 'hello'; token: string; name: string; addrs: string[]; port: number }
-  | { type: 'hello_ack'; name: string }
+  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number }
+  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean }
+  | { type: 'introduce'; member: Member }
   | { type: 'msg'; msg: WireMessage }
   | { type: 'ok' }
   | { type: 'ping' }
@@ -89,8 +140,26 @@ export type BridgeOptions = {
 const now = () => new Date().toISOString()
 // 상대가 이 시간 안에 가져가러 왔으면, 상대는 이쪽 메시지를 스스로 가져가는 중이다.
 const POLL_FRESH_MS = 60_000
+// 소개받은 세션과 이 시간 안에 이어지지 않으면 포기한다.
+const INVITE_TTL_MS = 10 * 60_000
 const firstLine = (text: string) => text.trim().split('\n')[0]!.slice(0, 80)
-const counted = (t: Thread) => t.messages.filter(m => m.kind !== 'note').length
+const counted = (t: Thread) => t.messages.filter(m => m.kind === 'question' || m.kind === 'answer').length
+const memberOf = (p: Peer): Member => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port })
+const isMember = (m: unknown): m is Member => {
+  const v = m as Member
+  return (
+    !!v &&
+    typeof v.key === 'string' &&
+    typeof v.name === 'string' &&
+    Array.isArray(v.addrs) &&
+    v.addrs.every(a => typeof a === 'string') &&
+    Number.isInteger(v.port)
+  )
+}
+const isAskInfo = (a: unknown): a is AskInfo => {
+  const v = a as AskInfo
+  return !!v && typeof v.id === 'string' && Array.isArray(v.to) && v.to.every(n => typeof n === 'string') && (v.answers === 'all' || v.answers === 'one')
+}
 const whereIs = (p: Peer) => {
   const addr = p.lastAddr ?? p.addrs[0]
   return addr ? `${hostForUrl(addr)}:${p.port}` : undefined
@@ -107,7 +176,9 @@ export class Bridge {
 
   private server?: Server<undefined>
   private timer?: ReturnType<typeof setInterval>
-  private tokens = new Map<string, number>()
+  private tokens = new Map<string, { expires: number; private: boolean }>()
+  private invites = new Map<string, Invite>()
+  private closedAsks = new Map<string, string>()
   private seen = new Set<string>()
   private outbox: Outgoing[] = []
   private events: BridgeEvent[] = []
@@ -156,16 +227,20 @@ export class Bridge {
       if (!this.server) throw new Error(`no free port between ${min} and ${max}`)
     }
     this.abort = new AbortController()
-    this.timer = setInterval(() => void this.flush(), this.opts.retryMs)
+    this.timer = setInterval(() => {
+      void this.flush()
+      void this.tryInvites()
+    }, this.opts.retryMs)
     this.timer.unref?.()
     this.writeState()
   }
 
   // 새 연결 코드. 코드마다 토큰이 달라서 한 코드로는 한 세션만 연결할 수 있다.
-  newCode(): string {
+  // 그룹 코드로 들어온 세션은 이쪽 그룹의 다른 세션과도 이어 준다. 개인용 코드는 이쪽하고만 잇는다.
+  newCode(options: { private?: boolean } = {}): string {
     if (!this.server) this.open()
     const token = randomToken()
-    this.tokens.set(token, Date.now() + this.opts.tokenTtlMs)
+    this.tokens.set(token, { expires: Date.now() + this.opts.tokenTtlMs, private: !!options.private })
     this.lastCode = encodeCode({ v: 1, name: this.name, addrs: this.addrs(), port: this.port, key: this.key, token })
     this.writeState()
     return this.lastCode
@@ -186,13 +261,43 @@ export class Bridge {
     }
     if (reply.type !== 'hello_ack') throw new Error('unexpected answer from the other session')
     peer.name = reply.name
-    this.peers.set(peer.key, peer)
-    void this.pollLoop(peer.key)
+    peer.private = !!reply.private
+    this.addPeer(peer)
+    if (!peer.private) for (const m of Array.isArray(reply.members) ? reply.members : []) this.invite(m, peer.name)
     return peer
   }
 
+  // 소개받아 아직 잇는 중인 세션.
+  connecting() {
+    return [...this.invites.values()].map(i => ({ name: i.name, introducedBy: i.by }))
+  }
+
+  // 한 세션에 묻는다. 대화 하나가 생긴다.
   async ask(to: string | undefined, question: string, context?: string) {
     const peer = this.resolvePeer(to)
+    return this.sendQuestion(peer, question, context)
+  }
+
+  // to 가 여러 명이나 everyone 이면 받는 사람마다 대화를 하나씩 만들고 같은 ask 로 묶는다. 한 명이면 ask 와 같다.
+  async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all') {
+    const peers = this.resolvePeers(to)
+    if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context)
+    const ask: AskInfo = { id: randomUUID().slice(0, 8), to: peers.map(p => p.name), answers }
+    const sent = await Promise.all(
+      peers.map(peer =>
+        // 한 곳이 거절해도 나머지는 보낸다.
+        this.sendQuestion(peer, question, context, ask).catch(e => ({
+          thread: undefined,
+          to: peer.name,
+          delivery: 'refused' as const,
+          error: e instanceof Error ? e.message : String(e),
+        })),
+      ),
+    )
+    return { ask: ask.id, answers, to: ask.to, sent }
+  }
+
+  private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo) {
     const thread: Thread = {
       id: randomUUID().slice(0, 8),
       peer: peer.key,
@@ -201,20 +306,24 @@ export class Bridge {
       subject: firstLine(question),
       startedBy: 'me',
       status: 'waiting_for_peer',
+      ask,
       messages: [],
     }
     this.threads.set(thread.id, thread)
-    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, at: now() }
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, at: msg.at })
-    const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
-    return { thread: thread.id, to: peer.name, delivery }
+    try {
+      return { thread: thread.id, to: peer.name, delivery: await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) }
+    } catch (e) {
+      this.threads.delete(thread.id)
+      throw e
+    }
   }
 
   async reply(threadId: string, text: string) {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
-    if (thread.status === 'needs_human')
-      throw new Error(`this conversation reached ${MAX_MESSAGES_PER_THREAD} messages; stop and let the humans decide`)
+    this.assertOpen(thread)
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, at: now() }
@@ -228,6 +337,7 @@ export class Bridge {
   async hold(threadId: string, note: string) {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
+    this.assertOpen(thread)
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'note', text: note, at: now() }
@@ -273,6 +383,7 @@ export class Bridge {
         const pulling = this.isPulling(peer)
         return {
           name: peer.name,
+          group: !peer.private,
           reachable: direct || pulling,
           via: direct
             ? `${peer.lastAddr}:${peer.port}`
@@ -283,7 +394,7 @@ export class Bridge {
         }
       }),
     )
-    return { me: this.describe(), peers }
+    return { me: this.describe(), peers, connecting: this.connecting() }
   }
 
   threadSummaries() {
@@ -294,6 +405,7 @@ export class Bridge {
         with: t.peerName,
         subject: t.subject,
         status: t.status,
+        ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
         messages: counted(t),
         last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
       }
@@ -329,6 +441,7 @@ export class Bridge {
     this.removeState()
     this.peers.clear()
     this.tokens.clear()
+    this.invites.clear()
     this.outbox = []
   }
 
@@ -358,16 +471,22 @@ export class Bridge {
 
     const peer = this.peers.get(from)
     if (!peer) {
-      if (payload.type !== 'hello' || !this.takeToken(payload.token)) return new Response('forbidden', { status: 403 })
+      if (payload.type !== 'hello' || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port)) return new Response('forbidden', { status: 403 })
+      const invite = this.invites.get(from)
+      const invited = !!invite && invite.expires > Date.now()
+      const token = invited ? undefined : this.takeToken(payload.token)
+      if (!invited && !token) return new Response('forbidden', { status: 403 })
       const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, '')
       // 다른 PC에서 왔으면 상대가 적어 보낸 127.0.0.1 은 이 PC를 가리키므로 뺀다.
       const remote = !!seenAt && !isLoopback(seenAt)
       const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
-      this.peers.set(from, { key: from, name: payload.name, addrs, port: payload.port })
-      this.emit({ type: 'connected', peer: payload.name, at: now() })
-      void this.pollLoop(from)
-      return answer({ type: 'hello_ack', name: this.name })
+      const added: Peer = { key: from, name: payload.name, addrs, port: payload.port, private: token?.private }
+      // 그룹 코드로 들어왔으면, 이쪽 그룹의 다른 세션과 서로 소개한다. 소개받아 온 세션은 더 퍼뜨리지 않는다.
+      const members = token && !token.private ? this.groupPeers().filter(p => p.key !== from) : []
+      for (const m of members) void this.sendOrQueue(m, { type: 'introduce', member: memberOf(added) }).catch(() => {})
+      this.addPeer(added, { emit: true, via: invited ? invite!.by : undefined })
+      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined })
     }
 
     if (payload.type === 'poll') {
@@ -396,9 +515,93 @@ export class Bridge {
         peer.addrs = payload.addrs
         peer.port = payload.port
         return { type: 'hello_ack', name: this.name }
+      case 'introduce':
+        // 개인용 코드로 이어진 상대가 소개하는 세션은 받지 않는다.
+        if (!peer.private) this.invite(payload.member, peer.name)
+        return { type: 'ok' }
       default:
         return null
     }
+  }
+
+  private groupPeers() {
+    return [...this.peers.values()].filter(p => !p.private)
+  }
+
+  // 새로 이어진 상대를 등록한다. 양쪽이 동시에 인사해 이미 등록돼 있으면 아무것도 하지 않는다.
+  private addPeer(peer: Peer, options: { emit?: boolean; via?: string } = {}) {
+    if (this.peers.has(peer.key)) return false
+    this.peers.set(peer.key, peer)
+    this.invites.delete(peer.key)
+    if (options.emit) this.emit({ type: 'connected', peer: peer.name, via: options.via, at: now() })
+    void this.pollLoop(peer.key)
+    return true
+  }
+
+  // 그룹의 누군가가 소개한 세션을 기다리고, 이쪽에서도 먼저 인사해 본다.
+  private invite(member: unknown, by: string) {
+    if (!isMember(member) || member.key === this.key || this.peers.has(member.key)) return
+    const { key, name, addrs, port } = member
+    this.invites.set(key, { key, name, addrs, port, by, expires: Date.now() + INVITE_TTL_MS, nextTry: 0, backoff: this.opts.retryMs })
+    void this.tryInvites()
+  }
+
+  private async tryInvites() {
+    await Promise.all(
+      [...this.invites.values()].map(async invite => {
+        if (this.peers.has(invite.key)) return void this.invites.delete(invite.key)
+        if (invite.expires <= Date.now()) {
+          this.invites.delete(invite.key)
+          this.emit({ type: 'undelivered', to: invite.name, reason: `could not connect to ${invite.name}, introduced by ${invite.by}`, at: now() })
+          return
+        }
+        if (invite.trying || invite.nextTry > Date.now() || !this.server) return
+        invite.trying = true
+        const peer: Peer = { key: invite.key, name: invite.name, addrs: invite.addrs, port: invite.port }
+        try {
+          // 상대가 아직 소개를 못 받았으면 거절한다. 그때는 조금 뒤에 다시 인사한다.
+          const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port })
+          if (reply.type === 'hello_ack' && this.invites.has(invite.key)) {
+            peer.name = reply.name
+            this.addPeer(peer, { emit: true, via: invite.by })
+          }
+        } catch {
+          invite.nextTry = Date.now() + invite.backoff
+          invite.backoff = Math.min(invite.backoff * 2, 30_000)
+        } finally {
+          invite.trying = false
+        }
+      }),
+    )
+  }
+
+  private assertOpen(thread: Thread) {
+    if (thread.status === 'needs_human')
+      throw new Error(`this conversation reached ${MAX_MESSAGES_PER_THREAD} messages; stop and let the humans decide`)
+    if (thread.status === 'closed') {
+      const notice = thread.messages.findLast(m => m.kind === 'closed')
+      throw new Error(notice?.text ?? 'this question is closed. No answer is needed.')
+    }
+  }
+
+  // 한 명만 답하면 되는 질문에 첫 답이 오면, 나머지 사람에게 답하지 않아도 된다고 알린다.
+  private closeSiblings(ask: AskInfo, answeredBy: string, except: string) {
+    this.closedAsks.set(ask.id, answeredBy)
+    for (const t of this.threads.values()) {
+      if (t.ask?.id !== ask.id || t.id === except || t.status === 'closed') continue
+      const text = `${answeredBy} answered first, so this question is closed. No answer is needed.`
+      const msg: WireMessage = { id: randomUUID(), thread: t.id, kind: 'closed', text, at: now() }
+      t.messages.push({ id: msg.id, from: 'me', kind: 'closed', text, at: msg.at })
+      t.status = 'closed'
+      const peer = this.peers.get(t.peer)
+      if (peer) void this.sendOrQueue(peer, { type: 'msg', msg }, t.id).catch(() => {})
+    }
+  }
+
+  private askProgress(ask: AskInfo): AskProgress {
+    const threads = [...this.threads.values()].filter(t => t.ask?.id === ask.id)
+    const answered = threads.filter(t => t.messages.some(m => m.from === 'peer' && m.kind === 'answer')).map(t => t.peerName)
+    return { id: ask.id, answers: ask.answers, asked: threads.map(t => t.peerName), answered, closedBy: this.closedAsks.get(ask.id) }
   }
 
   private dropPeer(peer: Peer) {
@@ -487,7 +690,7 @@ export class Bridge {
 
   private receive(peer: Peer, msg: WireMessage) {
     if (!msg || typeof msg.id !== 'string' || typeof msg.thread !== 'string' || typeof msg.text !== 'string') return
-    if (msg.kind !== 'question' && msg.kind !== 'answer' && msg.kind !== 'note') return
+    if (!KINDS.includes(msg.kind)) return
     if (this.seen.has(msg.id)) return
     this.seen.add(msg.id)
     let thread = this.threads.get(msg.thread)
@@ -500,6 +703,7 @@ export class Bridge {
         subject: msg.subject ?? firstLine(msg.text),
         startedBy: 'peer',
         status: 'your_turn',
+        ask: isAskInfo(msg.ask) ? { id: msg.ask.id, to: msg.ask.to, answers: msg.ask.answers } : undefined,
         messages: [],
       }
       this.threads.set(thread.id, thread)
@@ -508,9 +712,16 @@ export class Bridge {
     }
     const context = typeof msg.context === 'string' ? msg.context : undefined
     thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text: msg.text, context, at: now() })
-    if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
+    // 이미 마감한 질문에 늦게 온 답은 남기기만 하고, 마감 상태는 그대로 둔다.
+    if (thread.status === 'closed' || msg.kind === 'closed') thread.status = 'closed'
+    else if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
     else thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'your_turn'
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text: msg.text, context, status: thread.status, at: now() })
+    let ask: AskInfo | AskProgress | undefined = thread.ask
+    if (thread.ask && thread.startedBy === 'me') {
+      if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer.name, thread.id)
+      ask = this.askProgress(thread.ask)
+    }
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text: msg.text, context, status: thread.status, ask, at: now() })
   }
 
   private emit(event: BridgeEvent) {
@@ -519,10 +730,20 @@ export class Bridge {
   }
 
   private takeToken(token: unknown) {
-    if (typeof token !== 'string') return false
-    const expires = this.tokens.get(token)
+    if (typeof token !== 'string') return undefined
+    const entry = this.tokens.get(token)
     this.tokens.delete(token)
-    return expires !== undefined && expires > Date.now()
+    return entry && entry.expires > Date.now() ? entry : undefined
+  }
+
+  private resolvePeers(to?: string | string[]): Peer[] {
+    const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map(n => n.trim()).filter(Boolean)
+    if (names.some(n => EVERYONE.includes(n.toLowerCase()))) {
+      if (this.peers.size === 0) throw new Error('no connected session yet; open the bridge and exchange a connection code first')
+      return [...this.peers.values()]
+    }
+    if (names.length === 0) return [this.resolvePeer(undefined)]
+    return [...new Set(names.map(n => this.resolvePeer(n)))]
   }
 
   private resolvePeer(to?: string): Peer {
@@ -530,7 +751,7 @@ export class Bridge {
     if (peers.length === 0) throw new Error('no connected session yet; open the bridge and exchange a connection code first')
     if (!to) {
       if (peers.length === 1) return peers[0]!
-      throw new Error(`several sessions are connected; say which one: ${peers.map(p => p.name).join(', ')}`)
+      throw new Error(`several sessions are connected; say which one, several, or "everyone": ${peers.map(p => p.name).join(', ')}`)
     }
     const needle = to.trim().toLowerCase()
     const exact = peers.filter(p => p.name.toLowerCase() === needle)

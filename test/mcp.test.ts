@@ -10,13 +10,13 @@ import { waitSeconds } from '../src/limits'
 const home = mkdtempSync(join(tmpdir(), 'coworker-mcp-'))
 const clients: Client[] = []
 
-async function session(clientName: string) {
+async function session(clientName: string, env: Record<string, string> = {}) {
   const client = new Client({ name: clientName, version: '1.0.0' })
   await client.connect(
     new StdioClientTransport({
       command: process.execPath,
       args: [join(import.meta.dir, '..', 'src', 'mcp.ts')],
-      env: { ...process.env, COWORKER_HOME: home } as Record<string, string>,
+      env: { ...process.env, COWORKER_HOME: home, ...env } as Record<string, string>,
       stderr: 'inherit',
     }),
   )
@@ -96,6 +96,37 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   await codex('close_bridge')
   expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'peer_closed' })
 })
+
+test('three sessions join one group and one question goes to everyone', async () => {
+  const lead = await session('claude-code', { COWORKER_PORTS: '17960-17969' })
+  const first = await session('codex-mcp-client')
+  const second = await session('claude-code')
+
+  const opened = await lead('open_bridge', {})
+  expect(opened.port).toBeGreaterThanOrEqual(17960)
+  expect(opened.port).toBeLessThanOrEqual(17969)
+  const one = await first('connect', { code: opened.code })
+  const two = await second('connect', { code: (await lead('open_bridge', {})).code })
+  expect(two.joining).toEqual([one.myName])
+  for (let i = 0; i < 40 && (await first('list_connections')).peers.length < 2; i++) await Bun.sleep(50)
+  expect((await first('list_connections')).peers.map((p: { name: string }) => p.name).sort()).toEqual([opened.name, two.myName].sort())
+
+  const asked = await lead('send_question', { question: 'Ready to merge?', to: 'everyone', answers: 'one' })
+  expect(asked).toMatchObject({ answers: 'one', to: expect.arrayContaining([one.myName, two.myName]) })
+  const take = async (s: typeof lead, kind: string) => {
+    for (let i = 0; i < 20; i++) {
+      const found = (await s('wait_for_message', { timeout_sec: 1 })).events.find((e: { kind?: string }) => e.kind === kind)
+      if (found) return found
+    }
+    throw new Error(`no ${kind}`)
+  }
+  const q = await take(first, 'question')
+  await take(second, 'question')
+  await first('reply', { thread: q.thread, text: 'Yes.' })
+  expect(await take(lead, 'answer')).toMatchObject({ text: 'Yes.', ask: { closedBy: one.myName } })
+  expect(await take(second, 'closed')).toMatchObject({ status: 'closed' })
+  await expect(lead('open_bridge', { port: 80 })).rejects.toThrow()
+}, 20_000)
 
 test('ending the session closes its bridge and removes its state file', async () => {
   const s = await session('claude-code')

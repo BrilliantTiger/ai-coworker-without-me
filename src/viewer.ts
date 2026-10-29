@@ -85,14 +85,16 @@ details .text { color: var(--text); }
 <div id="list"></div>
 </main>
 <script>
-const KIND = { question: '질문', answer: '답', note: '알림' }
+const KIND = { question: '질문', answer: '답', note: '알림', closed: '마감' }
 const STATUS = {
   waiting_for_peer: '상대 차례',
   your_turn: '이쪽 차례',
   checking_with_your_human: '이쪽 사람에게 확인 중',
   peer_checking_with_their_human: '상대가 자기 사람에게 확인 중',
   needs_human: '상한에 닿음 · 사람이 정할 차례',
+  closed: '마감 · 다른 사람이 먼저 답함',
 }
+const ANSWERS = { all: '모두 답', one: '한 명만 답' }
 const time = at => new Date(at).toLocaleString('ko-KR', { hour12: false })
 function el(tag, cls, text) {
   const e = document.createElement(tag)
@@ -114,9 +116,10 @@ function render(data) {
     head.append(el('span', 'badge' + (mine ? ' out' : ''), mine ? '보낸 질문' : '받은 질문'), el('span', 'subject', c.subject), el('span', 'status', STATUS[c.status] ?? c.status))
     const where = c.peerName + (c.peerAddr ? ' (' + c.peerAddr + ')' : '')
     const first = c.messages[0]
-    card.append(head, el('div', 'meta', (mine ? '받는 쪽: ' : '보낸 쪽: ') + where + (first ? ' · 시작 ' + time(first.at) : '')))
+    const group = c.ask ? ' · 함께 받은 사람: ' + c.ask.to.join(', ') + ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
+    card.append(head, el('div', 'meta', (mine ? '받는 쪽: ' : '보낸 쪽: ') + where + (first ? ' · 시작 ' + time(first.at) : '') + group))
     for (const m of c.messages) {
-      const box = el('div', 'msg' + (m.from === 'me' ? ' mine' : '') + (m.kind === 'note' ? ' note' : ''))
+      const box = el('div', 'msg' + (m.from === 'me' ? ' mine' : '') + (m.kind === 'note' || m.kind === 'closed' ? ' note' : ''))
       const who = m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'
       box.append(el('div', 'who', (KIND[m.kind] ?? m.kind) + ' · ' + who), el('div', 'time', time(m.at)), el('div', 'text', m.text))
       if (m.context) {

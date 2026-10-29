@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Bridge, MAX_MESSAGES_PER_THREAD, routeId, type BridgeEvent } from '../src/bridge'
+import { Bridge, MAX_MESSAGES_PER_THREAD, parsePorts, routeId, type BridgeEvent } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, seal, fromB64 } from '../src/crypto'
 import { Viewer } from '../src/viewer'
@@ -121,15 +121,18 @@ describe('bridge', () => {
     await expect(c.connect(code)).rejects.toThrow('refused this code')
   })
 
-  test('a fresh code lets a second session connect to the same bridge', async () => {
+  test('a fresh private code lets a second session connect to the same bridge only', async () => {
     const { a, b } = await pair()
     const c = make('C · Claude Code')
-    await c.connect(a.newCode())
+    await c.connect(a.newCode({ private: true }))
     expect([...a.peers.values()].map(p => p.name).sort()).toEqual(['B · Codex', 'C · Claude Code'])
     await expect(a.ask(undefined, 'hi')).rejects.toThrow('several sessions are connected')
     expect((await a.ask('codex', 'hi')).to).toBe('B · Codex')
     await expect(a.ask('nobody', 'hi')).rejects.toThrow('no connected session matches')
+    await Bun.sleep(300)
     expect(b.peers.size).toBe(1)
+    expect(c.peers.size).toBe(1)
+    expect((await a.connections()).peers.find(p => p.name === 'C · Claude Code')).toMatchObject({ group: false })
   })
 
   test('strangers are refused even with a well-formed message', async () => {
@@ -280,6 +283,128 @@ describe('bridge', () => {
     if (process.platform !== 'win32') expect(Bun.file(path).size).toBeGreaterThan(0)
     await a.close()
     expect(existsSync(path)).toBe(false)
+  })
+})
+
+async function connectedTo(b: Bridge, names: string[]) {
+  for (let i = 0; i < 60; i++) {
+    if (names.every(n => [...b.peers.values()].some(p => p.name === n))) return
+    await Bun.sleep(50)
+  }
+  throw new Error(`${b.name} is connected to ${[...b.peers.values()].map(p => p.name).join(', ')}, not ${names.join(', ')}`)
+}
+
+async function messages(b: Bridge, count: number) {
+  const got: Extract<BridgeEvent, { type: 'message' }>[] = []
+  for (let i = 0; i < 40 && got.length < count; i++) for (const e of await b.wait(100)) if (e.type === 'message') got.push(e)
+  return got
+}
+
+async function team() {
+  const a = make('A · Claude Code')
+  const b = make('B · Codex')
+  const c = make('C · Claude Code')
+  await b.connect(a.newCode())
+  await c.connect(a.newCode())
+  await connectedTo(b, ['A · Claude Code', 'C · Claude Code'])
+  await connectedTo(c, ['A · Claude Code', 'B · Codex'])
+  return { a, b, c }
+}
+
+describe('group', () => {
+  test('everyone who joins with a group code is connected with everyone already in the group', async () => {
+    const { a, b, c } = await team()
+    const d = make('D · Codex')
+    await d.connect(c.newCode())
+    for (const s of [a, b, c, d]) await connectedTo(s, [a, b, c, d].filter(x => x !== s).map(x => x.name))
+    const joined = [] as BridgeEvent[]
+    for (let i = 0; i < 10; i++) joined.push(...(await b.wait(50)))
+    expect(joined).toContainEqual(expect.objectContaining({ type: 'connected', peer: 'D · Codex', via: 'C · Claude Code' }))
+  })
+
+  test('a session introduced to the group can be asked directly, and a stranger still cannot get in', async () => {
+    const { b, c } = await team()
+    const { thread } = await b.ask('C · Claude Code', 'direct between the two who joined')
+    expect((await messages(c, 1))[0]).toMatchObject({ from: 'B · Codex', text: 'direct between the two who joined' })
+    await c.reply(thread, 'got it')
+    expect((await messages(b, 1))[0]).toMatchObject({ kind: 'answer', text: 'got it' })
+
+    const stranger = newKeyPair()
+    const url = `http://127.0.0.1:${c.port}/v1/${routeId(c.key)}`
+    const hello = seal({ type: 'hello', name: 'evil', addrs: [], port: 1 }, fromB64(c.key), stranger)
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify(hello) })).status).toBe(403)
+  })
+
+  test('a private member does not introduce others into the group', async () => {
+    const a = make('A')
+    const b = make('B')
+    const x = make('X')
+    await b.connect(a.newCode())
+    await x.connect(a.newCode({ private: true }))
+    // X는 A와만 이어졌다. X가 A에게 누군가를 소개해도 A는 받지 않는다.
+    const outsider = make('Outsider')
+    outsider.open()
+    await (x as any).sendOrQueue(x.peers.get(a.key), { type: 'introduce', member: { key: outsider.key, name: 'Outsider', addrs: ['127.0.0.1'], port: outsider.port } })
+    await Bun.sleep(300)
+    expect(a.connecting()).toEqual([])
+    expect([...a.peers.values()].map(p => p.name).sort()).toEqual(['B', 'X'])
+  })
+})
+
+describe('asking several sessions', () => {
+  test('asking everyone gets an answer from each, each in its own conversation', async () => {
+    const { a, b, c } = await team()
+    const sent = (await a.askMany('everyone', 'Which branch are you on?')) as { ask: string; sent: { thread: string; to: string; delivery: string }[] }
+    expect(sent).toMatchObject({ answers: 'all', to: ['B · Codex', 'C · Claude Code'] })
+    expect(sent.sent.map(s => s.delivery)).toEqual(['delivered', 'delivered'])
+
+    const qb = (await messages(b, 1))[0]!
+    const qc = (await messages(c, 1))[0]!
+    expect(qb).toMatchObject({ kind: 'question', ask: { to: ['B · Codex', 'C · Claude Code'], answers: 'all' } })
+    await b.reply(qb.thread, 'main')
+    await c.reply(qc.thread, 'feat/x')
+    const answers = await messages(a, 2)
+    expect(answers.map(e => e.text).sort()).toEqual(['feat/x', 'main'])
+    expect(answers.at(-1)!.ask).toMatchObject({ id: sent.ask, answered: expect.arrayContaining(['B · Codex', 'C · Claude Code']) })
+    // B와 C는 서로의 답을 보지 않는다.
+    expect(await b.wait(100)).toEqual([])
+  })
+
+  test('when one answer is enough, the first answer closes the question for the others', async () => {
+    const { a, b, c } = await team()
+    const d = make('D · Codex')
+    await d.connect(a.newCode())
+    await connectedTo(a, ['B · Codex', 'C · Claude Code', 'D · Codex'])
+    const sent = (await a.askMany(['B · Codex', 'C · Claude Code'], 'Who can review PR 12?', undefined, 'one')) as { ask: string }
+    const qb = (await messages(b, 1))[0]!
+    const qc = (await messages(c, 1))[0]!
+    expect(qc.ask).toMatchObject({ answers: 'one' })
+    // 묻지 않은 D에게는 질문이 가지 않는다.
+    expect((await d.wait(100)).filter(e => e.type === 'message')).toEqual([])
+
+    await b.reply(qb.thread, 'I will.')
+    const got = (await messages(a, 1))[0]!
+    expect(got).toMatchObject({ from: 'B · Codex', kind: 'answer', ask: { id: sent.ask, answers: 'one', closedBy: 'B · Codex' } })
+    expect((await messages(c, 1))[0]).toMatchObject({ kind: 'closed', status: 'closed' })
+    await expect(c.reply(qc.thread, 'me too')).rejects.toThrow('B · Codex answered first')
+    await expect(c.hold(qc.thread, 'asking')).rejects.toThrow('closed')
+    expect(a.threadSummaries().filter(t => t.ask?.id === sent.ask).map(t => t.status).sort()).toEqual(['closed', 'your_turn'])
+  })
+
+  test('a list with one name is an ordinary question', async () => {
+    const { a } = await pair()
+    expect(await a.askMany(['codex'], 'hi')).toMatchObject({ to: 'B · Codex', delivery: 'delivered' })
+  })
+})
+
+describe('ports', () => {
+  test('the default range can be changed', () => {
+    expect(parsePorts(undefined)).toEqual([7700, 7799])
+    expect(parsePorts(' 9000-9010 ')).toEqual([9000, 9010])
+    expect(parsePorts('9005')).toEqual([9005, 9005])
+    expect(() => parsePorts('80-90')).toThrow('COWORKER_PORTS')
+    expect(() => parsePorts('9010-9000')).toThrow('COWORKER_PORTS')
+    expect(() => parsePorts('abc')).toThrow('COWORKER_PORTS')
   })
 })
 
