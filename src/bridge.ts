@@ -230,6 +230,8 @@ export class Bridge {
   private waiters: Array<() => void> = []
   // 새 일이 생길 때마다 불린다. Claude Code 를 Channels 로 켰으면 여기서 바로 세션에 밀어 넣는다.
   onEvent?: () => void
+  // 대화나 브릿지 상태가 바뀔 때마다 불린다. 보기 화면이 듣고 브라우저에 바로 밀어 준다.
+  private watchers = new Set<() => void>()
   private waiting = 0
   private flushing = false
   private lastCode?: string
@@ -293,6 +295,7 @@ export class Bridge {
     }, this.opts.retryMs)
     this.timer.unref?.()
     this.writeState()
+    this.changed()
   }
 
   // 새 연결 코드. 코드마다 토큰이 달라서 한 코드로는 한 세션만 연결할 수 있다.
@@ -373,10 +376,12 @@ export class Bridge {
     this.threads.set(thread.id, thread)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, at: msg.at })
+    this.changed()
     try {
       return { thread: thread.id, to: peer.name, delivery: await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) }
     } catch (e) {
       this.threads.delete(thread.id)
+      this.changed()
       throw e
     }
   }
@@ -391,6 +396,7 @@ export class Bridge {
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, at: msg.at })
     thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'waiting_for_peer'
+    this.changed()
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
   }
@@ -406,6 +412,7 @@ export class Bridge {
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'note', text: note, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: 'note', text: note, at: msg.at })
     thread.status = 'checking_with_your_human'
+    this.changed()
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
   }
@@ -437,6 +444,7 @@ export class Bridge {
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'agreement', text: renderAgreement(agreement), agreement, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: 'agreement', text: msg.text, agreement, at: msg.at })
     thread.status = 'agreed'
+    this.changed()
     const file = this.saveAgreement(thread)
     const peer = this.peers.get(thread.peer)
     const delivery = peer ? await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`
@@ -554,6 +562,7 @@ export class Bridge {
     this.tokens.clear()
     this.invites.clear()
     this.outbox = []
+    this.changed()
   }
 
   private listen(port: number): boolean {
@@ -921,6 +930,17 @@ export class Bridge {
     this.events.push(event)
     for (const wake of [...this.waiters]) wake()
     this.onEvent?.()
+    this.changed()
+  }
+
+  // 바뀐 것을 들을 함수를 건다. 돌려준 함수를 부르면 그만 듣는다.
+  watch(onChange: () => void) {
+    this.watchers.add(onChange)
+    return () => void this.watchers.delete(onChange)
+  }
+
+  private changed() {
+    for (const onChange of [...this.watchers]) onChange()
   }
 
   private takeToken(token: unknown) {

@@ -15,7 +15,8 @@ export class Viewer {
   }
 
   start(): string {
-    this.server ??= Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: req => this.handle(req) })
+    // 바뀔 때만 밀어 주는 연결은 오래 조용할 수 있다. Bun 은 10초 동안 조용한 연결을 끊으므로 끄지 않게 한다.
+    this.server ??= Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 0, fetch: req => this.handle(req) })
     return this.url!
   }
 
@@ -40,7 +41,48 @@ export class Viewer {
         },
       })
     if (req.method === 'GET' && path === `/${this.token}/data`) return Response.json(this.data(), { headers })
+    if (req.method === 'GET' && path === `/${this.token}/events`) return this.events(req, headers)
     return new Response('not found', { status: 404 })
+  }
+
+  // 대화가 바뀔 때마다 화면 자료를 통째로 밀어 준다(Server-Sent Events). 대화 몇 개라 통째로 보내도 작다.
+  // 한 번에 여러 곳이 바뀌어도 한 번만 보내고, 보낸 것과 같으면 보내지 않는다.
+  private events(req: Request, headers: Record<string, string>): Response {
+    const encoder = new TextEncoder()
+    let stop = () => {}
+    const body = new ReadableStream<Uint8Array>({
+      start: controller => {
+        let last = ''
+        let pending = false
+        const write = (text: string) => {
+          try {
+            controller.enqueue(encoder.encode(text))
+          } catch {
+            stop()
+          }
+        }
+        const send = () => {
+          pending = false
+          const json = JSON.stringify(this.data())
+          if (json === last) return
+          last = json
+          write(`data: ${json}\n\n`)
+        }
+        const unwatch = this.bridge.watch(() => {
+          if (!pending) (pending = true), setTimeout(send, 0)
+        })
+        // 연결이 살아 있는지 브라우저가 알 수 있게 가끔 빈 주석을 보낸다.
+        const ping = setInterval(() => write(': ping\n\n'), 15_000)
+        stop = () => {
+          clearInterval(ping)
+          unwatch()
+        }
+        req.signal.addEventListener('abort', () => stop())
+        send()
+      },
+      cancel: () => stop(),
+    })
+    return new Response(body, { headers: { ...headers, 'content-type': 'text/event-stream; charset=utf-8' } })
   }
 }
 
@@ -134,18 +176,21 @@ function render(data) {
     list.append(card)
   }
 }
-async function load() {
-  try {
-    const res = await fetch(location.pathname + '/data', { cache: 'no-store' })
-    if (!res.ok) throw new Error(res.status)
-    render(await res.json())
-    document.getElementById('refresh').textContent = '3초마다 새로 고침 · 마지막 ' + time(new Date().toISOString())
-  } catch {
-    document.getElementById('refresh').textContent = '세션에 닿지 않습니다. 세션이 끝났으면 이 화면은 더 바뀌지 않습니다.'
-  }
+// 세션이 바뀐 것을 그때그때 밀어 준다. 끊기면 브라우저가 알아서 다시 붙는다.
+const refresh = document.getElementById('refresh')
+let changedAt = ''
+const events = new EventSource(location.pathname + '/events')
+events.onmessage = e => {
+  render(JSON.parse(e.data))
+  changedAt = time(new Date().toISOString())
+  refresh.textContent = '바뀌면 바로 보여 줍니다 · 마지막 변경 ' + changedAt
 }
-load()
-setInterval(load, 3000)
+events.onopen = () => {
+  if (changedAt) refresh.textContent = '바뀌면 바로 보여 줍니다 · 마지막 변경 ' + changedAt
+}
+events.onerror = () => {
+  refresh.textContent = '세션에 닿지 않습니다. 세션이 끝났으면 이 화면은 더 바뀌지 않습니다.'
+}
 </script>
 </body>
 </html>

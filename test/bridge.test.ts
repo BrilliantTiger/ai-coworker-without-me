@@ -532,4 +532,39 @@ describe('viewer', () => {
       viewer.stop()
     }
   })
+
+  test('pushes each change to the browser as it happens, without the page asking again', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const viewer = new Viewer(a)
+    try {
+      const res = await fetch(`${viewer.start()}/events`)
+      expect(res.headers.get('content-type')).toContain('text/event-stream')
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      const pushed = async (): Promise<ReturnType<Viewer['data']>> => {
+        for (;;) {
+          const end = buffer.indexOf('\n\n')
+          if (end >= 0) {
+            const chunk = buffer.slice(0, end)
+            buffer = buffer.slice(end + 2)
+            if (chunk.startsWith('data: ')) return JSON.parse(chunk.slice(6))
+            continue
+          }
+          const { value, done } = await reader.read()
+          if (done) throw new Error('the stream ended')
+          buffer += decoder.decode(value, { stream: true })
+        }
+      }
+      expect((await pushed()).conversations).toEqual([])
+      const asked = await b.ask(undefined, 'Which port?')
+      expect((await pushed()).conversations).toEqual([expect.objectContaining({ id: asked.thread, status: 'your_turn' })])
+      await a.reply(asked.thread, '18001')
+      expect((await pushed()).conversations[0]).toMatchObject({ status: 'waiting_for_peer', messages: [expect.anything(), expect.objectContaining({ text: '18001' })] })
+      await reader.cancel()
+    } finally {
+      viewer.stop()
+    }
+  })
 })
