@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { Bridge, MAX_MESSAGES_PER_THREAD, routeId, type BridgeEvent } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, seal, fromB64 } from '../src/crypto'
+import { Viewer } from '../src/viewer'
 
 const opened: Bridge[] = []
 let nextPort = 17700
@@ -93,6 +94,27 @@ describe('bridge', () => {
     expect(conns.peers).toEqual([expect.objectContaining({ name: 'A · Claude Code', reachable: true, queued: 0 })])
   })
 
+  test('only the latest wait takes what arrives, so a wait nobody reads does not swallow it', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const stale = a.wait(5000)
+    const current = a.wait(5000)
+    expect(await stale).toEqual([])
+    await b.ask(undefined, 'Still there?')
+    expect((await current)[0]).toMatchObject({ type: 'message', kind: 'question', text: 'Still there?' })
+  })
+
+  test('a cancelled wait ends empty-handed and leaves what arrives for the next one', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const cancel = new AbortController()
+    const cancelled = a.wait(5000, cancel.signal)
+    cancel.abort()
+    expect(await cancelled).toEqual([])
+    await b.ask(undefined, 'Hello?')
+    expect(await next(a, 'message')).toMatchObject({ kind: 'question', text: 'Hello?' })
+  })
+
   test('a code works only once', async () => {
     const { code } = await pair()
     const c = make('C')
@@ -155,8 +177,11 @@ describe('bridge', () => {
   test('a side that cannot be reached still gets its messages by coming to pick them up', async () => {
     const { a, b } = await pair()
     // A에서 B로 가는 길이 막힌 상황. B는 A에 닿을 수 있다(Windows 방화벽이 들어오는 연결만 막을 때와 같다).
+    // B의 주소만 바꾸면, A가 이미 보내 둔 요청이 옛 주소로 성공해 길이 다시 열린 것처럼 보일 때가 있다.
+    // 그래서 A가 B로 보내는 길 자체를 막는다.
     const bAsSeenByA = a.peers.get(b.key)!
-    bAsSeenByA.addrs = ['192.0.2.1']
+    const deliverTo = (a as any).deliverTo.bind(a)
+    ;(a as any).deliverTo = (peer: { key: string }, ...rest: unknown[]) => (peer.key === b.key ? Promise.resolve(null) : deliverTo(peer, ...rest))
     bAsSeenByA.lastAddr = undefined
     for (let i = 0; i < 40 && !bAsSeenByA.lastPollAt; i++) await Bun.sleep(50)
     expect(bAsSeenByA.lastPollAt).toBeDefined()
@@ -244,5 +269,47 @@ describe('bridge', () => {
     if (process.platform !== 'win32') expect(Bun.file(path).size).toBeGreaterThan(0)
     await a.close()
     expect(existsSync(path)).toBe(false)
+  })
+})
+
+describe('viewer', () => {
+  test('shows each conversation with whom, which way and when, only on this PC and only with the link', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const received = await b.ask(undefined, 'Which port does the L2 API use?', 'compose mentions two')
+    const q = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    await a.reply(q.thread, '18001')
+    const sent = await a.ask(undefined, 'And the database?')
+
+    const viewer = new Viewer(a)
+    try {
+      const url = viewer.start()
+      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[\w-]+$/)
+      const page = await fetch(url)
+      expect(page.headers.get('content-type')).toContain('text/html')
+      // 상대가 보낸 글은 화면 HTML 에 박지 않고, 데이터로만 내려 글자로 넣는다.
+      expect(await page.text()).not.toContain('Which port')
+
+      const data = (await (await fetch(`${url}/data`)).json()) as ReturnType<Viewer['data']>
+      expect(data.me).toMatchObject({ name: 'A · Claude Code', open: true, port: a.port })
+      expect(data.conversations).toEqual([
+        expect.objectContaining({
+          id: received.thread,
+          startedBy: 'peer',
+          peerName: 'B · Codex',
+          peerAddr: `127.0.0.1:${b.port}`,
+          messages: [
+            expect.objectContaining({ from: 'peer', kind: 'question', text: 'Which port does the L2 API use?', context: 'compose mentions two', at: expect.any(String) }),
+            expect.objectContaining({ from: 'me', kind: 'answer', text: '18001', at: expect.any(String) }),
+          ],
+        }),
+        expect.objectContaining({ id: sent.thread, startedBy: 'me', peerName: 'B · Codex', messages: [expect.objectContaining({ from: 'me', kind: 'question' })] }),
+      ])
+
+      expect((await fetch(url.replace(/[^/]+$/, 'wrong-token'))).status).toBe(404)
+      expect((await fetch(`${url}/data`, { method: 'POST' })).status).toBe(404)
+    } finally {
+      viewer.stop()
+    }
   })
 })

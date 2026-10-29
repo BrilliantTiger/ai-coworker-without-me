@@ -5,7 +5,9 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { z } from 'zod'
 import { Bridge, MAX_MESSAGES_PER_THREAD } from './bridge'
+import { waitSeconds } from './limits'
 import { shortHostname } from './net'
+import { Viewer } from './viewer'
 
 const INSTRUCTIONS = `Coworker links this AI session to a coworker's AI session (Claude Code or Codex, on another PC or this one). The two AIs ask and answer each other directly; the humans watch and make the decisions.
 
@@ -17,6 +19,7 @@ Stay open until your human says stop
 
 Tell your human right away
 - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you call wait_for_message again.
+- When wait_for_message returns nothing, say nothing to your human. No "still listening" or "nothing new" lines; just call wait_for_message again.
 
 Answer what is settled, ask your human what needs deciding
 - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
@@ -40,7 +43,6 @@ function clientLabel() {
   return name || 'AI'
 }
 
-// Codex 는 도구 한 번을 60초까지만 기다린다.
 const isCodex = () => clientLabel() === 'Codex'
 const LISTEN = 'Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.'
 
@@ -49,12 +51,20 @@ function getBridge() {
   return bridge
 }
 
+// 브라우저로 대화를 보는 화면. 브릿지가 닫혀도 세션이 살아 있는 동안은 지난 대화를 보여 준다.
+let viewer: Viewer | undefined
+function viewerUrl() {
+  viewer ??= new Viewer(getBridge())
+  return viewer.start()
+}
+const VIEWER = 'Also give your human the viewer link: it shows, in a browser on this PC, every question and answer, with whom and when.'
+
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] })
 
-function tool<T>(run: (args: T) => Promise<unknown> | unknown) {
-  return async (args: T) => {
+function tool<T>(run: (args: T, extra: { signal: AbortSignal }) => Promise<unknown> | unknown) {
+  return async (args: T, extra: { signal: AbortSignal }) => {
     try {
-      return result(await run(args))
+      return result(await run(args, extra))
     } catch (e) {
       return { isError: true, content: [{ type: 'text' as const, text: e instanceof Error ? e.message : String(e) }] }
     }
@@ -82,7 +92,8 @@ server.registerTool(
       name: b.name,
       port: b.port,
       addresses: b.addrs(),
-      next: `Show the code to your human so they can send it to the coworker. The code works once. ${LISTEN}`,
+      viewer: viewerUrl(),
+      next: `Show the code to your human so they can send it to the coworker. The code works once. ${VIEWER} ${LISTEN}`,
     }
   }),
 )
@@ -98,7 +109,13 @@ server.registerTool(
   tool(async ({ code }: { code: string }) => {
     const b = getBridge()
     const peer = await b.connect(code)
-    return { connected: peer.name, myName: b.name, myPort: b.port, next: `Tell your human you are connected to ${peer.name}. ${LISTEN}` }
+    return {
+      connected: peer.name,
+      myName: b.name,
+      myPort: b.port,
+      viewer: viewerUrl(),
+      next: `Tell your human you are connected to ${peer.name}. ${VIEWER} ${LISTEN}`,
+    }
   }),
 )
 
@@ -107,10 +124,10 @@ server.registerTool(
   {
     title: 'List connections',
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: 'Show this session\'s bridge and the connected sessions, with whether each one can be reached right now.',
+    description: 'Show this session\'s bridge and the connected sessions, with whether each one can be reached right now, and the viewer link for the human.',
     inputSchema: {},
   },
-  tool(async () => getBridge().connections()),
+  tool(async () => ({ ...(await getBridge().connections()), viewer: viewer?.url })),
 )
 
 server.registerTool(
@@ -172,17 +189,22 @@ server.registerTool(
     title: 'Wait for message',
     annotations: { readOnlyHint: true, openWorldHint: true },
     description:
-      'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving), up to timeout_sec. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop.',
+      'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving), up to timeout_sec. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop. If nothing arrived, say nothing to your human and call it again.',
     inputSchema: {
-      timeout_sec: z.number().int().min(0).max(300).optional().describe('How long to wait. Default 50 for Codex (it allows at most 60), 120 otherwise.'),
+      timeout_sec: z
+        .number()
+        .int()
+        .min(0)
+        .max(300)
+        .optional()
+        .describe('How long to wait. Default 50 for Codex (it allows at most 60), 110 otherwise (Claude Code moves calls over 120 seconds to the background). Longer values are cut to those limits.'),
     },
   },
-  tool(async ({ timeout_sec }: { timeout_sec?: number }) => {
+  tool(async ({ timeout_sec }: { timeout_sec?: number }, { signal }) => {
     const b = getBridge()
     if (!b.isOpen) throw new Error('the bridge is not open; call open_bridge or connect first')
-    const max = isCodex() ? 55 : 300
-    const events = await b.wait(Math.min(timeout_sec ?? (isCodex() ? 50 : 120), max) * 1000)
-    if (!events.length) return { events, next: `Nothing new yet. ${LISTEN}` }
+    const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal)
+    if (!events.length) return { events, next: 'Nothing new. Do not tell your human anything about this; call wait_for_message again now.' }
     return {
       events,
       next:
@@ -239,6 +261,7 @@ function exit() {
   if (exiting) return
   exiting = true
   bridge?.shutdown()
+  viewer?.stop()
   process.exit(0)
 }
 process.stdin.on('end', exit)

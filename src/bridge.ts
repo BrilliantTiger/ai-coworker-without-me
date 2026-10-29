@@ -34,10 +34,12 @@ export type ThreadMessage = {
   at: string
 }
 
+// peerAddr: 대화가 시작될 때 상대에게 닿던 주소. 사람이 「어디와」 주고받았는지 볼 수 있게 남긴다.
 export type Thread = {
   id: string
   peer: string
   peerName: string
+  peerAddr?: string
   subject: string
   startedBy: 'me' | 'peer'
   status: ThreadStatus
@@ -89,6 +91,10 @@ const now = () => new Date().toISOString()
 const POLL_FRESH_MS = 60_000
 const firstLine = (text: string) => text.trim().split('\n')[0]!.slice(0, 80)
 const counted = (t: Thread) => t.messages.filter(m => m.kind !== 'note').length
+const whereIs = (p: Peer) => {
+  const addr = p.lastAddr ?? p.addrs[0]
+  return addr ? `${hostForUrl(addr)}:${p.port}` : undefined
+}
 
 export class Bridge {
   readonly keys: KeyPair = newKeyPair()
@@ -106,6 +112,7 @@ export class Bridge {
   private outbox: Outgoing[] = []
   private events: BridgeEvent[] = []
   private waiters: Array<() => void> = []
+  private waiting = 0
   private flushing = false
   private lastCode?: string
   private polling = new Set<string>()
@@ -190,6 +197,7 @@ export class Bridge {
       id: randomUUID().slice(0, 8),
       peer: peer.key,
       peerName: peer.name,
+      peerAddr: whereIs(peer),
       subject: firstLine(question),
       startedBy: 'me',
       status: 'waiting_for_peer',
@@ -230,19 +238,28 @@ export class Bridge {
   }
 
   // 새 소식이 올 때까지 기다린다. 이미 쌓여 있으면 바로 돌려준다.
-  async wait(timeoutMs: number): Promise<BridgeEvent[]> {
-    if (this.events.length === 0 && timeoutMs > 0) {
+  // 기다림은 마지막 하나만 산다. 사람이 끊었거나 아무도 결과를 읽지 않는 기다림이 소식을 가져가면
+  // 그 소식은 사라진다. 그래서 새 기다림이 시작되거나 호출이 취소되면 앞의 기다림은 빈손으로 끝난다.
+  async wait(timeoutMs: number, signal?: AbortSignal): Promise<BridgeEvent[]> {
+    if (timeoutMs <= 0) return this.events.splice(0)
+    const turn = ++this.waiting
+    for (const wake of [...this.waiters]) wake()
+    const live = () => turn === this.waiting && !signal?.aborted
+    const deadline = Date.now() + timeoutMs
+    while (this.events.length === 0 && live() && Date.now() < deadline) {
       await new Promise<void>(resolve => {
         const done = () => {
           clearTimeout(timer)
+          signal?.removeEventListener('abort', done)
           this.waiters = this.waiters.filter(w => w !== done)
           resolve()
         }
-        const timer = setTimeout(done, timeoutMs)
+        const timer = setTimeout(done, deadline - Date.now())
+        signal?.addEventListener('abort', done)
         this.waiters.push(done)
       })
     }
-    return this.events.splice(0)
+    return live() ? this.events.splice(0) : []
   }
 
   async connections() {
@@ -478,6 +495,7 @@ export class Bridge {
         id: msg.thread,
         peer: peer.key,
         peerName: peer.name,
+        peerAddr: whereIs(peer),
         subject: msg.subject ?? firstLine(msg.text),
         startedBy: 'peer',
         status: 'your_turn',
