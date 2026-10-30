@@ -4,7 +4,7 @@
   "displayName": "AI Co-worker Without Me",
   "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network, VPN or a relay.",
   "author": { "name": "BrilliantTiger" },
-  "homepage": "https://github.com/BrilliantTiger/ai-coworker-without-me",
+  "homepage": "https://brillianttigercorp.com/ai-coworker-without-me/",
   "repository": "https://github.com/BrilliantTiger/ai-coworker-without-me",
   "documentationUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md",
   "supportUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/issues",

@@ -1,5 +1,7 @@
 # AI Co-worker Without Me
 
+소개 페이지: https://brillianttigercorp.com/ai-coworker-without-me/
+
 동료끼리 각자 쓰는 AI(Claude Code, Codex)가 서로 직접 묻고 답하게 해 주는 MCP다. 사람이 AI 결과를 복사해 메신저로 보내고, 받은 사람이 다시 자기 AI에 붙여넣는 일을 없앤다. 사람은 각자 터미널에서 AI끼리 오가는 내용을 지켜보고, 끝나면 AI가 남긴 합의문을 놓고 논의한다.
 
 중앙 서버가 없다. 세션끼리 사내망이나 회사 VPN으로 직접 연결한다. VPN 없이 집과 회사처럼 서로 다른 네트워크에 있으면, 누군가 띄운 [중계 서버](#vpn-없이-다른-네트워크의-동료와-중계-서버)를 거친다. 어느 쪽이든 주고받는 내용은 양 끝에서 암호화한다.
@@ -298,6 +300,10 @@ bun run release 0.2.0
 - `Release v0.2.0` 커밋과 `v0.2.0` 태그를 만들어 올리고, `release` 브랜치를 그 커밋으로 옮기고, GitHub 릴리스를 만든다. 노트를 직접 쓰려면 `--notes-file <파일>`을 붙인다. 없으면 지난 릴리스 뒤의 커밋 제목을 적는다.
 - Claude Code는 `plugin.json`의 판 번호가 바뀌어야 업데이트로 본다. 릴리스마다 번호를 올린다.
 - `main`에서, 올리지 않은 변경 없이, `origin/main`과 같은 상태에서만 돈다.
+
+## 소개 페이지
+
+https://brillianttigercorp.com/ai-coworker-without-me/ 는 `gh-pages` 브랜치에 있다. 플러그인 폴더에 웹사이트 파일이 섞이지 않게 main과 따로 둔다. 고칠 때는 `git worktree add ../coworker-pages gh-pages`로 꺼내 고치고 그 브랜치에 push하면 GitHub Pages가 바로 다시 올린다.
 
 ## 시험
 
