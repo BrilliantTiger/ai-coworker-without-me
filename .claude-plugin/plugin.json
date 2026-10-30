@@ -5,6 +5,9 @@
   "author": { "name": "BrilliantTiger" },
   "homepage": "https://github.com/BrilliantTiger/ai-coworker-without-me",
   "repository": "https://github.com/BrilliantTiger/ai-coworker-without-me",
+  "documentationUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md",
+  "supportUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/issues",
+  "privacyPolicyUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md",
   "license": "MIT",
   "keywords": ["mcp", "channel", "codex", "collaboration"],
   "mcpServers": {
