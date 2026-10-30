@@ -22,8 +22,6 @@ export function parsePorts(text: string | undefined): [number, number] {
     throw new Error(`COWORKER_PORTS must look like "9000-9010" or "9000", between 1024 and 65535 (got "${text}")`)
   return [min, max]
 }
-// 대화 하나에 주고받는 메시지 상한. 왕복 6번.
-export const MAX_MESSAGES_PER_THREAD = 12
 
 // 주소마다 다른 프로그램이 같은 포트로 떠 있을 수 있다. 받는 쪽 키로 만든 경로로 보내서,
 // 엉뚱한 곳(예: 같은 포트를 쓰는 이 PC의 다른 브릿지)이 답하면 「여기 아님」으로 알 수 있게 한다.
@@ -58,7 +56,6 @@ export type ThreadStatus =
   | 'your_turn'
   | 'checking_with_your_human'
   | 'peer_checking_with_their_human'
-  | 'needs_human'
   | 'closed'
   | 'agreed'
 
@@ -395,7 +392,7 @@ export class Bridge {
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, at: msg.at })
-    thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'waiting_for_peer'
+    thread.status = 'waiting_for_peer'
     this.changed()
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
@@ -759,8 +756,6 @@ export class Bridge {
   }
 
   private assertOpen(thread: Thread) {
-    if (thread.status === 'needs_human')
-      throw new Error(`this conversation reached ${MAX_MESSAGES_PER_THREAD} messages; stop and let the humans decide`)
     if (thread.status === 'closed') {
       const notice = thread.messages.findLast(m => m.kind === 'closed')
       throw new Error(notice?.text ?? 'this question is closed. No answer is needed.')
@@ -916,7 +911,7 @@ export class Bridge {
     else if (agreement) thread.status = 'agreed'
     else if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
     // 합의문을 쓴 뒤에 늦게 온 답도 남기기만 한다.
-    else if (thread.status !== 'agreed') thread.status = counted(thread) >= MAX_MESSAGES_PER_THREAD ? 'needs_human' : 'your_turn'
+    else if (thread.status !== 'agreed') thread.status = 'your_turn'
     const file = agreement ? this.saveAgreement(thread) : undefined
     let ask: AskInfo | AskProgress | undefined = thread.ask
     if (thread.ask && thread.startedBy === 'me') {

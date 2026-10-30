@@ -134,7 +134,6 @@ const STATUS = {
   your_turn: '이쪽 차례',
   checking_with_your_human: '이쪽 사람에게 확인 중',
   peer_checking_with_their_human: '상대가 자기 사람에게 확인 중',
-  needs_human: '상한에 닿음 · 사람이 정할 차례',
   closed: '마감 · 다른 사람이 먼저 답함',
   agreed: '합의문 작성됨',
 }

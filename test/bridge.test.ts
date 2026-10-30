@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Bridge, MAX_MESSAGES_PER_THREAD, parsePorts, routeId, type BridgeEvent } from '../src/bridge'
+import { Bridge, parsePorts, routeId, type BridgeEvent } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, seal, fromB64 } from '../src/crypto'
 import { Viewer } from '../src/viewer'
@@ -242,16 +242,16 @@ describe('bridge', () => {
     expect(b.threadSummaries()[0]).toMatchObject({ messages: 2 })
   })
 
-  test('a conversation stops at the message limit and hands over to the humans', async () => {
+  test('a conversation has no limit on how many times the two sides go back and forth', async () => {
     const { a, b } = await pair()
     const { thread } = await b.ask(undefined, 'q')
     let last: unknown
-    for (let n = 2; n <= MAX_MESSAGES_PER_THREAD; n++) last = await (n % 2 === 0 ? a : b).reply(thread, `turn ${n}`)
-    expect(last).toMatchObject({ status: 'needs_human' })
+    for (let n = 2; n <= 30; n++) last = await (n % 2 === 0 ? a : b).reply(thread, `turn ${n}`)
+    // 30번째는 a가 답했다. 이제 b의 차례다.
+    expect(last).toMatchObject({ status: 'waiting_for_peer' })
     await Bun.sleep(50)
-    expect(a.threads.get(thread)!.status).toBe('needs_human')
-    expect(b.threads.get(thread)!.status).toBe('needs_human')
-    await expect(a.reply(thread, 'more')).rejects.toThrow('let the humans decide')
+    expect(b.threadSummaries()[0]).toMatchObject({ status: 'your_turn', messages: 30 })
+    expect(await b.reply(thread, 'turn 31')).toMatchObject({ status: 'waiting_for_peer' })
   })
 
   test('an agreement goes to both sides and is saved on both PCs, with facts kept apart from guesses', async () => {
@@ -301,10 +301,10 @@ describe('bridge', () => {
     expect(a.threadSummaries()[0]).toMatchObject({ status: 'agreed', messages: 2 })
   })
 
-  test('an agreement can be written after the message limit, and when the other side has left', async () => {
+  test('an agreement can be written after a long conversation, and when the other side has left', async () => {
     const { a, b } = await pair()
     const { thread } = await b.ask(undefined, 'q')
-    for (let n = 2; n <= MAX_MESSAGES_PER_THREAD; n++) await (n % 2 === 0 ? a : b).reply(thread, `turn ${n}`)
+    for (let n = 2; n <= 20; n++) await (n % 2 === 0 ? a : b).reply(thread, `turn ${n}`)
     await Bun.sleep(50)
     expect(await b.agree(thread, { conclusion: 'Not settled.', forHumans: ['Pick one'] })).toMatchObject({ status: 'agreed' })
     await b.close()
