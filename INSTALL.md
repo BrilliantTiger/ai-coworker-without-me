@@ -33,13 +33,13 @@ curl -fsSL https://bun.sh/install | bash
 Claude Code:
 
 ```
-claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me
+claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me@release
 ```
 
 Codex:
 
 ```
-codex plugin marketplace add BrilliantTiger/ai-coworker-without-me
+codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
 codex plugin add coworker@ai-coworker-without-me
 ```
 
@@ -120,13 +120,13 @@ PowerShell을 새로 열고 `bun --version`으로 확인한다.
 Claude Code:
 
 ```
-claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me
+claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me@release
 ```
 
 Codex:
 
 ```
-codex plugin marketplace add BrilliantTiger/ai-coworker-without-me
+codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
 codex plugin add coworker@ai-coworker-without-me
 ```
 
@@ -246,7 +246,7 @@ AI가 전하는 오류별로 할 일은 README의 [오류별로 할 일](README.
 
 ## 새 판으로 올리기
 
-두 사람의 판이 다르면 연결 코드를 못 읽거나 기능이 맞지 않는다. 새 판이 나왔다고 들으면 둘 다 올리고 세션을 새로 켠다. 켜 둔 세션은 예전 판으로 계속 돈다. Mac과 Windows 명령이 같다.
+두 사람의 판이 다르면 연결 코드를 못 읽거나 기능이 맞지 않는다. [GitHub 릴리스](https://github.com/BrilliantTiger/ai-coworker-without-me/releases)에 새 판이 나오면 둘 다 올리고 세션을 새로 켠다. 켜 둔 세션은 예전 판으로 계속 돈다. Mac과 Windows 명령이 같다.
 
 Claude Code:
 
@@ -255,7 +255,7 @@ claude plugin marketplace update ai-coworker-without-me
 claude plugin update coworker@ai-coworker-without-me
 ```
 
-`Plugin "coworker" updated from <예전 커밋> to <새 커밋>`이 나오면 된 것이다. `already at the latest version`이면 이미 최신이다.
+`Plugin "coworker" updated from <예전 판> to <새 판>`이 나오면 된 것이다. `already at the latest version`이면 이미 최신이다.
 
 Codex:
 
@@ -268,9 +268,7 @@ codex plugin add coworker@ai-coworker-without-me
 
 ### 지금 깔린 판 보기
 
-판은 GitHub 커밋으로 맞춘다. 저장소 첫 화면에 보이는 최신 커밋의 앞 일곱 글자와 비교한다.
+판은 `0.1.0` 같은 번호로 맞춘다. 최신 판은 [GitHub 릴리스](https://github.com/BrilliantTiger/ai-coworker-without-me/releases)에 있다. 설치 명령의 `@release`는 릴리스한 판만 받는다는 뜻이다.
 
-- Claude Code: `claude plugin list`의 `coworker@ai-coworker-without-me` 아래 `Version:`이 커밋이다.
-- Codex: `codex plugin list`의 판은 늘 `0.1.0`이라 구분이 안 된다. 아래 파일의 `revision`을 본다.
-  - Mac: `cat ~/.codex/plugins/cache/ai-coworker-without-me/coworker/*/.codex-marketplace-install.json`
-  - Windows: `Get-Content $HOME\.codex\plugins\cache\ai-coworker-without-me\coworker\*\.codex-marketplace-install.json`
+- Claude Code: `claude plugin list`의 `coworker@ai-coworker-without-me` 아래 `Version:`
+- Codex: `codex plugin list`의 `coworker@ai-coworker-without-me` 줄 `VERSION`

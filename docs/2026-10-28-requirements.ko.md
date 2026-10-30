@@ -43,6 +43,8 @@
 - 2026-10-30에 확인했다. 개발용 채널 옵션은 `settings.json`에 넣을 수 없다. 채널 관련 설정은 관리 설정의 `channelsEnabled`와 `allowedChannelPlugins`뿐이고, 어느 쪽도 켜는 명령을 대신하지 않는다. Claude Code에는 플러그인 설치 직후에 안내를 띄우는 방법도 없다. 그래서 INSTALL.md에 별칭 `claude-cw`를 적고(Mac은 `alias`, Windows는 `claude`가 있는 폴더의 `claude-cw.cmd`), 플러그인의 세션 시작 훅이 옵션 없이 처음 켠 세션에 한 번 안내한다. 이 훅은 Claude Code 플러그인 설정(`.claude-plugin/plugin.json`)에만 넣었다. 실제 세션에서 처음에만 안내가 뜨고, 다시 켜거나 채널로 켜면 뜨지 않았다. Windows PC에서 `claude-cw.cmd`가 PowerShell과 명령 프롬프트 양쪽에서 실행됐다.
 - 2026-10-30에 확인했다. 개발용 채널 옵션을 붙였는데 Claude Code가 채널을 켜지 않으면 MCP는 그 사실을 알 수 없다. 이때는 시작 화면의 Channels 줄 바로 아래에 `plugin:coworker@… · plugin not installed` 같은 경고 줄이 뜬다. 회사 Team·Enterprise 계정에서 관리자가 채널을 켜 두지 않은 경우도 같다. 이때 질문은 대화 기록과 대화 보기에 남지만 AI가 스스로 반응하지 않으므로, INSTALL.md에 경고 줄이 보이면 옵션 없이 다시 켜라고 적었다.
 - 2026-10-30에 MCP SDK를 1.32.2로 고정했다. Claude Code의 새 MCP 런타임은 프로토콜 판 2026-07-28로 붙는 채널을 등록하지 않는다. 오래된 Bun이 package.json 범위대로 다시 깔 때 그 판을 쓰는 새 SDK가 들어오면 채널이 조용히 켜지지 않기 때문이다. 1.32.2는 2025-11-25까지만 쓴다.
+- 2026-10-30에 Claude 플러그인 디렉터리(claude.ai/directory/manage)에 제출할 초안을 만들었다(사람이 정함). 디렉터리에 올라가도 채널은 여전히 개발용 옵션으로 켜야 한다. `--channels` 승인 목록은 `claude-plugins-official`의 채널뿐이고, 디렉터리 등록과는 따로다. 검증은 통과했고, lock 파일 설치·자격 증명 오탐·MCP 실행 명령 세 가지로 검토자가 보고 게시한다. 목록은 Claude Code만 고르고(Cowork는 시험하지 않음), 아이콘과 PRIVACY.md를 더했다.
+- 2026-10-30에 판 번호로 릴리스하기로 했다(사람이 정함). 세 매니페스트의 판을 맞추고, `bun run release <판>`이 태그와 GitHub 릴리스를 만들고 `release` 브랜치를 옮긴다. 설치 명령은 `BrilliantTiger/ai-coworker-without-me@release`로 그 브랜치를 받고(Claude Code와 Codex 모두 `owner/repo@ref`를 받는 것을 확인), 디렉터리도 `release` 브랜치를 따라가게 한다. Claude Code는 `plugin.json`의 판 번호가 바뀌어야 업데이트로 보므로 릴리스마다 번호를 올린다.
 
 ## 흐름
 

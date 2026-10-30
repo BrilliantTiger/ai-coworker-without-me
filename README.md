@@ -64,10 +64,10 @@ Bun은 최신으로 쓴다(`bun upgrade`, chocolatey로 깔았으면 관리자 P
 ### Claude Code: 플러그인
 
 ```
-claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me
+claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me@release
 ```
 
-Claude Code 세션 안에서는 `/plugin marketplace add BrilliantTiger/ai-coworker-without-me`를 하고 `/plugin install coworker@ai-coworker-without-me`를 해도 된다.
+Claude Code 세션 안에서는 `/plugin marketplace add BrilliantTiger/ai-coworker-without-me@release`를 하고 `/plugin install coworker@ai-coworker-without-me`를 해도 된다.
 
 - 설정이 세 개 있다. 포트 범위(기본 7700-7799), 중계 서버 주소, 중계 서버 키다. 처음에는 기본값으로 켜진다. 사내망과 VPN에서만 쓰면 중계 서버 두 칸은 비워 둔다. 바꾸려면 Claude Code 세션에서 `/plugin configure coworker@ai-coworker-without-me`나 `/config`를 쓴다.
 - 이 플러그인을 쓸 세션은 이렇게 켠다. 자세한 것은 [채널로 켠다](#claude-code는-채널로-켠다)에 있다.
@@ -89,7 +89,7 @@ Claude Code 세션 안에서는 `/plugin marketplace add BrilliantTiger/ai-cowor
 ### Codex: 플러그인
 
 ```
-codex plugin marketplace add BrilliantTiger/ai-coworker-without-me
+codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
 codex plugin add coworker@ai-coworker-without-me
 ```
 
@@ -287,6 +287,19 @@ RELAY_KEY=<키> PORT=8787 bun src/relay.ts
 - **각자 개인 계정의 학습 설정을 확인한다.** 대화 내용이 모델 학습에 쓰이지 않게 하려면 끈다.
   - Claude(Pro·Max): [claude.ai/settings/data-privacy-controls](https://claude.ai/settings/data-privacy-controls)에서 Claude 모델 개선에 데이터를 쓰는 설정을 끈다. Claude Code 사용분도 이 설정을 따른다.
   - Codex(ChatGPT 개인 계정): ChatGPT 설정 → 데이터 제어에서 「모든 사용자를 위한 모델 개선(Improve the model for everyone)」을 끈다. Codex 설정에도 학습 관련 항목이 따로 있으니 함께 본다.
+
+## 릴리스
+
+플러그인으로 설치한 사람은 `release` 브랜치를 받는다. Claude 플러그인 디렉터리도 이 브랜치를 따라간다. `main`에 올린 것은 릴리스해야 나간다.
+
+```
+bun run release 0.2.0
+```
+
+- 세 매니페스트(`package.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`)의 판 번호를 맞추고 시험, 타입 검사, `claude plugin validate`를 돌린다.
+- `Release v0.2.0` 커밋과 `v0.2.0` 태그를 만들어 올리고, `release` 브랜치를 그 커밋으로 옮기고, GitHub 릴리스를 만든다. 노트를 직접 쓰려면 `--notes-file <파일>`을 붙인다. 없으면 지난 릴리스 뒤의 커밋 제목을 적는다.
+- Claude Code는 `plugin.json`의 판 번호가 바뀌어야 업데이트로 본다. 릴리스마다 번호를 올린다.
+- `main`에서, 올리지 않은 변경 없이, `origin/main`과 같은 상태에서만 돈다.
 
 ## 시험
 
