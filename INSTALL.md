@@ -226,7 +226,7 @@ AI가 전하는 오류별로 할 일은 README의 [오류별로 할 일](README.
 
 ## 새 판으로 올리기
 
-두 사람의 판이 다르면 연결 코드를 못 읽거나 기능이 맞지 않는다. 새 판이 나왔다고 들으면 둘 다 올리고 세션을 새로 켠다. Mac과 Windows 명령이 같다.
+두 사람의 판이 다르면 연결 코드를 못 읽거나 기능이 맞지 않는다. 새 판이 나왔다고 들으면 둘 다 올리고 세션을 새로 켠다. 켜 둔 세션은 예전 판으로 계속 돈다. Mac과 Windows 명령이 같다.
 
 Claude Code:
 
@@ -235,12 +235,22 @@ claude plugin marketplace update ai-coworker-without-me
 claude plugin update coworker@ai-coworker-without-me
 ```
 
+`Plugin "coworker" updated from <예전 커밋> to <새 커밋>`이 나오면 된 것이다. `already at the latest version`이면 이미 최신이다.
+
 Codex:
 
 ```
 codex plugin marketplace upgrade ai-coworker-without-me
-codex plugin remove coworker@ai-coworker-without-me
 codex plugin add coworker@ai-coworker-without-me
 ```
 
-Codex는 지웠다가 다시 깔아야 플러그인 파일 전체가 새로 받은 판으로 바뀐다.
+`add`를 다시 하면 플러그인 폴더를 통째로 새 판으로 바꾼다. 필요한 패키지는 다음에 켤 때 다시 깐다.
+
+### 지금 깔린 판 보기
+
+판은 GitHub 커밋으로 맞춘다. 저장소 첫 화면에 보이는 최신 커밋의 앞 일곱 글자와 비교한다.
+
+- Claude Code: `claude plugin list`의 `coworker@ai-coworker-without-me` 아래 `Version:`이 커밋이다.
+- Codex: `codex plugin list`의 판은 늘 `0.1.0`이라 구분이 안 된다. 아래 파일의 `revision`을 본다.
+  - Mac: `cat ~/.codex/plugins/cache/ai-coworker-without-me/coworker/*/.codex-marketplace-install.json`
+  - Windows: `Get-Content $HOME\.codex\plugins\cache\ai-coworker-without-me\coworker\*\.codex-marketplace-install.json`
