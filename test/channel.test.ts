@@ -43,6 +43,8 @@ test('only the program that started this server counts, not a Claude Code furthe
   const winClaude = '"C:\\Users\\me\\.local\\bin\\claude.exe" --dangerously-load-development-channels server:coworker'
   expect(launcherCommandLine(['"C:\\ProgramData\\chocoportable\\bin\\bun.exe" C:\\me\\src\\mcp.ts', winClaude])).toBe(winClaude)
   expect(launcherCommandLine(['"C:\\Program Files\\Codex\\codex.exe" mcp', winClaude])).toStartWith('"C:\\Program Files\\Codex')
+  // 훅은 셸을 거쳐 뜬다. Windows 에서는 Git Bash 다.
+  expect(launcherCommandLine(['"C:\\Program Files\\Git\\usr\\bin\\bash.exe" -c "bun hint.ts"', winClaude])).toBe(winClaude)
 })
 
 test('a server not started by Claude Code never reads command lines', () => {

@@ -75,7 +75,8 @@ for ($i = 0; $i -lt ${depth} -and $all.ContainsKey($id); $i++) {
 
 // 셸이나 bun 껍데기를 거쳐 띄운 경우에는 건너뛴다.
 // Windows 의 cmd /c, 그리고 chocolatey 등이 까는 bun.exe 껍데기는 진짜 bun 을 다시 띄운다.
-const WRAPPERS = new Set(['sh', 'bash', 'zsh', 'fish', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'bun', 'bun.exe'])
+// Claude Code 는 훅을 셸로 띄운다. Windows 에서는 Git Bash(bash.exe)다.
+const WRAPPERS = new Set(['sh', 'sh.exe', 'bash', 'bash.exe', 'zsh', 'fish', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'bun', 'bun.exe'])
 
 // 이 MCP 를 띄운 프로그램 하나만 본다. 더 위까지 보면, 채널로 켠 Claude Code 안에서 띄운 Codex 도 채널로 잘못 안다.
 export function launcherCommandLine(lines: string[]): string | undefined {

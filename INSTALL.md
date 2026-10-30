@@ -9,7 +9,7 @@ coworker를 처음 쓰는 사람이 설치하고 동료와 처음 연결하기�
 
 ## 필요한 것
 
-- Claude Code나 Codex. 개인 계정(Claude Pro·Max, ChatGPT)으로 쓴다. 둘 중 하나만 있어도 된다.
+- Claude Code나 Codex. 개인 계정(Claude Pro·Max, ChatGPT)으로 쓴다. 둘 중 하나만 있어도 된다. 회사 Team·Enterprise 계정으로 로그인한 Claude Code는 관리자가 채널을 켜 두지 않으면 채널이 막힌다. 그래도 AI가 기다리기 도구로 받아서 쓸 수는 있다.
 - [Bun](https://bun.sh). 아래에서 설치한다.
 - 두 PC가 같은 사내망에 있거나 회사 VPN에 들어와 있어야 한다. VPN 없이 다른 네트워크에 있으면 중계 서버가 필요하다. README의 [중계 서버](README.md#vpn-없이-다른-네트워크의-동료와-중계-서버)를 본다.
 - 쓰기 전에 각자 개인 계정의 학습 설정을 끈다.
@@ -75,8 +75,18 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 ```
 
 - 경고 화면이 뜨면 「I am using this for local development」를 고른다. 직접 만든 채널이라 켤 때마다 뜬다.
-- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이면 된 것이다.
+- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다.
+- 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 기다리기 도구로 받는다.
 - 이렇게 켜야 상대가 보낸 것이 세션에 바로 들어오고 AI가 알아서 답한다. 옵션 없이 켜도 쓸 수는 있지만, AI가 기다리기 도구를 붙잡고 기다린다.
+- 플러그인을 깐 뒤 옵션 없이 처음 켠 세션에는 이렇게 켜라는 안내가 한 번 뜬다.
+
+**`claude-cw`로 줄이기.** 이 옵션은 `settings.json`에 넣을 수 없고 켤 때마다 붙여야 한다. 별칭을 한 번 만들어 두면 `claude-cw`만 치면 된다.
+
+```
+echo "alias claude-cw='claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me'" >> ~/.zshrc
+```
+
+터미널을 새로 열고 `claude-cw`로 켠다. `claude-cw --resume`처럼 다른 옵션도 그대로 붙는다. bash를 쓰면 `~/.zshrc` 대신 `~/.bashrc`에 넣는다.
 
 Codex는 그냥 켠다.
 
@@ -150,7 +160,17 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 ```
 
 - 경고 화면이 뜨면 「I am using this for local development」를 고른다. 직접 만든 채널이라 켤 때마다 뜬다.
-- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이면 된 것이다.
+- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다.
+- 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 기다리기 도구로 받는다.
+- 플러그인을 깐 뒤 옵션 없이 처음 켠 세션에는 이렇게 켜라는 안내가 한 번 뜬다.
+
+**`claude-cw`로 줄이기.** 이 옵션은 `settings.json`에 넣을 수 없고 켤 때마다 붙여야 한다. PowerShell에서 아래를 한 번 실행하면 `claude`가 있는 폴더에 `claude-cw.cmd`가 생긴다.
+
+```
+Set-Content "$(Split-Path (Get-Command claude).Source)\claude-cw.cmd" '@claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me %*'
+```
+
+이제 PowerShell이나 명령 프롬프트에서 `claude-cw`로 켠다. `claude-cw --resume`처럼 다른 옵션도 그대로 붙는다. PowerShell 프로필에 함수로 넣는 방법은 실행 정책에 막힐 수 있어서 파일로 만든다.
 
 Codex는 그냥 켠다. PowerShell에서 켠 Codex는 세션 이름에 프로젝트 폴더가 빠지고 `Codex @ <컴퓨터 이름>`으로 나온다. 이름을 정하려면 "이름을 ○○로 해서 브릿지 열어줘"처럼 말한다.
 

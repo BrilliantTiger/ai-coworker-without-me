@@ -5,7 +5,7 @@
     "": {
       "name": "ai-coworker-without-me",
       "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.32.2",
+        "@modelcontextprotocol/sdk": "1.32.2",
         "tweetnacl": "^1.0.3",
         "zod": "^4.6.7",
       },

@@ -137,7 +137,8 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 직접 등록했으면 `plugin:coworker@ai-coworker-without-me` 대신 `server:coworker`를 쓴다.
 
 - 켤 때마다 경고 화면이 뜬다. 직접 만든 채널이라 그렇다. 「I am using this for local development」를 고른다.
-- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이면 된 것이다.
+- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다. 경고 줄이 있으면 채널이 켜지지 않았다. coworker는 Claude Code가 채널을 켰는지 알 수 없어서 알림을 계속 보내고, Claude Code는 그 알림을 버린다. 옵션 없이 다시 켜면 기다리기 도구로 받는다. 회사 Team·Enterprise 계정은 관리자가 채널을 켜 두지 않으면 이렇게 된다.
+- 이 옵션은 `settings.json`에 넣을 수 없다. 켤 때마다 붙여야 해서 `claude-cw` 같은 별칭을 만들어 둔다. Mac·Windows 방법은 [INSTALL.md](INSTALL.md)에 있다. 플러그인을 깐 뒤 옵션 없이 처음 켠 세션에는 이 안내가 한 번 뜬다. 한 번 지나가면 `~/.coworker/hint-shown`이 남고 다시 뜨지 않는다.
 - 이렇게 켜면 상대가 보낸 것이 세션에 바로 들어오고, AI가 알아서 읽고 답한다. AI가 기다리기 도구를 붙잡고 있지 않아도 되고, 아무것도 오지 않는 동안에는 사용량이 들지 않는다.
 - `--channels`로는 안 켜진다. `--channels`는 Anthropic이 승인한 채널만 받는다. 이 채널을 적으면 Claude Code가 `server: entries need --dangerously-load-development-channels`를 띄우고 채널을 켜지 않는다.
 - 채널 옵션 없이 켠 Claude Code도 쓸 수 있다. 그때는 Codex처럼 AI가 기다리기 도구로 메시지를 기다린다.
