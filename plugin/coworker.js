@@ -17390,7 +17390,7 @@ import { randomUUID as randomUUID2 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.1";
+var version2 = "0.4.2";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -25265,7 +25265,8 @@ class Bridge {
     if (!this.server)
       this.open();
     const token = randomToken();
-    this.tokens.set(token, { expires: Date.now() + this.opts.tokenTtlMs, private: !!options.private });
+    const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs;
+    this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: !!options.private });
     this.lastCode = encodeCode({ v: 1, name: this.name, addrs: this.addrs(), port: this.port, key: this.key, token });
     this.writeState();
     return this.lastCode;
@@ -26286,6 +26287,8 @@ events.onerror = () => {
 `;
 
 // src/session.ts
+var DEFAULT_CODE_MINUTES = 60;
+var MAX_CODE_MINUTES = 365 * 24 * 60;
 function createSession(opts) {
   const channel = opts.channel;
   const LISTENING = channel ? `Stay open until your human says stop
@@ -26426,21 +26429,24 @@ ${text}` : "";
   server.registerTool("open_bridge", {
     title: "Open bridge",
     annotations: { readOnlyHint: false, openWorldHint: true },
-    description: "Open this session to coworkers' AI sessions and get a one-time connection code. The human sends the code to a coworker (for example over a messenger), and the coworker's AI calls connect with it. By default whoever joins is also connected with everyone already in this session's group. Call again to get a fresh code for each further session.",
+    description: "Open this session to coworkers' AI sessions and get a one-time connection code. The human sends the code to a coworker (for example over a messenger), and the coworker's AI calls connect with it. By default whoever joins is also connected with everyone already in this session's group. The code expires after 60 minutes unless expires_minutes says otherwise. Call again to get a fresh code for each further session.",
     inputSchema: {
       port: number2().int().min(1024).max(65535).optional().describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range).`),
       name: string2().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>".'),
-      private: boolean2().optional().describe("true: the code links only this session and the one who joins; they are not connected with the rest of the group.")
+      private: boolean2().optional().describe("true: the code links only this session and the one who joins; they are not connected with the rest of the group."),
+      expires_minutes: number2().int().min(0).max(MAX_CODE_MINUTES).optional().describe(`How many minutes the code can be used. Default ${DEFAULT_CODE_MINUTES}. 0: no time limit; the code works until this bridge closes. Either way the code works only once.`)
     }
-  }, tool(async ({ port, name, private: only }) => {
+  }, tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES }) => {
     await resolveFolder();
     const b = getBridge();
     if (name)
       b.name = name;
     b.open(port);
     const { relay: relayInfo, warn = "" } = await relayStatus(b);
+    const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60000).toISOString();
     return {
-      code: b.newCode({ private: only }),
+      code: b.newCode({ private: only, ttlMs: minutes === 0 ? null : minutes * 60000 }),
+      expires: expires ?? "never: works until this bridge closes",
       kind: only ? "private: links only this session and the one who joins" : "group: whoever joins is also connected with everyone in this group",
       name: b.name,
       port: b.port,
@@ -26448,7 +26454,7 @@ ${text}` : "";
       relay: relayInfo,
       group: [...b.peers.values()].filter((p) => !p.private).map((p) => p.name),
       viewer: viewerUrl(),
-      next: `Show the code to your human so they can send it to the coworker. The code works once.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`
+      next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`
     };
   }));
   server.registerTool("connect", {
