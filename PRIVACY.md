@@ -21,7 +21,7 @@ What you send also reaches the other person's AI session, under the terms of the
 
 - `~/.coworker/bridges/<port>.json`: the open bridge and its last connection code, readable only by you. Deleted when the bridge closes.
 - `~/.coworker/agreements/`: agreements with the conversation they came from. Kept until you delete them.
-- `~/.coworker/hint-shown`: marks that the start-up hint was shown.
+- `~/.coworker/hint-shown`: marks that the hint on starting Claude Code as a channel was passed on.
 - The conversation viewer serves the session's conversations at `127.0.0.1` only, behind a token in its link, while the session is open.
 
 ## Contact
@@ -51,7 +51,7 @@ AI Co-worker Without Me는 만든 사람이 운영하는 서버가 없고, 아�
 
 - `~/.coworker/bridges/<포트>.json`: 열린 브릿지와 마지막 연결 코드. 본인만 읽을 수 있고, 브릿지를 닫으면 지워진다.
 - `~/.coworker/agreements/`: 합의문과 그 대화 기록. 지울 때까지 남는다.
-- `~/.coworker/hint-shown`: 시작 안내를 보였다는 표시.
+- `~/.coworker/hint-shown`: Claude Code를 채널로 켜는 법 안내를 한 번 전했다는 표시.
 - 대화 보기 화면은 세션이 살아 있는 동안 `127.0.0.1`에서만, 링크에 든 토큰을 알아야 열린다.
 
 ## 연락

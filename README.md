@@ -59,7 +59,7 @@ AI 둘이 서로 맞장구치다 틀린 결론에 합의하지 않도록, 합의
 
 필요한 것은 [Bun](https://bun.sh) 하나다. 플러그인으로 설치하면 Claude Code와 Codex에 한 번에 들어간다.
 
-Bun은 최신으로 쓴다(`bun upgrade`, chocolatey로 깔았으면 관리자 PowerShell에서 `choco upgrade bun -y`). 1.3.x 같은 예전 Bun은 이 저장소의 `bun.lock`을 읽지 못한다. 그래도 플러그인은 package.json대로 깔고 켜지지만, 직접 받은 저장소에서 `bun install`을 하면 `bun.lock`이 바뀐 파일로 나온다.
+플러그인은 서버와 쓰는 패키지를 파일 하나(`plugin/coworker.js`)로 묶어 두어서, 설치하거나 켤 때 아무것도 깔지 않는다. Bun은 최신으로 쓴다(`bun upgrade`, chocolatey로 깔았으면 관리자 PowerShell에서 `choco upgrade bun -y`). 저장소를 직접 받아 `bun install`을 할 때는 1.3.x 같은 예전 Bun이 이 저장소의 `bun.lock`을 읽지 못한다.
 
 ### Claude Code: 플러그인
 
@@ -93,7 +93,7 @@ codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
 codex plugin add coworker@ai-coworker-without-me
 ```
 
-- 처음 켤 때 필요한 패키지를 스스로 깐다. 몇 초 걸린다.
+- 설치할 패키지가 없어서 바로 켜진다.
 - 기다리기처럼 읽기만 하는 도구는 승인 없이 쓴다. 질문 보내기, 답하기, 합의문 쓰기처럼 보내는 도구는 쓸 때마다 승인을 묻는다.
 - 포트 범위나 중계 서버를 바꾸려면 Codex를 켜는 셸의 환경변수 `COWORKER_PORTS`, `COWORKER_RELAY`, `COWORKER_RELAY_KEY`로 정한다. Codex가 그 값을 coworker에 넘겨 준다.
   - Mac·Linux: `~/.zshrc`나 `~/.bashrc`에 `export COWORKER_RELAY=https://relay.example.com`처럼 넣는다.
@@ -138,7 +138,7 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 
 - 켤 때마다 경고 화면이 뜬다. 직접 만든 채널이라 그렇다. 「I am using this for local development」를 고른다.
 - 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다. 경고 줄이 있으면 채널이 켜지지 않았다. coworker는 Claude Code가 채널을 켰는지 알 수 없어서 알림을 계속 보내고, Claude Code는 그 알림을 버린다. 옵션 없이 다시 켜면 기다리기 도구로 받는다. 회사 Team·Enterprise 계정은 관리자가 채널을 켜 두지 않으면 이렇게 된다.
-- 이 옵션은 `settings.json`에 넣을 수 없다. 켤 때마다 붙여야 해서 `claude-cw` 같은 별칭을 만들어 둔다. Mac·Windows 방법은 [INSTALL.md](INSTALL.md)에 있다. 플러그인을 깐 뒤 옵션 없이 처음 켠 세션에는 이 안내가 한 번 뜬다. 한 번 지나가면 `~/.coworker/hint-shown`이 남고 다시 뜨지 않는다.
+- 이 옵션은 `settings.json`에 넣을 수 없다. 켤 때마다 붙여야 해서 `claude-cw` 같은 별칭을 만들어 둔다. Mac·Windows 방법은 [INSTALL.md](INSTALL.md)에 있다. 옵션 없이 켠 세션에서 처음 브릿지를 열거나 연결하면, AI가 이 안내를 한 번 전한다. 한 번 지나가면 `~/.coworker/hint-shown`이 남고 다시 전하지 않는다.
 - 이렇게 켜면 상대가 보낸 것이 세션에 바로 들어오고, AI가 알아서 읽고 답한다. AI가 기다리기 도구를 붙잡고 있지 않아도 되고, 아무것도 오지 않는 동안에는 사용량이 들지 않는다.
 - `--channels`로는 안 켜진다. `--channels`는 Anthropic이 승인한 채널만 받는다. 이 채널을 적으면 Claude Code가 `server: entries need --dangerously-load-development-channels`를 띄우고 채널을 켜지 않는다.
 - 채널 옵션 없이 켠 Claude Code도 쓸 수 있다. 그때는 Codex처럼 AI가 기다리기 도구로 메시지를 기다린다.
@@ -293,13 +293,19 @@ RELAY_KEY=<키> PORT=8787 bun src/relay.ts
 플러그인으로 설치한 사람은 `release` 브랜치를 받는다. Claude 플러그인 디렉터리도 이 브랜치를 따라간다. `main`에 올린 것은 릴리스해야 나간다.
 
 ```
-bun run release 0.2.0
+bun run release 0.3.0
 ```
 
-- 세 매니페스트(`package.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`)의 판 번호를 맞추고 시험, 타입 검사, `claude plugin validate`를 돌린다.
+- 세 매니페스트(`package.json`, `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`)의 판 번호를 맞추고, 서버를 `plugin/coworker.js`로 다시 묶고, 시험, 타입 검사, `claude plugin validate`를 돌린다.
 - `Release v0.2.0` 커밋과 `v0.2.0` 태그를 만들어 올리고, `release` 브랜치를 그 커밋으로 옮기고, GitHub 릴리스를 만든다. 노트를 직접 쓰려면 `--notes-file <파일>`을 붙인다. 없으면 지난 릴리스 뒤의 커밋 제목을 적는다.
 - Claude Code는 `plugin.json`의 판 번호가 바뀌어야 업데이트로 본다. 릴리스마다 번호를 올린다.
 - `main`에서, 올리지 않은 변경 없이, `origin/main`과 같은 상태에서만 돈다.
+
+## 플러그인 구조
+
+설치되는 것은 `plugin/` 폴더뿐이다. 매니페스트(`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`), 아이콘, README, LICENSE, 그리고 `src/`를 묶은 서버 `coworker.js`가 들어 있다. Claude Code와 Codex는 둘 다 `bun --no-install`로 `coworker.js`를 띄운다. 소스, 시험, 문서, `package.json`과 `bun.lock`은 저장소에만 있다.
+
+`src/`를 고쳤으면 `bun run build`로 다시 묶는다. 묶은 파일이 바깥 패키지를 불러오면 빌드가 실패한다. 릴리스 스크립트는 판 번호를 바꾼 뒤 늘 다시 묶는다.
 
 ## 소개 페이지
 

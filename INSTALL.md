@@ -26,7 +26,7 @@ coworker를 처음 쓰는 사람이 설치하고 동료와 처음 연결하기�
 curl -fsSL https://bun.sh/install | bash
 ```
 
-터미널을 새로 열고 `bun --version`으로 확인한다. 이미 깔려 있으면 `bun upgrade`로 최신으로 올린다. 1.3.x 같은 예전 Bun도 켜지기는 하지만 최신을 쓴다.
+터미널을 새로 열고 `bun --version`으로 확인한다. 이미 깔려 있으면 `bun upgrade`로 최신으로 올린다.
 
 ### 2. 플러그인
 
@@ -43,7 +43,7 @@ codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
 codex plugin add coworker@ai-coworker-without-me
 ```
 
-쓰는 것만 설치하면 된다. Codex는 처음 켤 때 필요한 패키지를 스스로 깔아서 몇 초 걸린다.
+쓰는 것만 설치하면 된다. 플러그인은 서버를 파일 하나로 묶어 두어서, 설치하거나 켤 때 아무것도 깔지 않는다.
 
 ### 3. 허용 창 줄이기 (Claude Code, 해도 되고 안 해도 된다)
 
@@ -78,7 +78,7 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 - 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다.
 - 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 기다리기 도구로 받는다.
 - 이렇게 켜야 상대가 보낸 것이 세션에 바로 들어오고 AI가 알아서 답한다. 옵션 없이 켜도 쓸 수는 있지만, AI가 기다리기 도구를 붙잡고 기다린다.
-- 플러그인을 깐 뒤 옵션 없이 처음 켠 세션에는 이렇게 켜라는 안내가 한 번 뜬다.
+- 옵션 없이 켠 세션에서 처음 브릿지를 열거나 연결하면, AI가 이렇게 켜라는 안내를 한 번 전한다.
 
 **`claude-cw`로 줄이기.** 이 옵션은 `settings.json`에 넣을 수 없고 켤 때마다 붙여야 한다. 별칭을 한 번 만들어 두면 `claude-cw`만 치면 된다.
 
@@ -113,7 +113,6 @@ PowerShell을 새로 열고 `bun --version`으로 확인한다.
 - 위 명령으로 깔았으면: `bun upgrade`
 - chocolatey로 깔았으면: 관리자 PowerShell에서 `choco upgrade bun -y`
 
-1.3.x 같은 예전 Bun도 켜지기는 하지만 최신을 쓴다.
 
 ### 2. 플러그인
 
@@ -130,7 +129,7 @@ codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
 codex plugin add coworker@ai-coworker-without-me
 ```
 
-쓰는 것만 설치하면 된다. Codex는 처음 켤 때 필요한 패키지를 스스로 깔아서 몇 초 걸린다.
+쓰는 것만 설치하면 된다. 플러그인은 서버를 파일 하나로 묶어 두어서, 설치하거나 켤 때 아무것도 깔지 않는다.
 
 ### 3. 허용 창 줄이기 (Claude Code, 해도 되고 안 해도 된다)
 
@@ -162,7 +161,7 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 - 경고 화면이 뜨면 「I am using this for local development」를 고른다. 직접 만든 채널이라 켤 때마다 뜬다.
 - 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다.
 - 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 기다리기 도구로 받는다.
-- 플러그인을 깐 뒤 옵션 없이 처음 켠 세션에는 이렇게 켜라는 안내가 한 번 뜬다.
+- 옵션 없이 켠 세션에서 처음 브릿지를 열거나 연결하면, AI가 이렇게 켜라는 안내를 한 번 전한다.
 
 **`claude-cw`로 줄이기.** 이 옵션은 `settings.json`에 넣을 수 없고 켤 때마다 붙여야 한다. PowerShell에서 아래를 한 번 실행하면 `claude`가 있는 폴더에 `claude-cw.cmd`가 생긴다.
 
@@ -264,7 +263,7 @@ codex plugin marketplace upgrade ai-coworker-without-me
 codex plugin add coworker@ai-coworker-without-me
 ```
 
-`add`를 다시 하면 플러그인 폴더를 통째로 새 판으로 바꾼다. 필요한 패키지는 다음에 켤 때 다시 깐다.
+`add`를 다시 하면 플러그인 폴더를 통째로 새 판으로 바꾼다.
 
 ### 지금 깔린 판 보기
 
