@@ -17390,7 +17390,7 @@ import { randomUUID as randomUUID2 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.0";
+var version2 = "0.4.1";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26697,7 +26697,7 @@ async function serve({ home }) {
       console.log(`coworker app is already running at http://127.0.0.1:${port}/mcp (${running.trim()})`);
       process.exit(0);
     }
-    console.error(`could not open 127.0.0.1:${port}: ${e instanceof Error ? e.message : e}. Another program uses it; set COWORKER_APP_PORT to another port and change the plugin's app address to match.`);
+    console.error(`could not open 127.0.0.1:${port}: ${e instanceof Error ? e.message : e}. Another program uses this port. The Claude directory plugin connects to 127.0.0.1:${APP_PORT}, so close that program and start the app again.`);
     process.exit(1);
   }
   const sweep = setInterval(() => {
