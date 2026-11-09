@@ -297,10 +297,13 @@ export class Bridge {
 
   // 새 연결 코드. 코드마다 토큰이 달라서 한 코드로는 한 세션만 연결할 수 있다.
   // 그룹 코드로 들어온 세션은 이쪽 그룹의 다른 세션과도 이어 준다. 개인용 코드는 이쪽하고만 잇는다.
-  newCode(options: { private?: boolean } = {}): string {
+  // ttlMs: 코드를 쓸 수 있는 시간. 비우면 tokenTtlMs(기본 60분), null 이면 시간 제한 없이 브릿지를 닫을 때까지 쓴다.
+  // 어느 쪽이든 한 번 쓰면 끝난다.
+  newCode(options: { private?: boolean; ttlMs?: number | null } = {}): string {
     if (!this.server) this.open()
     const token = randomToken()
-    this.tokens.set(token, { expires: Date.now() + this.opts.tokenTtlMs, private: !!options.private })
+    const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs
+    this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: !!options.private })
     this.lastCode = encodeCode({ v: 1, name: this.name, addrs: this.addrs(), port: this.port, key: this.key, token })
     this.writeState()
     return this.lastCode

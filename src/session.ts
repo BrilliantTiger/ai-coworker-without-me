@@ -7,6 +7,10 @@ import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { Viewer } from './viewer'
 
+// 연결 코드를 쓸 수 있는 시간(분). 0 을 주면 시간 제한 없이 브릿지를 닫을 때까지 쓴다. 어느 쪽이든 한 번만 쓴다.
+const DEFAULT_CODE_MINUTES = 60
+const MAX_CODE_MINUTES = 365 * 24 * 60
+
 export type SessionOptions = {
   // Claude Code 가 이 서버를 채널로 켰으면 상대 메시지를 세션에 바로 밀어 넣는다. 아니면 AI가 wait_for_message 로 기다린다.
   channel: boolean
@@ -204,7 +208,7 @@ export function createSession(opts: SessionOptions) {
       title: 'Open bridge',
       annotations: { readOnlyHint: false, openWorldHint: true },
       description:
-        'Open this session to coworkers\' AI sessions and get a one-time connection code. The human sends the code to a coworker (for example over a messenger), and the coworker\'s AI calls connect with it. By default whoever joins is also connected with everyone already in this session\'s group. Call again to get a fresh code for each further session.',
+        'Open this session to coworkers\' AI sessions and get a one-time connection code. The human sends the code to a coworker (for example over a messenger), and the coworker\'s AI calls connect with it. By default whoever joins is also connected with everyone already in this session\'s group. The code expires after 60 minutes unless expires_minutes says otherwise. Call again to get a fresh code for each further session.',
       inputSchema: {
         port: z
           .number()
@@ -215,16 +219,25 @@ export function createSession(opts: SessionOptions) {
           .describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range).`),
         name: z.string().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> · <tool> @ <computer>".'),
         private: z.boolean().optional().describe('true: the code links only this session and the one who joins; they are not connected with the rest of the group.'),
+        expires_minutes: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_CODE_MINUTES)
+          .optional()
+          .describe(`How many minutes the code can be used. Default ${DEFAULT_CODE_MINUTES}. 0: no time limit; the code works until this bridge closes. Either way the code works only once.`),
       },
     },
-    tool(async ({ port, name, private: only }: { port?: number; name?: string; private?: boolean }) => {
+    tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES }: { port?: number; name?: string; private?: boolean; expires_minutes?: number }) => {
       await resolveFolder()
       const b = getBridge()
       if (name) b.name = name
       b.open(port)
       const { relay: relayInfo, warn = '' } = await relayStatus(b)
+      const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60_000).toISOString()
       return {
-        code: b.newCode({ private: only }),
+        code: b.newCode({ private: only, ttlMs: minutes === 0 ? null : minutes * 60_000 }),
+        expires: expires ?? 'never: works until this bridge closes',
         kind: only ? 'private: links only this session and the one who joins' : 'group: whoever joins is also connected with everyone in this group',
         name: b.name,
         port: b.port,
@@ -232,7 +245,7 @@ export function createSession(opts: SessionOptions) {
         relay: relayInfo,
         group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
         viewer: viewerUrl(),
-        next: `Show the code to your human so they can send it to the coworker. The code works once.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`,
+        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`,
       }
     }),
   )

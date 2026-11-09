@@ -133,6 +133,19 @@ describe('bridge', () => {
     await expect(c.connect(code)).rejects.toThrow('refused this code')
   })
 
+  test('a code stops working when its time is up, unless it was made with no time limit', async () => {
+    const a = make('A', { tokenTtlMs: 1 })
+    a.open()
+    const expired = a.newCode()
+    const custom = a.newCode({ ttlMs: 60_000 })
+    const unlimited = a.newCode({ ttlMs: null })
+    await Bun.sleep(20)
+    await expect(make('B').connect(expired)).rejects.toThrow('refused this code')
+    await make('C').connect(custom)
+    await make('D').connect(unlimited)
+    await expect(make('E').connect(unlimited)).rejects.toThrow('refused this code')
+  })
+
   test('a fresh private code lets a second session connect to the same bridge only', async () => {
     const { a, b } = await pair()
     const c = make('C · Claude Code')

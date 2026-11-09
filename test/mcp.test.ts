@@ -250,6 +250,17 @@ test('three sessions join one group and one question goes to everyone', async ()
   await expect(lead('open_bridge', { port: 80 })).rejects.toThrow()
 }, 20_000)
 
+test('open_bridge makes codes that last 60 minutes by default, a chosen time, or with no time limit', async () => {
+  const s = await session('claude-code')
+  const minutesLeft = (expires: string) => Math.round((Date.parse(expires) - Date.now()) / 60_000)
+  expect(minutesLeft((await s('open_bridge', {})).expires)).toBe(60)
+  expect(minutesLeft((await s('open_bridge', { expires_minutes: 180 })).expires)).toBe(180)
+  const unlimited = await s('open_bridge', { expires_minutes: 0 })
+  expect(unlimited.expires).toStartWith('never')
+  expect(unlimited.next).toContain('no time limit')
+  await expect(s('open_bridge', { expires_minutes: -1 })).rejects.toThrow()
+})
+
 test('ending the session closes its bridge and removes its state file', async () => {
   const s = await session('claude-code')
   const { port } = await s('open_bridge', {})
