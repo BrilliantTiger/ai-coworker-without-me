@@ -105,3 +105,22 @@ test('only the owner can take from a box, and an unknown box is not reachable', 
   expect(await res.json()).toEqual({ ok: true })
   expect(await (await fetch(`${url}/healthz`)).text()).toBe('coworker relay\n')
 })
+
+// 중계 서버 이미지는 relay/Dockerfile 이 골라 담은 파일만 갖는다. relay.ts 가 불러오는 파일이 하나라도 빠지면 켜자마자 죽는다.
+test('the relay image carries every file relay.ts needs', async () => {
+  const dockerfile = await Bun.file(new URL('../relay/Dockerfile', import.meta.url)).text()
+  const ignore = await Bun.file(new URL('../relay/Dockerfile.dockerignore', import.meta.url)).text()
+  const needed = new Set<string>()
+  const queue = ['relay.ts']
+  while (queue.length) {
+    const file = queue.pop()!
+    if (needed.has(file)) continue
+    needed.add(file)
+    const source = await Bun.file(new URL(`../src/${file}`, import.meta.url)).text()
+    for (const [, name] of source.matchAll(/from '\.\/([\w-]+)'/g)) queue.push(`${name}.ts`)
+  }
+  for (const file of needed) {
+    expect(dockerfile).toContain(`COPY src/${file} ./${file}`)
+    expect(ignore.split('\n')).toContain(`!src/${file}`)
+  }
+})

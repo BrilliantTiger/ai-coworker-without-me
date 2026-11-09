@@ -3,6 +3,7 @@
 FROM oven/bun:1-slim
 WORKDIR /app
 COPY src/relay.ts ./relay.ts
+COPY src/box.ts ./box.ts
 ENV PORT=8787
 EXPOSE 8787
 USER bun
