@@ -59,6 +59,18 @@ AI 둘이 서로 맞장구치다 틀린 결론에 합의하지 않도록, 합의
 
 필요한 것은 [Bun](https://bun.sh) 하나다. 플러그인으로 설치하면 Claude Code와 Codex에 한 번에 들어간다.
 
+판은 둘이다. 코드는 같은 파일(`coworker.js`) 하나다.
+
+| | GitHub판 | 디렉터리판 |
+|---|---|---|
+| 폴더 | `plugin/` | `directory/` |
+| coworker 서버 | 플러그인이 각 PC에서 띄운다(stdio) | 사람이 각 PC에 깔아 둔 coworker 앱(`coworker.js serve`)에 주소로 붙는다 |
+| 플러그인 안의 코드 | `coworker.js` | 없다. 설정, 안내문(스킬), 아이콘뿐 |
+| 채널(메시지가 세션에 바로 들어옴) | 된다 | 안 된다. 기다리기로 받는다 |
+| 배포 | GitHub `@release` | Claude 플러그인 디렉터리 |
+
+디렉터리판이 따로 있는 이유는 Claude 플러그인 디렉터리가 인증된 조직이 아니면 사용자 PC에서 코드를 띄우는 플러그인을 받지 않아서다. 두 판 모두 중앙 서버가 없고 내용은 양 끝에서 암호화한다. 아래는 GitHub판 설치다. 디렉터리판은 [INSTALL.md](INSTALL.md#claude-플러그인-디렉터리판으로-쓸-때)에 있다.
+
 플러그인은 서버와 쓰는 패키지를 파일 하나(`plugin/coworker.js`)로 묶어 두어서, 설치하거나 켤 때 아무것도 깔지 않는다. Bun은 최신으로 쓴다(`bun upgrade`, chocolatey로 깔았으면 관리자 PowerShell에서 `choco upgrade bun -y`). 저장소를 직접 받아 `bun install`을 할 때는 1.3.x 같은 예전 Bun이 이 저장소의 `bun.lock`을 읽지 못한다.
 
 ### Claude Code: 플러그인
@@ -296,14 +308,27 @@ RELAY_KEY=<키> PORT=8787 bun src/relay.ts
 bun run release 0.3.0
 ```
 
-- 세 매니페스트(`package.json`, `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`)의 판 번호를 맞추고, 서버를 `plugin/coworker.js`로 다시 묶고, 시험, 타입 검사, `claude plugin validate`를 돌린다.
-- `Release v0.2.0` 커밋과 `v0.2.0` 태그를 만들어 올리고, `release` 브랜치를 그 커밋으로 옮기고, GitHub 릴리스를 만든다. 노트를 직접 쓰려면 `--notes-file <파일>`을 붙인다. 없으면 지난 릴리스 뒤의 커밋 제목을 적는다.
+- 네 매니페스트(`package.json`, `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`, `directory/.claude-plugin/plugin.json`)의 판 번호를 맞추고, 서버를 `plugin/coworker.js`로 다시 묶고, 시험, 타입 검사, `claude plugin validate`를 돌린다.
+- `Release v0.2.0` 커밋과 `v0.2.0` 태그를 만들어 올리고, `release` 브랜치를 그 커밋으로 옮기고, `coworker.js`를 붙인 GitHub 릴리스를 만든다. 노트를 직접 쓰려면 `--notes-file <파일>`을 붙인다. 없으면 지난 릴리스 뒤의 커밋 제목을 적는다.
 - Claude Code는 `plugin.json`의 판 번호가 바뀌어야 업데이트로 본다. 릴리스마다 번호를 올린다.
 - `main`에서, 올리지 않은 변경 없이, `origin/main`과 같은 상태에서만 돈다.
 
+## coworker 앱
+
+`bun coworker.js serve`로 띄우면 coworker 앱이 된다. 이 PC의 여러 세션을 `http://127.0.0.1:7690/mcp`(Streamable HTTP)로 받고, 세션마다 브릿지를 따로 둔다. 디렉터리판 플러그인이 여기에 붙는다.
+
+- `127.0.0.1`에서만 열고, 브라우저가 보내는 요청(Origin 헤더가 있는 요청)과 이 PC가 아닌 Host로 온 요청은 거절한다. 웹페이지가 앱을 부르지 못하게 하려는 것이다.
+- 세션 이름의 프로젝트 폴더는 클라이언트가 알려 주는 폴더(roots)에서 가져온다.
+- 세션이 끝나거나(DELETE), 도구 호출 없이 30분 동안 요청이 없으면 그 세션의 브릿지를 닫는다.
+- 이미 켜져 있으면 두 번째 `serve`는 그대로 물러난다. 포트는 `COWORKER_APP_PORT`로 바꾼다.
+- `bun coworker.js autostart on|off`: 로그인할 때 켜기·끄기. Mac은 LaunchAgent, Windows는 시작프로그램 폴더의 바로가기다.
+- 릴리스마다 `coworker.js`가 GitHub 릴리스 파일로 붙는다. `releases/latest/download/coworker.js`로 받는다.
+
 ## 플러그인 구조
 
-설치되는 것은 `plugin/` 폴더뿐이다. 매니페스트(`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`), 아이콘, README, LICENSE, 그리고 `src/`를 묶은 서버 `coworker.js`가 들어 있다. Claude Code와 Codex는 둘 다 `bun --no-install`로 `coworker.js`를 띄운다. 소스, 시험, 문서, `package.json`과 `bun.lock`은 저장소에만 있다.
+GitHub판으로 설치되는 것은 `plugin/` 폴더뿐이다. 매니페스트(`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`), 아이콘, README, LICENSE, 그리고 `src/`를 묶은 서버 `coworker.js`가 들어 있다. Claude Code와 Codex는 둘 다 `bun --no-install`로 `coworker.js`를 띄운다. 소스, 시험, 문서, `package.json`과 `bun.lock`은 저장소에만 있다.
+
+디렉터리판은 `directory/` 폴더다. 매니페스트에는 앱 주소(사용자 설정 `app_url`, 기본 `http://127.0.0.1:7690/mcp`)만 있고, 앱이 꺼져 있을 때 사람에게 설치 방법을 알려 주는 스킬, README, LICENSE, 아이콘이 있다. 코드는 없다.
 
 `src/`를 고쳤으면 `bun run build`로 다시 묶는다. 묶은 파일이 바깥 패키지를 불러오면 빌드가 실패한다. 릴리스 스크립트는 판 번호를 바꾼 뒤 늘 다시 묶는다.
 

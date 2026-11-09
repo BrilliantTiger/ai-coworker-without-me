@@ -9,7 +9,7 @@ import { join } from 'node:path'
 // Claude Code 는 plugin.json 의 version 이 바뀌어야 업데이트로 본다. 그래서 릴리스마다 판을 올린다.
 
 const root = join(import.meta.dir, '..')
-const MANIFESTS = ['package.json', 'plugin/.claude-plugin/plugin.json', 'plugin/.codex-plugin/plugin.json']
+const MANIFESTS = ['package.json', 'plugin/.claude-plugin/plugin.json', 'plugin/.codex-plugin/plugin.json', 'directory/.claude-plugin/plugin.json']
 const BUNDLE = 'plugin/coworker.js'
 const SEMVER = /^\d+\.\d+\.\d+$/
 
@@ -61,6 +61,7 @@ run(['bun', 'run', 'build'])
 run(['bun', 'test'])
 run(['bun', 'run', 'typecheck'])
 run(['claude', 'plugin', 'validate', 'plugin'])
+run(['claude', 'plugin', 'validate', 'directory'])
 run(['claude', 'plugin', 'validate', '.'])
 
 const changed = run(['git', 'status', '--porcelain'])
@@ -75,5 +76,6 @@ const notes = notesFile
 run(['git', 'tag', '-a', tag, '-m', `Release ${tag}`])
 run(['git', 'push', '-q', 'origin', 'main', tag])
 run(['git', 'push', '-q', 'origin', 'HEAD:refs/heads/release'])
-run(['gh', 'release', 'create', tag, '--title', tag, '--notes', notes || `Release ${tag}`])
+// 디렉터리판을 쓰는 사람이 받아서 앱으로 켜는 파일이다. releases/latest/download/coworker.js 로 받는다.
+run(['gh', 'release', 'create', tag, BUNDLE, '--title', tag, '--notes', notes || `Release ${tag}`])
 console.log(`released ${tag}: main, the release branch and the GitHub release now point at ${run(['git', 'rev-parse', '--short', 'HEAD'])}`)

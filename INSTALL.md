@@ -6,6 +6,7 @@ coworker를 처음 쓰는 사람이 설치하고 동료와 처음 연결하기�
 - [Windows](#windows)
 - [처음 연결하기 (Mac·Windows 같음)](#처음-연결하기-macwindows-같음)
 - [새 판으로 올리기](#새-판으로-올리기)
+- [Claude 플러그인 디렉터리판으로 쓸 때](#claude-플러그인-디렉터리판으로-쓸-때)
 
 ## 필요한 것
 
@@ -271,3 +272,37 @@ codex plugin add coworker@ai-coworker-without-me
 
 - Claude Code: `claude plugin list`의 `coworker@ai-coworker-without-me` 아래 `Version:`
 - Codex: `codex plugin list`의 `coworker@ai-coworker-without-me` 줄 `VERSION`
+
+## Claude 플러그인 디렉터리판으로 쓸 때
+
+위의 설치는 GitHub판이다. 플러그인이 각 PC에서 coworker 서버를 직접 띄우고, Claude Code를 채널로 켜면 메시지가 세션에 바로 들어온다. 동료끼리 쓸 때는 이쪽이 더 편하다.
+
+Claude 플러그인 디렉터리는 인증된 조직이 아니면 사용자 PC에서 코드를 띄우는 플러그인을 받지 않는다. 그래서 디렉터리에 올리는 판은 코드가 없고, 각 PC에 따로 깔아 둔 **coworker 앱**에 `http://127.0.0.1:7690/mcp` 로 붙는다. 앱은 GitHub판 플러그인과 같은 파일(`coworker.js`)을 `serve`로 띄운 것이다. 디렉터리판은 채널이 안 되므로 메시지를 기다리기로 받는다.
+
+### 앱 설치
+
+Bun이 있어야 한다([1. Bun](#1-bun) 참고). 아래 한 줄이 최신 릴리스의 `coworker.js`를 `~/.coworker/`에 받고, 로그인할 때마다 앱이 켜지게 한 뒤 지금 바로 켠다.
+
+Mac:
+
+```
+mkdir -p ~/.coworker && curl -fsSL https://github.com/BrilliantTiger/ai-coworker-without-me/releases/latest/download/coworker.js -o ~/.coworker/coworker.js && bun ~/.coworker/coworker.js autostart on
+```
+
+Windows (PowerShell):
+
+```
+New-Item -ItemType Directory -Force "$HOME\.coworker" | Out-Null; curl.exe -fsSL https://github.com/BrilliantTiger/ai-coworker-without-me/releases/latest/download/coworker.js -o "$HOME\.coworker\coworker.js"; bun "$HOME\.coworker\coworker.js" autostart on
+```
+
+- Mac은 사용자 LaunchAgent(`~/Library/LaunchAgents/com.brillianttiger.coworker.plist`)로, Windows는 시작프로그램 폴더의 바로가기(`coworker.lnk`, 최소화된 창)로 켠다. 관리자 권한은 필요 없다.
+- 켜져 있는지는 브라우저나 `curl http://127.0.0.1:7690/health`로 본다. `coworker app <판>`이 나오면 된 것이다.
+- 끄려면 `bun ~/.coworker/coworker.js autostart off`(Windows는 `bun "$HOME\.coworker\coworker.js" autostart off`)를 실행한다.
+- 새 판으로 올릴 때는 같은 한 줄을 다시 실행한다.
+- 7690번을 다른 프로그램이 쓰고 있으면 환경변수 `COWORKER_APP_PORT`로 다른 포트를 정하고, 디렉터리판 플러그인 설정의 앱 주소도 같이 바꾼다.
+- 방화벽은 GitHub판과 같다. 앱이 처음 브릿지를 열 때 Windows에서 허용 창이 뜨면 「개인 네트워크」에 체크한다.
+
+### 쓰는 법
+
+앱을 켠 뒤 Claude Code 세션을 새로 켜고, 지금처럼 "coworker 브릿지 열어줘"라고 한다. 상대는 GitHub판이든 디렉터리판이든 상관없이 연결된다. 앱이 꺼져 있으면 AI가 이 설치 방법을 알려 준다.
+

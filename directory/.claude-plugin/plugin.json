@@ -1,0 +1,35 @@
+{
+  "name": "coworker",
+  "version": "0.3.0",
+  "displayName": "AI Co-worker Without Me",
+  "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network or VPN, through the coworker app running on each computer.",
+  "author": {
+    "name": "BrilliantTiger"
+  },
+  "homepage": "https://brillianttigercorp.com/ai-coworker-without-me/",
+  "repository": "https://github.com/BrilliantTiger/ai-coworker-without-me",
+  "documentationUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md",
+  "supportUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/issues",
+  "privacyPolicyUrl": "https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "codex",
+    "collaboration",
+    "coworker"
+  ],
+  "mcpServers": {
+    "coworker": {
+      "type": "http",
+      "url": "${user_config.app_url}"
+    }
+  },
+  "userConfig": {
+    "app_url": {
+      "type": "string",
+      "title": "coworker app address",
+      "description": "Where the coworker app on this computer listens. Change it only if you started the app on another port (COWORKER_APP_PORT).",
+      "default": "http://127.0.0.1:7690/mcp"
+    }
+  }
+}

@@ -63,3 +63,38 @@ test('the bundled server starts from a copy of the plugin folder with no package
     await client.close()
   }
 })
+
+test('the same bundle runs as the coworker app, and the directory plugin holds no code', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coworker-app-bundle-'))
+  temps.push(dir)
+  cpSync(join(pluginDir, 'coworker.js'), join(dir, 'coworker.js'))
+  const probe = Bun.serve({ port: 0, fetch: () => new Response('') })
+  const port = probe.port!
+  probe.stop(true)
+  const app = Bun.spawn([process.execPath, '--no-install', join(dir, 'coworker.js'), 'serve'], {
+    cwd: dir,
+    env: { ...process.env, COWORKER_HOME: join(dir, 'home'), COWORKER_APP_PORT: String(port) },
+    stdout: 'pipe',
+    stderr: 'inherit',
+  })
+  try {
+    let health = ''
+    for (let i = 0; i < 50 && !health; i++) {
+      health = await fetch(`http://127.0.0.1:${port}/health`).then(r => r.text()).catch(() => '')
+      if (!health) await Bun.sleep(100)
+    }
+    expect(health).toBe(`coworker app ${json(join(root, 'package.json')).version}\n`)
+  } finally {
+    app.kill()
+  }
+  // 디렉터리판: 앱 주소만 두고, 코드도 훅도 없다.
+  const directory = join(root, 'directory')
+  const manifest = json(join(directory, '.claude-plugin', 'plugin.json'))
+  expect(manifest.mcpServers.coworker).toEqual({ type: 'http', url: '${user_config.app_url}' })
+  expect(manifest.userConfig.app_url.default).toBe('http://127.0.0.1:7690/mcp')
+  expect(manifest.hooks).toBeUndefined()
+  expect(manifest.version).toBe(json(join(root, 'package.json')).version)
+  const allowed = /\.(md|json|png|txt)$|^LICENSE$/
+  const walk = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap(e => (e.isDirectory() ? walk(join(d, e.name)) : [e.name]))
+  for (const f of walk(directory)) expect(f).toMatch(allowed)
+}, 15_000)
