@@ -299,7 +299,7 @@ New-Item -ItemType Directory -Force "$HOME\.coworker" | Out-Null; curl.exe -fsSL
 - 켜져 있는지는 브라우저나 `curl http://127.0.0.1:7690/health`로 본다. `coworker app <판>`이 나오면 된 것이다.
 - 끄려면 `bun ~/.coworker/coworker.js autostart off`(Windows는 `bun "$HOME\.coworker\coworker.js" autostart off`)를 실행한다.
 - 새 판으로 올릴 때는 같은 한 줄을 다시 실행한다.
-- 7690번을 다른 프로그램이 쓰고 있으면 환경변수 `COWORKER_APP_PORT`로 다른 포트를 정하고, 디렉터리판 플러그인 설정의 앱 주소도 같이 바꾼다.
+- 디렉터리판 플러그인은 `127.0.0.1:7690`에만 붙는다. 7690번을 다른 프로그램이 쓰고 있으면 그 프로그램을 끄고 앱을 다시 켠다.
 - 방화벽은 GitHub판과 같다. 앱이 처음 브릿지를 열 때 Windows에서 허용 창이 뜨면 「개인 네트워크」에 체크한다.
 
 ### 쓰는 법

@@ -320,7 +320,7 @@ bun run release 0.3.0
 - `127.0.0.1`에서만 열고, 브라우저가 보내는 요청(Origin 헤더가 있는 요청)과 이 PC가 아닌 Host로 온 요청은 거절한다. 웹페이지가 앱을 부르지 못하게 하려는 것이다.
 - 세션 이름의 프로젝트 폴더는 클라이언트가 알려 주는 폴더(roots)에서 가져온다.
 - 세션이 끝나거나(DELETE), 도구 호출 없이 30분 동안 요청이 없으면 그 세션의 브릿지를 닫는다.
-- 이미 켜져 있으면 두 번째 `serve`는 그대로 물러난다. 포트는 `COWORKER_APP_PORT`로 바꾼다.
+- 이미 켜져 있으면 두 번째 `serve`는 그대로 물러난다. 포트는 `COWORKER_APP_PORT`로 바꿀 수 있지만, 디렉터리판 플러그인은 7690에만 붙는다.
 - `bun coworker.js autostart on|off`: 로그인할 때 켜기·끄기. Mac은 LaunchAgent, Windows는 시작프로그램 폴더의 바로가기다.
 - 릴리스마다 `coworker.js`가 GitHub 릴리스 파일로 붙는다. `releases/latest/download/coworker.js`로 받는다.
 
@@ -328,7 +328,7 @@ bun run release 0.3.0
 
 GitHub판으로 설치되는 것은 `plugin/` 폴더뿐이다. 매니페스트(`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`), 아이콘, README, LICENSE, 그리고 `src/`를 묶은 서버 `coworker.js`가 들어 있다. Claude Code와 Codex는 둘 다 `bun --no-install`로 `coworker.js`를 띄운다. 소스, 시험, 문서, `package.json`과 `bun.lock`은 저장소에만 있다.
 
-디렉터리판은 `directory/` 폴더다. 매니페스트에는 앱 주소(사용자 설정 `app_url`, 기본 `http://127.0.0.1:7690/mcp`)만 있고, 앱이 꺼져 있을 때 사람에게 설치 방법을 알려 주는 스킬, README, LICENSE, 아이콘이 있다. 코드는 없다.
+디렉터리판은 `directory/` 폴더다. 매니페스트에는 고정된 앱 주소 `http://127.0.0.1:7690/mcp`만 있고, 앱이 꺼져 있을 때 사람에게 설치 방법을 알려 주는 스킬, README, LICENSE, 아이콘이 있다. 코드는 없다.
 
 `src/`를 고쳤으면 `bun run build`로 다시 묶는다. 묶은 파일이 바깥 패키지를 불러오면 빌드가 실패한다. 릴리스 스크립트는 판 번호를 바꾼 뒤 늘 다시 묶는다.
 

@@ -21,15 +21,7 @@
   "mcpServers": {
     "coworker": {
       "type": "http",
-      "url": "${user_config.app_url}"
-    }
-  },
-  "userConfig": {
-    "app_url": {
-      "type": "string",
-      "title": "coworker app address",
-      "description": "Where the coworker app on this computer listens. Change it only if you started the app on another port (COWORKER_APP_PORT).",
-      "default": "http://127.0.0.1:7690/mcp"
+      "url": "http://127.0.0.1:7690/mcp"
     }
   }
 }

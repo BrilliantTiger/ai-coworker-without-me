@@ -4,6 +4,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { APP_PORT } from '../src/serve'
 
 // 설치되는 것은 plugin/ 폴더뿐이다. 사용자 PC에서 아무것도 깔지 않고 그 폴더만으로 서버가 떠야 한다.
 const root = join(import.meta.dir, '..')
@@ -87,11 +88,12 @@ test('the same bundle runs as the coworker app, and the directory plugin holds n
   } finally {
     app.kill()
   }
-  // 디렉터리판: 앱 주소만 두고, 코드도 훅도 없다.
+  // 디렉터리판: 고정된 앱 주소만 두고, 코드도 훅도 없다. 디렉터리가 어디로 붙는지 끝까지 읽을 수 있게 변수를 쓰지 않는다.
   const directory = join(root, 'directory')
   const manifest = json(join(directory, '.claude-plugin', 'plugin.json'))
-  expect(manifest.mcpServers.coworker).toEqual({ type: 'http', url: '${user_config.app_url}' })
-  expect(manifest.userConfig.app_url.default).toBe('http://127.0.0.1:7690/mcp')
+  expect(manifest.mcpServers.coworker).toEqual({ type: 'http', url: `http://127.0.0.1:${APP_PORT}/mcp` })
+  expect(JSON.stringify(manifest)).not.toContain('${')
+  expect(manifest.userConfig).toBeUndefined()
   expect(manifest.hooks).toBeUndefined()
   expect(manifest.version).toBe(json(join(root, 'package.json')).version)
   const allowed = /\.(md|json|png|txt)$|^LICENSE$/
