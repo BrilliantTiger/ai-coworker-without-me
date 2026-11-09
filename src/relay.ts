@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { timingSafeEqual } from 'node:crypto'
 import type { Server } from 'bun'
+import { boxOf } from './box'
 
 // 중계 서버. VPN 없이 서로 다른 공유기 아래에 있는 PC끼리 이어 준다.
 // 인터넷에서 닿는 곳에 하나 띄우면, 두 PC는 여기로 나가는 연결만 한다. 들어오는 연결을 받을 필요가 없다.
@@ -13,7 +14,7 @@ import type { Server } from 'bun'
 // 우편함을 열어 꺼내 가는 것은 비밀을 아는 주인만 된다.
 // RELAY_KEY 를 정해 두면 그 키를 아는 세션만 우편함을 연다. 남이 이 서버를 공짜 중계로 쓰지 못하게 한다.
 
-export const boxOf = (secret: string) => createHash('sha256').update(secret).digest('base64url').slice(0, 22)
+export { boxOf }
 
 export type RelayOptions = {
   port?: number

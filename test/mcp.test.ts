@@ -269,3 +269,16 @@ test('Claude Code waits until something arrives; Codex ends before it gives up o
   expect(waitSeconds(undefined, true)).toBe(50)
   expect(waitSeconds(300, true)).toBe(55)
 })
+
+test('a Claude Code session not started as a channel passes on how to start one, once', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-hint-mcp-'))
+  const claude = await session('claude-code', { COWORKER_HOME: own, CLAUDECODE: '1' })
+  const first = await claude('open_bridge', {})
+  expect(first.next).toContain('claude-cw')
+  expect(first.next).toContain('plugin:coworker@ai-coworker-without-me')
+  const again = await claude('open_bridge', {})
+  expect(again.next).not.toContain('claude-cw')
+  // Codex 는 채널이 없어서 이 안내를 받지 않는다.
+  const codex = await session('codex-mcp-client', { COWORKER_HOME: mkdtempSync(join(tmpdir(), 'coworker-hint-mcp-')), CLAUDECODE: '' })
+  expect((await codex('open_bridge', {})).next).not.toContain('claude-cw')
+})

@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "coworker",
-      "source": "./",
+      "source": "./plugin",
       "description": "Let coworkers' AI sessions ask and answer each other directly."
     }
   ]

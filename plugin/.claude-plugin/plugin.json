@@ -14,7 +14,7 @@
   "mcpServers": {
     "coworker": {
       "command": "bun",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/src/start.ts"],
+      "args": ["--no-install", "${CLAUDE_PLUGIN_ROOT}/coworker.js"],
       "env": {
         "COWORKER_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
         "COWORKER_PORTS": "${user_config.ports}",
@@ -24,14 +24,6 @@
     }
   },
   "channels": [{ "server": "coworker", "displayName": "Coworker" }],
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup",
-        "hooks": [{ "type": "command", "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/hint.ts\"", "timeout": 10 }]
-      }
-    ]
-  },
   "userConfig": {
     "ports": {
       "type": "string",

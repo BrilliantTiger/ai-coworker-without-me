@@ -7,6 +7,7 @@
   "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network or VPN.",
   "scripts": {
     "mcp": "bun src/mcp.ts",
+    "build": "bun scripts/build.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "release": "bun scripts/release.ts"

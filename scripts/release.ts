@@ -3,13 +3,14 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // 릴리스: bun run release 0.2.0 [--notes-file 노트.md]
-// 세 매니페스트의 판 번호를 맞추고, 시험을 돌리고, 커밋과 태그(v0.2.0)를 만들어 올린 뒤
-// release 브랜치를 그 커밋으로 옮기고 GitHub 릴리스를 만든다.
+// 세 매니페스트의 판 번호를 맞추고, 서버를 plugin/coworker.js 로 다시 묶고, 시험을 돌리고,
+// 커밋과 태그(v0.2.0)를 만들어 올린 뒤 release 브랜치를 그 커밋으로 옮기고 GitHub 릴리스를 만든다.
 // 플러그인을 깐 사람과 디렉터리는 release 브랜치를 따라간다. main 에 올린 것은 릴리스해야 나간다.
 // Claude Code 는 plugin.json 의 version 이 바뀌어야 업데이트로 본다. 그래서 릴리스마다 판을 올린다.
 
 const root = join(import.meta.dir, '..')
-const MANIFESTS = ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']
+const MANIFESTS = ['package.json', 'plugin/.claude-plugin/plugin.json', 'plugin/.codex-plugin/plugin.json']
+const BUNDLE = 'plugin/coworker.js'
 const SEMVER = /^\d+\.\d+\.\d+$/
 
 function run(cmd: string[], quiet = false): string {
@@ -55,13 +56,16 @@ if (released ? !newer(version, released) : current.some(v => v && newer(v, versi
   throw new Error(`${version} must be newer than ${released ?? current.join(', ')}`)
 
 for (const file of MANIFESTS) setVersion(file, version)
+// 서버가 알리는 판 번호도 package.json 에서 가져오므로, 판을 바꾼 뒤에 묶는다.
+run(['bun', 'run', 'build'])
 run(['bun', 'test'])
 run(['bun', 'run', 'typecheck'])
+run(['claude', 'plugin', 'validate', 'plugin'])
 run(['claude', 'plugin', 'validate', '.'])
 
 const changed = run(['git', 'status', '--porcelain'])
 if (changed) {
-  run(['git', 'add', ...MANIFESTS])
+  run(['git', 'add', ...MANIFESTS, BUNDLE])
   run(['git', 'commit', '-q', '-m', `Release ${tag}`])
 }
 // 노트 파일이 없으면 지난 릴리스 뒤의 커밋 제목을 적는다.

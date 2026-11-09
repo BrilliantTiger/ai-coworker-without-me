@@ -2,7 +2,7 @@ import { afterAll, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HINT, startupHint } from '../src/hint'
+import { HINT, firstTimeHint } from '../src/hint'
 
 const homes: string[] = []
 const newHome = () => {
@@ -12,18 +12,11 @@ const newHome = () => {
 }
 afterAll(() => homes.forEach(h => rmSync(join(h, '..'), { recursive: true, force: true })))
 
-test('the first session started without the channel option shows how to start one, once', () => {
+test('the hint on how to start Claude Code as a channel is given once', () => {
   const home = newHome()
-  expect(startupHint(home, () => 'claude')).toBe(HINT)
+  expect(firstTimeHint(home)).toBe(HINT)
   expect(existsSync(join(home, 'hint-shown'))).toBe(true)
-  // 한 번 보였으면 실행 인자를 다시 읽지도 않는다.
-  expect(startupHint(home, () => { throw new Error('read the command line again') })).toBeUndefined()
-})
-
-test('a session already started as a channel shows nothing and is not told again later', () => {
-  const home = newHome()
-  expect(startupHint(home, () => 'claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me')).toBeUndefined()
-  expect(startupHint(home, () => 'claude')).toBeUndefined()
+  expect(firstTimeHint(home)).toBeUndefined()
 })
 
 test('the hint names the plugin channel and points to the install guide', () => {

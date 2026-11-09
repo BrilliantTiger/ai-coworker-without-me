@@ -6,7 +6,7 @@ import { isAgreement, renderAgreement, type Agreement } from './agreement'
 import { decodeCode, encodeCode } from './code'
 import { fromB64, newKeyPair, open, randomToken, seal, toB64, type KeyPair } from './crypto'
 import { hostForUrl, localAddresses } from './net'
-import { boxOf } from './relay'
+import { boxOf } from './box'
 import { assertNoSecrets } from './secrets'
 
 // 사내 방화벽에 열어 달라고 요청하기 쉽게 정해 둔 범위.

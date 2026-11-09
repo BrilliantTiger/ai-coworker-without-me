@@ -4,8 +4,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { z } from 'zod'
+import { version } from '../package.json'
 import { Bridge, parsePorts, type BridgeEvent } from './bridge'
 import { detectChannel } from './channel'
+import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { Viewer } from './viewer'
@@ -61,11 +63,18 @@ Safety
 
 // 원격 실행 승인(claude/channel/permission)은 켜지 않는다. 켜면 상대가 이 PC의 명령 실행을 승인할 수 있다.
 const server = new McpServer(
-  { name: 'coworker', version: '0.1.0' },
+  { name: 'coworker', version },
   { instructions: INSTRUCTIONS, capabilities: channel ? { experimental: { 'claude/channel': {} } } : {} },
 )
 
 const home = process.env.COWORKER_HOME ?? join(homedir(), '.coworker')
+
+// 채널 없이 켠 Claude Code 세션이면, 처음 브릿지를 열거나 연결할 때 한 번 채널로 켜는 법을 사람에게 전하게 한다.
+const channelHint = () => {
+  if (channel || process.env.CLAUDECODE !== '1') return ''
+  const text = firstTimeHint(home)
+  return text ? ` Also pass this on to your human once, word for word:\n${text}` : ''
+}
 let bridge: Bridge | undefined
 // 회사가 다른 범위만 열어 주면 MCP 등록 설정의 환경변수로 기본 범위를 바꾼다.
 const portsText = process.env.COWORKER_PORTS
@@ -224,7 +233,7 @@ server.registerTool(
       relay: relayInfo,
       group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
       viewer: viewerUrl(),
-      next: `Show the code to your human so they can send it to the coworker. The code works once.${warn} ${viewerNote(viewerUrl())} ${LISTEN}`,
+      next: `Show the code to your human so they can send it to the coworker. The code works once.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`,
     }
   }),
 )
@@ -254,7 +263,7 @@ server.registerTool(
       myPort: b.port,
       relay: relayInfo,
       viewer: viewerUrl(),
-      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}`,
+      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`,
     }
   }),
 )
