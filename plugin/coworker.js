@@ -23949,7 +23949,7 @@ class StdioServerTransport {
 import { homedir } from "os";
 import { basename, join as join3 } from "path";
 // package.json
-var version2 = "0.2.0";
+var version2 = "0.3.0";
 
 // src/bridge.ts
 import { randomUUID } from "crypto";
