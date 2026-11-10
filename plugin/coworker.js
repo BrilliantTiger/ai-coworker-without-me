@@ -18716,7 +18716,7 @@ import { randomUUID as randomUUID3 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.5";
+var version2 = "0.4.6";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
