@@ -35,7 +35,8 @@ export async function stillRunning(saved: SavedBridge): Promise<boolean> {
 }
 
 // stdio 서버가 뜰 때: 이 세션 ID로 저장해 둔 브릿지가 있고, 아무도 쓰고 있지 않으면 되살릴 것으로 돌려준다.
-// 다른 프로세스가 같은 브릿지를 돌리고 있으면 이 세션은 새 이름표를 쓴다(sessionId 없음).
+// Claude Code 가 서버를 다시 띄울 때는 앞 프로세스가 막 끝나는 중일 수 있어서 잠깐 기다린다.
+// 그래도 다른 프로세스가 같은 브릿지를 돌리고 있으면 이 세션은 새 이름표를 쓴다(sessionId 없음).
 export async function findSession(home: string, id: string | undefined): Promise<{ sessionId?: string; restore?: SavedBridge }> {
   if (!id) return {}
   const path = savedPath(home, id)
@@ -45,8 +46,12 @@ export async function findSession(home: string, id: string | undefined): Promise
     rmSync(path, { force: true })
     return { sessionId: id }
   }
-  if (await stillRunning(saved)) return {}
-  return { sessionId: id, restore: saved }
+  for (let i = 0; i < 10; i++) {
+    // 앞 프로세스가 끝나면서 마지막 상태를 남겼을 수 있으니 다시 읽는다.
+    if (!(await stillRunning(saved))) return { sessionId: id, restore: readSaved(path) ?? saved }
+    await Bun.sleep(200)
+  }
+  return {}
 }
 
 // 오래된 상태 파일을 지운다. 저장하다 남은 임시 파일도 함께 지운다.

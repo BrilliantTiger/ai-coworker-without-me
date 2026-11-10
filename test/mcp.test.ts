@@ -349,7 +349,7 @@ async function ended(client: Client, homeDir: string, id: string) {
 
 test('the same Claude Code session started again gets its bridge back by itself, and the other side needs no new code', async () => {
   const own = mkdtempSync(join(tmpdir(), 'coworker-resume-'))
-  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-one' }
+  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-one', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
   const first = new Client({ name: 'claude-code', version: '1.0.0' })
   const claude = await session('claude-code', env, first)
   const codex = await session('codex-mcp-client')
@@ -400,4 +400,24 @@ test('a session without a session id, like Codex, brings its bridge back with re
   // 사람이 닫으라고 하면 저장한 상태도 지운다. 다시 되살릴 수 없다.
   await again('close_bridge')
   expect(readSaved(savedPath(own, opened.session_id))).toBeUndefined()
+}, 30_000)
+
+test('the plugin server and a directly added server in the same Claude Code session do not take each other\'s bridge', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-resume-'))
+  const base = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-two' }
+  const pluginEnv = { ...base, CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
+  const firstPlugin = new Client({ name: 'claude-code', version: '1.0.0' })
+  const firstDirect = new Client({ name: 'claude-code', version: '1.0.0' })
+  const plugin = await session('claude-code', pluginEnv, firstPlugin)
+  await session('claude-code', base, firstDirect)
+  const opened = await plugin('open_bridge', {})
+  expect(opened.session_id).toBe('session-two')
+  await ended(firstPlugin, own, 'session-two')
+  await firstDirect.close()
+
+  // 같은 세션을 다시 켰다. 브릿지를 열었던 플러그인 서버만 되살린다.
+  const again = await session('claude-code', pluginEnv)
+  const direct = await session('claude-code', base)
+  expect(await again('list_connections')).toMatchObject({ session_id: 'session-two', me: { open: true, port: opened.port } })
+  expect(await direct('list_connections')).toMatchObject({ session_id: 'session-two.direct', me: { open: false } })
 }, 30_000)

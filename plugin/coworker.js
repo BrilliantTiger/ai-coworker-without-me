@@ -17873,9 +17873,12 @@ async function findSession(home, id) {
     rmSync3(path, { force: true });
     return { sessionId: id };
   }
-  if (await stillRunning(saved))
-    return {};
-  return { sessionId: id, restore: saved };
+  for (let i = 0;i < 10; i++) {
+    if (!await stillRunning(saved))
+      return { sessionId: id, restore: readSaved(path) ?? saved };
+    await Bun.sleep(200);
+  }
+  return {};
 }
 function pruneSaved(home, keepMs = KEEP_MS) {
   const dir = join3(home, "sessions");
@@ -27078,7 +27081,8 @@ else
 async function stdio() {
   const channel = detectChannel();
   pruneSaved(home);
-  const claudeSession = process.env.CLAUDECODE === "1" ? process.env.CLAUDE_CODE_SESSION_ID || undefined : undefined;
+  const id = process.env.CLAUDECODE === "1" ? process.env.CLAUDE_CODE_SESSION_ID : undefined;
+  const claudeSession = id ? `${id}${process.env.CLAUDE_PLUGIN_ROOT ? "" : ".direct"}` : undefined;
   const { sessionId, restore } = await findSession(home, claudeSession);
   const session = createSession({
     channel,

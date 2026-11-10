@@ -24,8 +24,10 @@ async function stdio() {
   // 상대 메시지를 세션에 바로 밀어 넣는다. 아니면 AI가 wait_for_message 로 기다린다.
   const channel = detectChannel()
   // Claude Code 는 세션 ID를 넘겨 준다. 같은 세션을 다시 켜면(claude --resume) 저장해 둔 브릿지를 되살린다.
+  // 한 세션에 플러그인으로 뜬 서버와 직접 등록한 서버가 함께 뜰 수 있어서, 서로의 브릿지를 되살리지 않게 이름표를 나눈다.
   pruneSaved(home)
-  const claudeSession = process.env.CLAUDECODE === '1' ? process.env.CLAUDE_CODE_SESSION_ID || undefined : undefined
+  const id = process.env.CLAUDECODE === '1' ? process.env.CLAUDE_CODE_SESSION_ID : undefined
+  const claudeSession = id ? `${id}${process.env.CLAUDE_PLUGIN_ROOT ? '' : '.direct'}` : undefined
   const { sessionId, restore } = await findSession(home, claudeSession)
   const session = createSession({
     channel,
