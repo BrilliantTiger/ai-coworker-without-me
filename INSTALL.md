@@ -10,7 +10,7 @@ coworker를 처음 쓰는 사람이 설치하고 동료와 처음 연결하기�
 
 ## 필요한 것
 
-- Claude Code나 Codex. 개인 계정(Claude Pro·Max, ChatGPT)으로 쓴다. 둘 중 하나만 있어도 된다. 회사 Team·Enterprise 계정으로 로그인한 Claude Code는 관리자가 채널을 켜 두지 않으면 채널이 막힌다. 그래도 AI가 기다리기 도구로 받아서 쓸 수는 있다.
+- Claude Code나 Codex. 개인 계정(Claude Pro·Max, ChatGPT)으로 쓴다. 둘 중 하나만 있어도 된다. 회사 Team·Enterprise 계정으로 로그인한 Claude Code는 관리자가 채널을 켜 두지 않으면 채널이 막힌다. 그래도 AI가 백그라운드 명령으로 받아서 쓸 수는 있다.
 - [Bun](https://bun.sh). 아래에서 설치한다.
 - 두 PC가 같은 사내망에 있거나 회사 VPN에 들어와 있어야 한다. VPN 없이 다른 네트워크에 있으면 중계 서버가 필요하다. README의 [중계 서버](README.md#vpn-없이-다른-네트워크의-동료와-중계-서버)를 본다.
 - 쓰기 전에 각자 개인 계정의 학습 설정을 끈다.
@@ -48,7 +48,7 @@ codex plugin add coworker@ai-coworker-without-me
 
 ### 3. 허용 창 줄이기 (Claude Code, 해도 되고 안 해도 된다)
 
-Claude Code는 coworker 도구를 쓸 때마다 허용 창을 띄운다. 읽기만 하는 도구는 허용 창 없이 쓰게 하려면 `~/.claude/settings.json`에 아래를 넣는다. 파일이 이미 있으면 `permissions.allow` 목록에 네 줄만 더한다.
+Claude Code는 coworker 도구를 쓸 때마다 허용 창을 띄운다. 읽기만 하는 도구는 허용 창 없이 쓰게 하려면 `~/.claude/settings.json`에 아래를 넣는다. 파일이 이미 있으면 `permissions.allow` 목록에 다섯 줄만 더한다.
 
 ```json
 {
@@ -57,7 +57,8 @@ Claude Code는 coworker 도구를 쓸 때마다 허용 창을 띄운다. 읽기�
       "mcp__plugin_coworker_coworker__wait_for_message",
       "mcp__plugin_coworker_coworker__inbox",
       "mcp__plugin_coworker_coworker__list_connections",
-      "mcp__plugin_coworker_coworker__read_conversation"
+      "mcp__plugin_coworker_coworker__read_conversation",
+      "Bash(curl -s http://127.0.0.1:*/next)"
     ]
   }
 }
@@ -77,8 +78,8 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 
 - 경고 화면이 뜨면 「I am using this for local development」를 고른다. 직접 만든 채널이라 켤 때마다 뜬다.
 - 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다.
-- 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 기다리기 도구로 받는다.
-- 이렇게 켜야 상대가 보낸 것이 세션에 바로 들어오고 AI가 알아서 답한다. 옵션 없이 켜도 쓸 수는 있지만, AI가 기다리기 도구를 붙잡고 기다린다.
+- 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 백그라운드 명령으로 받는다.
+- 이렇게 켜야 상대가 보낸 것이 세션에 바로 들어오고 AI가 알아서 답한다. 옵션 없이 켜도 쓸 수 있다. 그때는 AI가 기다리는 명령을 백그라운드로 걸어 두고, 메시지가 오면 깨어나 답한다.
 - 옵션 없이 켠 세션에서 처음 브릿지를 열거나 연결하면, AI가 이렇게 켜라는 안내를 한 번 전한다.
 
 **`claude-cw`로 줄이기.** 이 옵션은 `settings.json`에 넣을 수 없고 켤 때마다 붙여야 한다. 별칭을 한 번 만들어 두면 `claude-cw`만 치면 된다.
@@ -134,7 +135,7 @@ codex plugin add coworker@ai-coworker-without-me
 
 ### 3. 허용 창 줄이기 (Claude Code, 해도 되고 안 해도 된다)
 
-`%USERPROFILE%\.claude\settings.json`에 아래를 넣는다. 파일이 이미 있으면 `permissions.allow` 목록에 네 줄만 더한다.
+`%USERPROFILE%\.claude\settings.json`에 아래를 넣는다. 파일이 이미 있으면 `permissions.allow` 목록에 다섯 줄만 더한다.
 
 ```json
 {
@@ -143,7 +144,8 @@ codex plugin add coworker@ai-coworker-without-me
       "mcp__plugin_coworker_coworker__wait_for_message",
       "mcp__plugin_coworker_coworker__inbox",
       "mcp__plugin_coworker_coworker__list_connections",
-      "mcp__plugin_coworker_coworker__read_conversation"
+      "mcp__plugin_coworker_coworker__read_conversation",
+      "Bash(curl -s http://127.0.0.1:*/next)"
     ]
   }
 }
@@ -161,7 +163,7 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 
 - 경고 화면이 뜨면 「I am using this for local development」를 고른다. 직접 만든 채널이라 켤 때마다 뜬다.
 - 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다.
-- 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 기다리기 도구로 받는다.
+- 경고 줄이 있으면 채널이 켜지지 않은 것이다. 이대로 두면 상대가 보낸 것이 세션에 들어오지 않는다. 옵션 없이 다시 켜면 AI가 백그라운드 명령으로 받는다.
 - 옵션 없이 켠 세션에서 처음 브릿지를 열거나 연결하면, AI가 이렇게 켜라는 안내를 한 번 전한다.
 
 **`claude-cw`로 줄이기.** 이 옵션은 `settings.json`에 넣을 수 없고 켤 때마다 붙여야 한다. PowerShell에서 아래를 한 번 실행하면 `claude`가 있는 폴더에 `claude-cw.cmd`가 생긴다.
@@ -277,7 +279,7 @@ codex plugin add coworker@ai-coworker-without-me
 
 위의 설치는 GitHub판이다. 플러그인이 각 PC에서 coworker 서버를 직접 띄우고, Claude Code를 채널로 켜면 메시지가 세션에 바로 들어온다. 동료끼리 쓸 때는 이쪽이 더 편하다.
 
-Claude 플러그인 디렉터리는 인증된 조직이 아니면 사용자 PC에서 코드를 띄우는 플러그인을 받지 않는다. 그래서 디렉터리에 올리는 판은 코드가 없고, 각 PC에 따로 깔아 둔 **coworker 앱**에 `http://127.0.0.1:7690/mcp` 로 붙는다. 앱은 GitHub판 플러그인과 같은 파일(`coworker.js`)을 `serve`로 띄운 것이다. 디렉터리판은 채널이 안 되므로 메시지를 기다리기로 받는다.
+Claude 플러그인 디렉터리는 인증된 조직이 아니면 사용자 PC에서 코드를 띄우는 플러그인을 받지 않는다. 그래서 디렉터리에 올리는 판은 코드가 없고, 각 PC에 따로 깔아 둔 **coworker 앱**에 `http://127.0.0.1:7690/mcp` 로 붙는다. 앱은 GitHub판 플러그인과 같은 파일(`coworker.js`)을 `serve`로 띄운 것이다. 디렉터리판은 채널이 안 되므로 AI가 기다리는 명령을 백그라운드로 걸어 두고 받는다.
 
 ### 앱 설치
 

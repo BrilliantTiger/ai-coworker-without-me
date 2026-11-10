@@ -25411,6 +25411,9 @@ ${f.evidence}`).join(`
     const delivery = peer ? await this.sendOrQueue(peer, { type: "msg", msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`;
     return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file };
   }
+  unread() {
+    return this.events;
+  }
   async wait(timeoutMs, signal) {
     if (timeoutMs <= 0)
       return this.events.splice(0);
@@ -26100,6 +26103,7 @@ class Viewer {
   bridge;
   server;
   token = randomToken();
+  listener;
   constructor(bridge) {
     this.bridge = bridge;
   }
@@ -26111,11 +26115,18 @@ class Viewer {
     return this.url;
   }
   stop() {
+    this.listener = undefined;
     this.server?.stop(true);
     this.server = undefined;
   }
   data() {
     return { me: this.bridge.describe(), conversations: [...this.bridge.threads.values()] };
+  }
+  get listening() {
+    return this.listener !== undefined;
+  }
+  listenCommand(platform = process.platform) {
+    return `${platform === "win32" ? "curl.exe" : "curl"} -s ${this.start()}/next`;
   }
   handle(req) {
     const path = new URL(req.url).pathname;
@@ -26132,7 +26143,31 @@ class Viewer {
       return Response.json(this.data(), { headers });
     if (req.method === "GET" && path === `/${this.token}/events`)
       return this.events(req, headers);
+    if (req.method === "GET" && path === `/${this.token}/next`)
+      return this.next(req, headers);
     return new Response("not found", { status: 404 });
+  }
+  next(req, headers) {
+    this.listener?.("coworker: a newer listen command took over from this one. Nothing to do.");
+    return new Promise((resolve) => {
+      let unwatch = () => {};
+      const finish = (text) => {
+        if (this.listener === finish)
+          this.listener = undefined;
+        unwatch();
+        resolve(new Response(text && `${text}
+`, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } }));
+      };
+      const check = () => {
+        const text = newsLine(this.bridge.unread(), this.bridge.isOpen);
+        if (text)
+          finish(text);
+      };
+      this.listener = finish;
+      unwatch = this.bridge.watch(check);
+      req.signal.addEventListener("abort", () => finish(""), { once: true });
+      check();
+    });
   }
   events(req, headers) {
     const encoder = new TextEncoder;
@@ -26177,6 +26212,24 @@ class Viewer {
     return new Response(body, { headers: { ...headers, "content-type": "text/event-stream; charset=utf-8" } });
   }
 }
+function newsLine(events, open) {
+  if (events.length) {
+    const counts = new Map;
+    for (const e of events) {
+      const what = e.type === "message" ? e.kind : WHAT[e.type];
+      counts.set(what, (counts.get(what) ?? 0) + 1);
+    }
+    const list = [...counts].map(([what, n]) => `${n} ${what}`).join(", ");
+    return `coworker: new for this session (${list}). Call the coworker inbox tool to read it and handle it, then run this listen command in the background again.`;
+  }
+  if (!open)
+    return "coworker: this session's bridge is closed, so there is nothing to listen for. Do not run this command again.";
+}
+var WHAT = {
+  connected: "connected",
+  peer_closed: "left",
+  undelivered: "undelivered"
+};
 var PAGE = `<!doctype html>
 <html lang="ko">
 <head>
@@ -26300,13 +26353,14 @@ function createSession(opts) {
   Tell your human right away
   - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you end your turn.` : `Stay open until your human says stop
   - Once your human opens or connects a bridge, keep listening until your human tells you to stop. Only then call close_bridge.
-  - Listening means: call wait_for_message, handle what arrives, then call wait_for_message again. Do not stop after one question or one answer.
-  - Your human may interrupt you at any time. Do what they ask, then go back to listening.
+  - In Claude Code, listen in the background so your human can keep talking to you. open_bridge and connect give a listen command: run it with Bash in the background (run_in_background: true) and end your turn. It ends by itself when something arrives, and Claude Code then tells you; call inbox, handle what it shows, and run the listen command in the background again. Keep only one running, and do not wait for it. If you cannot run it, use wait_for_message as below.
+  - Elsewhere (for example Codex), listening means: call wait_for_message, handle what arrives, then call wait_for_message again.
+  - Do not stop after one question or one answer. Your human may interrupt you at any time. Do what they ask, then go back to listening.
   - Both sides ask and both sides answer. When you need something from the other side, use send_question and keep listening for the answer.
 
   Tell your human right away
-  - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you call wait_for_message again.
-  - When wait_for_message returns nothing, say nothing to your human. No "still listening" or "nothing new" lines; just call wait_for_message again.`;
+  - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you listen again.
+  - When nothing new arrived, say nothing to your human. No "still listening" or "nothing new" lines; just keep listening.`;
   const INSTRUCTIONS = `Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
 
   Groups
@@ -26355,7 +26409,18 @@ ${text}` : "";
     return name || "AI";
   }
   const isCodex = () => clientLabel() === "Codex";
-  const LISTEN = channel ? "Keep listening: what the other side sends comes in by itself as a <channel> notice from coworker. Do not call wait_for_message; end your turn when you are done." : "Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.";
+  const background = () => !channel && clientLabel() === "Claude Code";
+  const listenCommand = () => background() ? viewerOf().listenCommand() : undefined;
+  const tellFirst = () => background() && !viewer?.listening ? " Write all of this to your human in your reply first, and only then start listening." : "";
+  function listen() {
+    if (channel)
+      return "Keep listening: what the other side sends comes in by itself as a <channel> notice from coworker. Do not call wait_for_message; end your turn when you are done.";
+    if (!background())
+      return "Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.";
+    if (viewer?.listening)
+      return "Keep listening: your background listen command is still running and ends by itself when something arrives. Do not start another one and do not call wait_for_message; end your turn when you are done.";
+    return `Keep listening in the background, so your human can keep talking to you: run \`${listenCommand()}\` with Bash in the background (run_in_background: true), then end your turn. Do not wait for it and do not call wait_for_message. When it ends, Claude Code tells you: call inbox, handle what it shows, and run the command in the background again. If you cannot run it, call wait_for_message instead.`;
+  }
   let folder;
   let folderKnown = false;
   const resolveFolder = async () => {
@@ -26376,7 +26441,8 @@ ${text}` : "";
     return bridge;
   }
   let pushing = Promise.resolve();
-  const PUSHED = "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human. Then end your turn; the next message comes in by itself.";
+  const NEWS = "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human.";
+  const PUSHED = `${NEWS} Then end your turn; the next message comes in by itself.`;
   async function pushEvents() {
     for (const event of await bridge.wait(0)) {
       try {
@@ -26399,10 +26465,8 @@ ${text}` : "";
     }
   }
   let viewer;
-  function viewerUrl() {
-    viewer ??= new Viewer(getBridge());
-    return viewer.start();
-  }
+  const viewerOf = () => viewer ??= new Viewer(getBridge());
+  const viewerUrl = () => viewerOf().start();
   const viewerNote = (url) => `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself: ${url}`;
   async function relayStatus(b) {
     if (!relay)
@@ -26454,7 +26518,8 @@ ${text}` : "";
       relay: relayInfo,
       group: [...b.peers.values()].filter((p) => !p.private).map((p) => p.name),
       viewer: viewerUrl(),
-      next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`
+      listen_command: listenCommand(),
+      next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
     };
   }));
   server.registerTool("connect", {
@@ -26482,7 +26547,8 @@ ${text}` : "";
       myPort: b.port,
       relay: relayInfo,
       viewer: viewerUrl(),
-      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(", ")})` : ""}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`
+      listen_command: listenCommand(),
+      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(", ")})` : ""}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
     };
   }));
   server.registerTool("list_connections", {
@@ -26490,7 +26556,7 @@ ${text}` : "";
     annotations: { readOnlyHint: true, openWorldHint: true },
     description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now, and the viewer link for the human.",
     inputSchema: {}
-  }, tool(async () => ({ ...await getBridge().connections(), viewer: viewer?.url })));
+  }, tool(async () => ({ ...await getBridge().connections(), viewer: viewer?.url, listen_command: getBridge().isOpen ? listenCommand() : undefined })));
   server.registerTool("send_question", {
     title: "Send question",
     annotations: { readOnlyHint: false, openWorldHint: true },
@@ -26503,7 +26569,7 @@ ${text}` : "";
     }
   }, tool(async ({ question, context, to, answers }) => ({
     ...await getBridge().askMany(to, question, context, answers),
-    next: `Tell your human what you asked and whom. ${LISTEN}`
+    next: `Tell your human what you asked and whom. ${listen()}`
   })));
   server.registerTool("reply", {
     title: "Reply",
@@ -26515,7 +26581,7 @@ ${text}` : "";
     }
   }, tool(async ({ thread, text }) => ({
     ...await getBridge().reply(thread, text),
-    next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${LISTEN}`
+    next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${listen()}`
   })));
   server.registerTool("check_with_human", {
     title: "Check with human",
@@ -26554,12 +26620,12 @@ ${text}` : "";
       disagreements: a.disagreements,
       forHumans: a.for_humans
     }),
-    next: `Tell your human, in a few lines, that the agreement was written: the conclusion, what they must decide, and the file path. ${LISTEN}`
+    next: `Tell your human, in a few lines, that the agreement was written: the conclusion, what they must decide, and the file path. ${listen()}`
   })));
   server.registerTool("wait_for_message", {
     title: "Wait for message",
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: channel ? "Not needed in this session: what the other side sends comes in by itself as a <channel> notice from coworker. Returns at once." : "Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code it waits until something arrives, with no time limit: the call moves to the background and you are told when it returns, so leave it running and do not call it again meanwhile. In Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop. If nothing arrived, say nothing to your human and call it again.",
+    description: channel ? "Not needed in this session: what the other side sends comes in by itself as a <channel> notice from coworker. Returns at once." : "Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code, run the background listen command from open_bridge or connect instead, so your human can keep talking to you; call this only if you cannot run that command. In Claude Code this waits until something arrives, with no time limit; in Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and keep listening until your human says stop. If nothing arrived, say nothing to your human and keep listening.",
     inputSchema: {
       timeout_sec: number2().int().min(0).optional().describe("Leave it out to wait until something arrives (Codex: 50 seconds, at most 55). Give it only when you want the wait to end sooner.")
     }
@@ -26568,17 +26634,14 @@ ${text}` : "";
     if (!b.isOpen)
       throw new Error("the bridge is not open; call open_bridge or connect first");
     if (channel)
-      return { events: [], next: LISTEN };
+      return { events: [], next: listen() };
     const token = _meta?.progressToken;
     let beats = 0;
     const alive = token !== undefined ? setInterval(() => void sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++beats, message: "listening" } }).catch(() => {}), KEEPALIVE_MS) : undefined;
     const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal).finally(() => clearInterval(alive));
     if (!events.length)
-      return { events, next: "Nothing new. Do not tell your human anything about this; call wait_for_message again now." };
-    return {
-      events,
-      next: "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human. After that, call wait_for_message again."
-    };
+      return { events, next: background() ? `Nothing new. Do not tell your human anything about this. ${listen()}` : "Nothing new. Do not tell your human anything about this; call wait_for_message again now." };
+    return { events, next: `${NEWS} After that: ${listen()}` };
   }));
   server.registerTool("inbox", {
     title: "Inbox",
@@ -26587,7 +26650,9 @@ ${text}` : "";
     inputSchema: {}
   }, tool(async () => {
     const b = getBridge();
-    return { events: await b.wait(0), conversations: b.threadSummaries() };
+    const events = await b.wait(0);
+    const next = !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`;
+    return { events, conversations: b.threadSummaries(), listen_command: b.isOpen ? listenCommand() : undefined, next };
   }));
   server.registerTool("read_conversation", {
     title: "Read conversation",

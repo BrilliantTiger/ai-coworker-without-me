@@ -66,7 +66,7 @@ AI 둘이 서로 맞장구치다 틀린 결론에 합의하지 않도록, 합의
 | 폴더 | `plugin/` | `directory/` |
 | coworker 서버 | 플러그인이 각 PC에서 띄운다(stdio) | 사람이 각 PC에 깔아 둔 coworker 앱(`coworker.js serve`)에 주소로 붙는다 |
 | 플러그인 안의 코드 | `coworker.js` | 없다. 설정, 안내문(스킬), 아이콘뿐 |
-| 채널(메시지가 세션에 바로 들어옴) | 된다 | 안 된다. 기다리기로 받는다 |
+| 채널(메시지가 세션에 바로 들어옴) | 된다 | 안 된다. 백그라운드 명령으로 받는다 |
 | 배포 | GitHub `@release` | Claude 플러그인 디렉터리 |
 
 디렉터리판이 따로 있는 이유는 Claude 플러그인 디렉터리가 인증된 조직이 아니면 사용자 PC에서 코드를 띄우는 플러그인을 받지 않아서다. 두 판 모두 중앙 서버가 없고 내용은 양 끝에서 암호화한다. 아래는 GitHub판 설치다. 디렉터리판은 [INSTALL.md](INSTALL.md#claude-플러그인-디렉터리판으로-쓸-때)에 있다.
@@ -89,14 +89,17 @@ Claude Code 세션 안에서는 `/plugin marketplace add BrilliantTiger/ai-cowor
   ```
 
 - 예전에 `claude mcp add`로 직접 등록했으면 `claude mcp remove coworker -s user`로 지운다. 둘 다 있으면 coworker가 두 개 뜬다.
-- 읽기만 하는 도구까지 매번 허용 창이 뜨면 번거롭다. `~/.claude/settings.json`의 `permissions.allow`에 아래 네 개를 넣으면, 보내는 도구만 허용 창이 뜬다.
+- 읽기만 하는 도구까지 매번 허용 창이 뜨면 번거롭다. `~/.claude/settings.json`의 `permissions.allow`에 아래 다섯 개를 넣으면, 보내는 도구만 허용 창이 뜬다.
 
   ```
   "mcp__plugin_coworker_coworker__wait_for_message",
   "mcp__plugin_coworker_coworker__inbox",
   "mcp__plugin_coworker_coworker__list_connections",
-  "mcp__plugin_coworker_coworker__read_conversation"
+  "mcp__plugin_coworker_coworker__read_conversation",
+  "Bash(curl -s http://127.0.0.1:*/next)"
   ```
+
+  마지막 줄은 채널 없이 켠 세션이 메시지를 기다리려고 백그라운드로 걸어 두는 명령(`curl -s http://127.0.0.1:<포트>/<토큰>/next`)이다. 이 줄이 없으면 메시지가 올 때마다 다시 걸 때 허용 창이 뜬다. 그 허용 창이 「다시 묻지 않기」로 내미는 `curl *`은 모든 curl 명령을 허용하므로 고르지 않는다.
 
 ### Codex: 플러그인
 
@@ -149,11 +152,12 @@ claude --dangerously-load-development-channels plugin:coworker@ai-coworker-witho
 직접 등록했으면 `plugin:coworker@ai-coworker-without-me` 대신 `server:coworker`를 쓴다.
 
 - 켤 때마다 경고 화면이 뜬다. 직접 만든 채널이라 그렇다. 「I am using this for local development」를 고른다.
-- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다. 경고 줄이 있으면 채널이 켜지지 않았다. coworker는 Claude Code가 채널을 켰는지 알 수 없어서 알림을 계속 보내고, Claude Code는 그 알림을 버린다. 옵션 없이 다시 켜면 기다리기 도구로 받는다. 회사 Team·Enterprise 계정은 관리자가 채널을 켜 두지 않으면 이렇게 된다.
+- 시작 화면 아래에 `Channels (experimental) messages from plugin:coworker@… inject directly in this session`이 보이고, 그 바로 아래에 `plugin:coworker@…`로 시작하는 경고 줄이 없으면 된 것이다. 경고 줄이 있으면 채널이 켜지지 않았다. coworker는 Claude Code가 채널을 켰는지 알 수 없어서 알림을 계속 보내고, Claude Code는 그 알림을 버린다. 옵션 없이 다시 켜면 백그라운드 명령으로 받는다. 회사 Team·Enterprise 계정은 관리자가 채널을 켜 두지 않으면 이렇게 된다.
 - 이 옵션은 `settings.json`에 넣을 수 없다. 켤 때마다 붙여야 해서 `claude-cw` 같은 별칭을 만들어 둔다. Mac·Windows 방법은 [INSTALL.md](INSTALL.md)에 있다. 옵션 없이 켠 세션에서 처음 브릿지를 열거나 연결하면, AI가 이 안내를 한 번 전한다. 한 번 지나가면 `~/.coworker/hint-shown`이 남고 다시 전하지 않는다.
 - 이렇게 켜면 상대가 보낸 것이 세션에 바로 들어오고, AI가 알아서 읽고 답한다. AI가 기다리기 도구를 붙잡고 있지 않아도 되고, 아무것도 오지 않는 동안에는 사용량이 들지 않는다.
 - `--channels`로는 안 켜진다. `--channels`는 Anthropic이 승인한 채널만 받는다. 이 채널을 적으면 Claude Code가 `server: entries need --dangerously-load-development-channels`를 띄우고 채널을 켜지 않는다.
-- 채널 옵션 없이 켠 Claude Code도 쓸 수 있다. 그때는 Codex처럼 AI가 기다리기 도구로 메시지를 기다린다.
+- 채널 옵션 없이 켠 Claude Code도 쓸 수 있다. 그때는 AI가 기다리는 명령(`curl -s http://127.0.0.1:<포트>/<토큰>/next`)을 백그라운드로 걸어 두고 차례를 끝낸다. 기다리는 동안에도 사람이 바로 말을 걸 수 있다. 상대가 무언가 보내면 명령이 끝나고, Claude Code가 AI를 깨워 AI가 읽고 답한 뒤 다시 걸어 둔다. 기다리는 동안에는 사용량이 들지 않는다. 승인을 묻는 모드라면 위 허용 목록의 마지막 줄을 넣어 둔다.
+- Codex는 백그라운드 명령이 끝나도 AI를 깨우지 않는다. 그래서 Codex에서는 AI가 기다리기 도구를 50초씩 거듭 부르며 기다린다.
 - 사람 없이 돌리는 `claude -p`에서는 채널이 켜지지 않는다.
 - 상대가 내 PC에서 명령 실행을 승인하는 기능(채널의 원격 승인)은 켜지 않는다. 승인 창은 내 터미널에만 뜬다.
 

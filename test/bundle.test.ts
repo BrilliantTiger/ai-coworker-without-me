@@ -97,6 +97,8 @@ test('the same bundle runs as the coworker app, and the directory plugin holds n
   expect(manifest.hooks).toBeUndefined()
   expect(manifest.version).toBe(json(join(root, 'package.json')).version)
   const allowed = /\.(md|json|png|txt)$|^LICENSE$/
-  const walk = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap(e => (e.isDirectory() ? walk(join(d, e.name)) : [e.name]))
+  // .DS_Store 는 Finder 가 폴더를 열면 만드는 파일이다. .gitignore 에 있어 올라가지 않는다.
+  const walk = (d: string): string[] =>
+    readdirSync(d, { withFileTypes: true }).flatMap(e => (e.isDirectory() ? walk(join(d, e.name)) : e.name === '.DS_Store' ? [] : [e.name]))
   for (const f of walk(directory)) expect(f).toMatch(allowed)
 }, 15_000)

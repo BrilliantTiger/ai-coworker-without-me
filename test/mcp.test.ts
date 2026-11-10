@@ -195,7 +195,47 @@ test('a session not started as a channel does not claim to be one', async () => 
   await session('claude-code', {}, client)
   expect(client.getServerCapabilities()?.experimental).toBeUndefined()
   expect(client.getInstructions()).toMatch(/call wait_for_message, handle what arrives/)
+  expect(client.getInstructions()).toMatch(/In Claude Code, listen in the background.*run_in_background: true/)
 })
+
+test('Claude Code without a channel listens with a background command, so its human can keep talking to it meanwhile', async () => {
+  const claude = await session('claude-code')
+  const codex = await session('codex-mcp-client')
+  const opened = await claude('open_bridge', {})
+  // Claude Code 는 백그라운드로 돌릴 명령을 받는다. 기다리기 도구를 붙잡지 않는다.
+  expect(opened.listen_command).toBe(`${process.platform === 'win32' ? 'curl.exe' : 'curl'} -s ${opened.viewer}/next`)
+  expect(opened.next).toContain(`run \`${opened.listen_command}\` with Bash in the background (run_in_background: true)`)
+  expect(opened.next).toContain('do not call wait_for_message')
+  // Codex 는 백그라운드 명령이 끝나도 AI가 깨지 않으므로 그대로 기다리기 도구를 쓴다.
+  const joined = await codex('connect', { code: opened.code })
+  expect(joined.listen_command).toBeUndefined()
+  expect(joined.next).toContain('call wait_for_message now')
+
+  const listen = () => fetch(`${opened.viewer}/next`).then(r => r.text())
+  expect(await listen()).toContain('(1 connected)')
+  const first = await claude('inbox')
+  expect(first.events[0]).toMatchObject({ type: 'connected', peer: joined.myName })
+  expect(first.next).toContain(opened.listen_command)
+
+  // 명령이 기다리는 동안 다른 도구를 쓰면, 명령이 아직 돈다고 알려 준다. 하나 더 걸지 않게 한다.
+  const waiting = listen()
+  await Bun.sleep(200)
+  const asked = await claude('send_question', { question: 'Which port?' })
+  expect(asked.next).toContain('your background listen command is still running')
+  expect(asked.next).not.toContain(opened.listen_command)
+  const q = (await codex('wait_for_message', { timeout_sec: 5 })).events.at(-1)
+  await codex('reply', { thread: q.thread, text: '7690' })
+  expect(await waiting).toContain('(1 answer)')
+  const answered = await claude('inbox')
+  expect(answered.events.at(-1)).toMatchObject({ kind: 'answer', text: '7690' })
+  expect(answered.next).toContain(`run \`${opened.listen_command}\``)
+
+  // 사람이 그만하라고 해서 브릿지를 닫으면, 기다리던 명령도 끝난다.
+  const last = listen()
+  await Bun.sleep(100)
+  await claude('close_bridge')
+  expect(await last).toContain('bridge is closed')
+}, 20_000)
 
 test('Codex replacing the plugin folder under a running server does not break it', async () => {
   // Codex 는 설치 뒤 첫 세션에서 플러그인 폴더를 같은 경로의 새 폴더로 바꾼다. 이 서버는 그 폴더 안에서 떠 있다.

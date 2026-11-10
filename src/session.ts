@@ -40,13 +40,14 @@ export function createSession(opts: SessionOptions) {
   - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you end your turn.`
     : `Stay open until your human says stop
   - Once your human opens or connects a bridge, keep listening until your human tells you to stop. Only then call close_bridge.
-  - Listening means: call wait_for_message, handle what arrives, then call wait_for_message again. Do not stop after one question or one answer.
-  - Your human may interrupt you at any time. Do what they ask, then go back to listening.
+  - In Claude Code, listen in the background so your human can keep talking to you. open_bridge and connect give a listen command: run it with Bash in the background (run_in_background: true) and end your turn. It ends by itself when something arrives, and Claude Code then tells you; call inbox, handle what it shows, and run the listen command in the background again. Keep only one running, and do not wait for it. If you cannot run it, use wait_for_message as below.
+  - Elsewhere (for example Codex), listening means: call wait_for_message, handle what arrives, then call wait_for_message again.
+  - Do not stop after one question or one answer. Your human may interrupt you at any time. Do what they ask, then go back to listening.
   - Both sides ask and both sides answer. When you need something from the other side, use send_question and keep listening for the answer.
 
   Tell your human right away
-  - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you call wait_for_message again.
-  - When wait_for_message returns nothing, say nothing to your human. No "still listening" or "nothing new" lines; just call wait_for_message again.`
+  - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you listen again.
+  - When nothing new arrived, say nothing to your human. No "still listening" or "nothing new" lines; just keep listening.`
 
   const INSTRUCTIONS = `Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
 
@@ -102,9 +103,21 @@ export function createSession(opts: SessionOptions) {
   }
 
   const isCodex = () => clientLabel() === 'Codex'
-  const LISTEN = channel
-    ? 'Keep listening: what the other side sends comes in by itself as a <channel> notice from coworker. Do not call wait_for_message; end your turn when you are done.'
-    : 'Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.'
+  // 채널 없이 켠 Claude Code 는 백그라운드 명령으로 기다린다. 명령을 걸어 두고 차례를 끝내므로, 기다리는 동안에도 사람이 바로 말을 걸 수 있다.
+  // 소식이 오면 명령이 끝나고 Claude Code 가 AI를 깨운다(2026-11-10). wait_for_message 는 2분 동안 차례를 붙잡고 있었다.
+  // Codex 는 백그라운드 명령이 끝나도 AI를 깨우지 않아서 wait_for_message 로 기다린다.
+  const background = () => !channel && clientLabel() === 'Claude Code'
+  const listenCommand = () => (background() ? viewerOf().listenCommand() : undefined)
+  // 승인을 묻는 모드에서는 명령을 돌리기 전에 승인 창이 뜬다. 사람이 거절하면 차례가 끊기므로, 연결 코드처럼 사람에게 줄 것부터 쓰게 한다.
+  const tellFirst = () => (background() && !viewer?.listening ? ' Write all of this to your human in your reply first, and only then start listening.' : '')
+  function listen() {
+    if (channel)
+      return 'Keep listening: what the other side sends comes in by itself as a <channel> notice from coworker. Do not call wait_for_message; end your turn when you are done.'
+    if (!background()) return 'Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.'
+    if (viewer?.listening)
+      return 'Keep listening: your background listen command is still running and ends by itself when something arrives. Do not start another one and do not call wait_for_message; end your turn when you are done.'
+    return `Keep listening in the background, so your human can keep talking to you: run \`${listenCommand()}\` with Bash in the background (run_in_background: true), then end your turn. Do not wait for it and do not call wait_for_message. When it ends, Claude Code tells you: call inbox, handle what it shows, and run the command in the background again. If you cannot run it, call wait_for_message instead.`
+  }
 
   // 세션 이름에 붙일 프로젝트 폴더. 처음 브릿지를 열거나 연결할 때 한 번 알아낸다.
   let folder: string | undefined
@@ -128,8 +141,9 @@ export function createSession(opts: SessionOptions) {
 
   // Channels: 새 일이 생기면 순서대로 세션에 밀어 넣는다. Claude 는 <channel source="coworker" ...> 로 받는다.
   let pushing = Promise.resolve()
-  const PUSHED =
-    'First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human. Then end your turn; the next message comes in by itself.'
+  const NEWS =
+    'First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human.'
+  const PUSHED = `${NEWS} Then end your turn; the next message comes in by itself.`
 
   async function pushEvents() {
     for (const event of await bridge!.wait(0)) {
@@ -157,10 +171,8 @@ export function createSession(opts: SessionOptions) {
 
   // 브라우저로 대화를 보는 화면. 브릿지가 닫혀도 세션이 살아 있는 동안은 지난 대화를 보여 준다.
   let viewer: Viewer | undefined
-  function viewerUrl() {
-    viewer ??= new Viewer(getBridge())
-    return viewer.start()
-  }
+  const viewerOf = () => (viewer ??= new Viewer(getBridge()))
+  const viewerUrl = () => viewerOf().start()
   // 연 쪽과 연결한 쪽 모두 자기 PC의 링크를 받는다. 링크를 안내 문장에 넣어야 AI가 다른 일을 이어 할 때도 빠뜨리지 않는다.
   const viewerNote = (url: string) =>
     `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself: ${url}`
@@ -245,7 +257,8 @@ export function createSession(opts: SessionOptions) {
         relay: relayInfo,
         group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
         viewer: viewerUrl(),
-        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`,
+        listen_command: listenCommand(),
+        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
       }
     }),
   )
@@ -276,7 +289,8 @@ export function createSession(opts: SessionOptions) {
         myPort: b.port,
         relay: relayInfo,
         viewer: viewerUrl(),
-        next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.${warn} ${viewerNote(viewerUrl())} ${LISTEN}${channelHint()}`,
+        listen_command: listenCommand(),
+        next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
       }
     }),
   )
@@ -289,7 +303,7 @@ export function createSession(opts: SessionOptions) {
       description: 'Show this session\'s bridge and the connected sessions, with whether each one can be reached right now, and the viewer link for the human.',
       inputSchema: {},
     },
-    tool(async () => ({ ...(await getBridge().connections()), viewer: viewer?.url })),
+    tool(async () => ({ ...(await getBridge().connections()), viewer: viewer?.url, listen_command: getBridge().isOpen ? listenCommand() : undefined })),
   )
 
   server.registerTool(
@@ -314,7 +328,7 @@ export function createSession(opts: SessionOptions) {
     },
     tool(async ({ question, context, to, answers }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one' }) => ({
       ...(await getBridge().askMany(to, question, context, answers)),
-      next: `Tell your human what you asked and whom. ${LISTEN}`,
+      next: `Tell your human what you asked and whom. ${listen()}`,
     })),
   )
 
@@ -331,7 +345,7 @@ export function createSession(opts: SessionOptions) {
     },
     tool(async ({ thread, text }: { thread: string; text: string }) => ({
       ...(await getBridge().reply(thread, text)),
-      next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${LISTEN}`,
+      next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${listen()}`,
     })),
   )
 
@@ -397,7 +411,7 @@ export function createSession(opts: SessionOptions) {
           disagreements: a.disagreements,
           forHumans: a.for_humans,
         })),
-        next: `Tell your human, in a few lines, that the agreement was written: the conclusion, what they must decide, and the file path. ${LISTEN}`,
+        next: `Tell your human, in a few lines, that the agreement was written: the conclusion, what they must decide, and the file path. ${listen()}`,
       }),
     ),
   )
@@ -409,7 +423,7 @@ export function createSession(opts: SessionOptions) {
       annotations: { readOnlyHint: true, openWorldHint: true },
       description: channel
         ? 'Not needed in this session: what the other side sends comes in by itself as a <channel> notice from coworker. Returns at once.'
-        : 'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code it waits until something arrives, with no time limit: the call moves to the background and you are told when it returns, so leave it running and do not call it again meanwhile. In Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and call it again until your human says stop. If nothing arrived, say nothing to your human and call it again.',
+        : 'Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code, run the background listen command from open_bridge or connect instead, so your human can keep talking to you; call this only if you cannot run that command. In Claude Code this waits until something arrives, with no time limit; in Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and keep listening until your human says stop. If nothing arrived, say nothing to your human and keep listening.',
       inputSchema: {
         timeout_sec: z
           .number()
@@ -422,7 +436,7 @@ export function createSession(opts: SessionOptions) {
     tool(async ({ timeout_sec }: { timeout_sec?: number }, { signal, _meta, sendNotification }) => {
       const b = getBridge()
       if (!b.isOpen) throw new Error('the bridge is not open; call open_bridge or connect first')
-      if (channel) return { events: [], next: LISTEN }
+      if (channel) return { events: [], next: listen() }
       // Claude Code 는 응답도 진행 알림도 없이 30분이 지난 호출을 끊는다(stdio 서버의 기본값).
       // 시간 제한 없이 기다리는 동안 몇 분마다 진행 알림을 보내 호출을 살려 둔다.
       const token = _meta?.progressToken
@@ -432,12 +446,9 @@ export function createSession(opts: SessionOptions) {
           ? setInterval(() => void sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++beats, message: 'listening' } }).catch(() => {}), KEEPALIVE_MS)
           : undefined
       const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal).finally(() => clearInterval(alive))
-      if (!events.length) return { events, next: 'Nothing new. Do not tell your human anything about this; call wait_for_message again now.' }
-      return {
-        events,
-        next:
-          'First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human. After that, call wait_for_message again.',
-      }
+      if (!events.length)
+        return { events, next: background() ? `Nothing new. Do not tell your human anything about this. ${listen()}` : 'Nothing new. Do not tell your human anything about this; call wait_for_message again now.' }
+      return { events, next: `${NEWS} After that: ${listen()}` }
     }),
   )
 
@@ -451,7 +462,10 @@ export function createSession(opts: SessionOptions) {
     },
     tool(async () => {
       const b = getBridge()
-      return { events: await b.wait(0), conversations: b.threadSummaries() }
+      const events = await b.wait(0)
+      // 백그라운드 명령이 끝나면 AI가 여기서 읽는다. 읽은 다음 어떻게 다시 기다릴지도 함께 알려 준다.
+      const next = !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`
+      return { events, conversations: b.threadSummaries(), listen_command: b.isOpen ? listenCommand() : undefined, next }
     }),
   )
 

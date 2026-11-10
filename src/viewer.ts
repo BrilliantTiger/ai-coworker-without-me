@@ -1,12 +1,15 @@
 import type { Server } from 'bun'
-import type { Bridge } from './bridge'
+import type { Bridge, BridgeEvent } from './bridge'
 import { randomToken } from './crypto'
 
 // 사람이 브라우저로 대화를 지켜보는 화면. 이 PC 안(127.0.0.1)에서만 열리고, 주소에 든 토큰을 알아야 볼 수 있다.
 // 상대가 보낸 글은 화면에 글자로만 넣는다. HTML 로 해석하지 않는다.
+// 채널 없이 켠 Claude Code 가 백그라운드 명령으로 기다리는 주소(/next)도 여기에 둔다.
 export class Viewer {
   private server?: Server<undefined>
   private readonly token = randomToken()
+  // 지금 기다리고 있는 백그라운드 명령. 하나만 산다.
+  private listener?: (text: string) => void
 
   constructor(private readonly bridge: Bridge) {}
 
@@ -21,6 +24,7 @@ export class Viewer {
   }
 
   stop() {
+    this.listener = undefined
     this.server?.stop(true)
     this.server = undefined
   }
@@ -29,7 +33,18 @@ export class Viewer {
     return { me: this.bridge.describe(), conversations: [...this.bridge.threads.values()] }
   }
 
-  private handle(req: Request): Response {
+  // 백그라운드 명령이 지금 기다리고 있는지.
+  get listening() {
+    return this.listener !== undefined
+  }
+
+  // 백그라운드로 돌려 둘 명령. 새 소식이 오면 한 줄을 찍고 끝난다.
+  // Windows PowerShell 에서 curl 은 다른 명령의 별명이라 curl.exe 로 부른다. Git Bash 에서도 curl.exe 가 된다.
+  listenCommand(platform: string = process.platform) {
+    return `${platform === 'win32' ? 'curl.exe' : 'curl'} -s ${this.start()}/next`
+  }
+
+  private handle(req: Request): Response | Promise<Response> {
     const path = new URL(req.url).pathname
     const headers = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }
     if (req.method === 'GET' && path === `/${this.token}`)
@@ -42,7 +57,33 @@ export class Viewer {
       })
     if (req.method === 'GET' && path === `/${this.token}/data`) return Response.json(this.data(), { headers })
     if (req.method === 'GET' && path === `/${this.token}/events`) return this.events(req, headers)
+    if (req.method === 'GET' && path === `/${this.token}/next`) return this.next(req, headers)
     return new Response('not found', { status: 404 })
+  }
+
+  // 채널 없이 켠 Claude Code 는 이 주소를 부르는 명령을 백그라운드로 돌려 두고 차례를 끝낸다. 그동안 사람은 AI와 계속 이야기할 수 있다.
+  // 새 소식이 쌓이거나 브릿지가 닫히면 한 줄을 돌려주고 끝나고, 명령이 끝났다고 Claude Code 가 AI를 깨운다.
+  // 소식은 가져가지 않는다. AI가 inbox 로 읽으므로 이 명령이 중간에 끊겨도 소식은 남는다.
+  // 기다림은 마지막 하나만 산다. 새 명령이 오면 앞의 명령은 바로 끝나서, 백그라운드 명령이 쌓이지 않는다.
+  private next(req: Request, headers: Record<string, string>): Promise<Response> {
+    this.listener?.('coworker: a newer listen command took over from this one. Nothing to do.')
+    return new Promise(resolve => {
+      let unwatch = () => {}
+      const finish = (text: string) => {
+        if (this.listener === finish) this.listener = undefined
+        unwatch()
+        resolve(new Response(text && `${text}\n`, { headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' } }))
+      }
+      const check = () => {
+        const text = newsLine(this.bridge.unread(), this.bridge.isOpen)
+        if (text) finish(text)
+      }
+      this.listener = finish
+      unwatch = this.bridge.watch(check)
+      // 명령이 멈췄으면(사람이 백그라운드 작업을 멈췄거나 세션이 끝났다) 더 기다리지 않는다.
+      req.signal.addEventListener('abort', () => finish(''), { once: true })
+      check()
+    })
   }
 
   // 대화가 바뀔 때마다 화면 자료를 통째로 밀어 준다(Server-Sent Events). 대화 몇 개라 통째로 보내도 작다.
@@ -84,6 +125,27 @@ export class Viewer {
     })
     return new Response(body, { headers: { ...headers, 'content-type': 'text/event-stream; charset=utf-8' } })
   }
+}
+
+// 백그라운드 명령이 찍는 한 줄. 무엇이 몇 건 왔는지만 알린다. 상대가 정한 이름이나 보낸 글은 넣지 않는다.
+// 내용은 AI가 inbox 로 읽는다. 아무 일도 없으면 아무것도 돌려주지 않아 명령이 계속 기다린다.
+export function newsLine(events: readonly BridgeEvent[], open: boolean): string | undefined {
+  if (events.length) {
+    const counts = new Map<string, number>()
+    for (const e of events) {
+      const what = e.type === 'message' ? e.kind : WHAT[e.type]
+      counts.set(what, (counts.get(what) ?? 0) + 1)
+    }
+    const list = [...counts].map(([what, n]) => `${n} ${what}`).join(', ')
+    return `coworker: new for this session (${list}). Call the coworker inbox tool to read it and handle it, then run this listen command in the background again.`
+  }
+  if (!open) return "coworker: this session's bridge is closed, so there is nothing to listen for. Do not run this command again."
+}
+
+const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
+  connected: 'connected',
+  peer_closed: 'left',
+  undelivered: 'undelivered',
 }
 
 const PAGE = `<!doctype html>

@@ -451,6 +451,11 @@ export class Bridge {
     return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file }
   }
 
+  // 아직 아무도 가져가지 않은 소식을 들여다본다. 가져가지는 않는다.
+  unread(): readonly BridgeEvent[] {
+    return this.events
+  }
+
   // 새 소식이 올 때까지 기다린다. 이미 쌓여 있으면 바로 돌려준다.
   // 기다림은 마지막 하나만 산다. 사람이 끊었거나 아무도 결과를 읽지 않는 기다림이 소식을 가져가면
   // 그 소식은 사라진다. 그래서 새 기다림이 시작되거나 호출이 취소되면 앞의 기다림은 빈손으로 끝난다.

@@ -580,4 +580,44 @@ describe('viewer', () => {
       viewer.stop()
     }
   })
+
+  test('a background listen command ends when something new arrives, leaves it for inbox, and only the newest one waits', async () => {
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 100 && !ok(); i++) await Bun.sleep(20)
+      expect(ok()).toBe(true)
+    }
+    const { a, b } = await pair()
+    const viewer = new Viewer(a)
+    try {
+      const url = `${viewer.start()}/next`
+      expect(viewer.listenCommand('darwin')).toBe(`curl -s ${url}`)
+      expect(viewer.listenCommand('win32')).toBe(`curl.exe -s ${url}`)
+      // 이미 쌓인 소식이 있으면 바로 끝난다. 무엇이 몇 건인지만 알리고, 소식은 가져가지 않는다.
+      await until(() => a.unread().length > 0)
+      expect(await (await fetch(url)).text()).toBe(
+        'coworker: new for this session (1 connected). Call the coworker inbox tool to read it and handle it, then run this listen command in the background again.\n',
+      )
+      expect((await a.wait(0)).map(e => e.type)).toEqual(['connected'])
+      // 아무 일이 없으면 기다린다. 새 명령이 오면 앞의 명령은 바로 끝나서 하나만 남는다.
+      const older = fetch(url).then(r => r.text())
+      await until(() => viewer.listening)
+      const newer = fetch(url).then(r => r.text())
+      expect(await older).toContain('took over')
+      await b.ask(undefined, 'Which port does the L2 API use?')
+      const news = await newer
+      expect(news).toContain('(1 question)')
+      expect(news).not.toContain('L2 API')
+      expect(news).not.toContain('B · Codex')
+      expect(viewer.listening).toBe(false)
+      expect((await a.wait(0))[0]).toMatchObject({ type: 'message', kind: 'question', text: 'Which port does the L2 API use?' })
+      // 브릿지가 닫히면 기다리던 명령도 끝나고, 다시 돌리지 말라고 한다.
+      const last = fetch(url).then(r => r.text())
+      await until(() => viewer.listening)
+      await a.close()
+      expect(await last).toContain('bridge is closed')
+      expect(await (await fetch(url)).text()).toContain('Do not run this command again')
+    } finally {
+      viewer.stop()
+    }
+  })
 })
