@@ -2,7 +2,7 @@ import { afterAll, expect, test } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { connect as tcp } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -108,37 +108,23 @@ test('the app refuses web pages, other hosts and requests outside a session', as
   expect(unknown.status).toBe(404)
 })
 
-test('a session that ends or goes quiet closes its bridge', async () => {
-  const { port, home } = await startApp({ COWORKER_APP_IDLE_MS: '1500' })
-  const ended = await session(port, 'claude-code')
-  const { port: p1 } = await ended.call('open_bridge')
-  expect(existsSync(join(home, 'bridges', `${p1}.json`))).toBe(true)
-  await ended.transport.terminateSession()
-  for (let i = 0; i < 20 && existsSync(join(home, 'bridges', `${p1}.json`)); i++) await Bun.sleep(100)
-  expect(existsSync(join(home, 'bridges', `${p1}.json`))).toBe(false)
+test('a quiet session keeps its bridge open; a session that ends stops it and can come back with resume', async () => {
+  const { port, home } = await startApp()
+  // 사람이 닫으라고 하거나 세션이 끝나기 전까지는 조용해도 그대로 둔다.
   const quiet = await session(port, 'claude-code')
-  const { port: p2 } = await quiet.call('open_bridge')
-  for (let i = 0; i < 60 && existsSync(join(home, 'bridges', `${p2}.json`)); i++) await Bun.sleep(100)
-  expect(readdirSync(join(home, 'bridges'))).not.toContain(`${p2}.json`)
-}, 15_000)
+  const kept = await quiet.call('open_bridge')
+  await Bun.sleep(3000)
+  expect(existsSync(join(home, 'bridges', `${kept.port}.json`))).toBe(true)
+  expect(await quiet.call('list_connections')).toMatchObject({ me: { open: true } })
 
-test('a quiet session whose background listen command is waiting stays, and a stopped bridge comes back with resume', async () => {
-  const { port, home } = await startApp({ COWORKER_APP_IDLE_MS: '1500' })
-  const first = await session(port, 'claude-code')
-  const opened = await first.call('open_bridge')
-  // 채널 없는 Claude Code 는 백그라운드 명령으로 기다린다. 그동안 MCP 요청이 없어도 정리하지 않는다.
-  const stop = new AbortController()
-  const listening = fetch(`${opened.viewer}/next`, { signal: stop.signal }).catch(() => 'stopped')
-  await Bun.sleep(4000)
-  expect(existsSync(join(home, 'bridges', `${opened.port}.json`))).toBe(true)
-  // 명령이 멈추고 조용하면 정리한다. 상태는 남는다.
-  stop.abort()
-  expect(await listening).toBe('stopped')
-  for (let i = 0; i < 60 && existsSync(join(home, 'bridges', `${opened.port}.json`)); i++) await Bun.sleep(100)
+  // Claude Code 가 세션을 끝내면(DELETE) 브릿지는 멈추지만, 상태는 남아 새 세션의 AI가 되살린다.
+  const ended = await session(port, 'claude-code')
+  const opened = await ended.call('open_bridge')
+  await ended.transport.terminateSession()
+  for (let i = 0; i < 20 && existsSync(join(home, 'bridges', `${opened.port}.json`)); i++) await Bun.sleep(100)
   expect(existsSync(join(home, 'bridges', `${opened.port}.json`))).toBe(false)
-  // 다시 붙은 세션의 AI는 앞서 받은 session_id 로 같은 브릿지를 되살린다.
-  const second = await session(port, 'claude-code')
-  expect(await second.call('open_bridge', { resume: opened.session_id })).toMatchObject({ resumed: true, session_id: opened.session_id, name: opened.name })
+  const again = await session(port, 'claude-code')
+  expect(await again.call('open_bridge', { resume: opened.session_id })).toMatchObject({ resumed: true, session_id: opened.session_id, name: opened.name })
 }, 20_000)
 
 test('starting the app twice leaves the running one alone', async () => {

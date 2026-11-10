@@ -50,7 +50,7 @@ export function createSession(opts: SessionOptions) {
   const RESTARTS = `If coworker restarts
   - When the same Claude Code session starts again (for example claude --resume), its bridge comes back by itself with the same identity and connections. The other side keeps it and nobody needs a new code.
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
-  - What is sent to a session that is asleep or restarting waits up to 24 hours and is delivered when it is back.`
+  - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.`
   const LISTENING = channel
     ? `Stay open until your human says stop
   - In this session, what the other side sends comes in by itself as a <channel> notice from coworker: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
@@ -207,7 +207,7 @@ export function createSession(opts: SessionOptions) {
     const saved = readSaved(savedPath(home, id))
     if (!saved)
       throw new Error(
-        `no saved bridge for session_id ${id}: it was closed with close_bridge, was not used for 7 days, or belongs to another PC. Open a new bridge and exchange a new code`,
+        `no saved bridge for session_id ${id}: it was closed with close_bridge, or belongs to another PC. Open a new bridge and exchange a new code`,
       )
     if (await stillRunning(saved)) throw new Error('that bridge is still running in another session on this PC; use that session')
     switchTo(id)
@@ -277,17 +277,12 @@ export function createSession(opts: SessionOptions) {
     sendNotification: (n: { method: 'notifications/progress'; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void>
   }
 
-  // 지금 돌고 있는 도구 호출 수. 앱은 이 값이 0이고 한동안 요청이 없는 세션만 정리한다.
-  let inflight = 0
   function tool<T>(run: (args: T, extra: Extra) => Promise<unknown> | unknown) {
     return async (args: T, extra: Extra) => {
-      inflight++
       try {
         return result(await run(args, extra))
       } catch (e) {
         return { isError: true, content: [{ type: 'text' as const, text: e instanceof Error ? e.message : String(e) }] }
-      } finally {
-        inflight--
       }
     }
   }
@@ -616,9 +611,6 @@ export function createSession(opts: SessionOptions) {
 
   return {
     server,
-    inflight: () => inflight,
-    // 백그라운드 명령이 기다리고 있으면 그 세션은 살아 있다. 앱은 이런 세션을 정리하지 않는다.
-    listening: () => !!viewer?.listening,
     shutdown() {
       if (bridge && live.get(identity)?.bridge === bridge) live.delete(identity)
       bridge?.shutdown()

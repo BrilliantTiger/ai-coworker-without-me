@@ -13,11 +13,8 @@ import { createSession } from './session'
 // 주소로 붙는 서버는 채널이 될 수 없어서, 이 앱에 붙은 세션은 wait_for_message 로 기다린다.
 export const APP_PORT = 7690
 
-// 도구 호출도 백그라운드 명령도 기다리고 있지 않고 이 시간 동안 요청이 없는 세션은 브릿지를 멈추고 정리한다.
-// 멈춘 브릿지는 상태가 남아 있어서, 다시 붙은 세션의 AI가 resume 으로 되살릴 수 있다. COWORKER_APP_IDLE_MS 는 시험용이다.
-const IDLE_MS = Number(process.env.COWORKER_APP_IDLE_MS) || 30 * 60_000
-
-type Entry = { transport: WebStandardStreamableHTTPServerTransport; session: ReturnType<typeof createSession>; lastSeen: number }
+// 세션은 사람이 닫으라고 하거나 Claude Code 가 세션을 끝낼 때(DELETE)까지 산다. 조용하다고 시간으로 정리하지 않는다(사람이 정함, 2026-11-10).
+type Entry = { transport: WebStandardStreamableHTTPServerTransport; session: ReturnType<typeof createSession> }
 
 const jsonError = (status: number, message: string) =>
   new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message }, id: null }), {
@@ -64,7 +61,6 @@ export async function serve({ home }: { home: string }) {
     if (id) {
       const entry = sessions.get(id)
       if (!entry) return jsonError(404, 'Session not found')
-      entry.lastSeen = Date.now()
       return entry.transport.handleRequest(req)
     }
     if (req.method !== 'POST' || !(await isInitialize(req))) return jsonError(400, 'Bad Request: No valid session ID provided')
@@ -80,7 +76,7 @@ export async function serve({ home }: { home: string }) {
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: sid => {
-        sessions.set(sid, { transport, session, lastSeen: Date.now() })
+        sessions.set(sid, { transport, session })
       },
       onsessionclosed: sid => close(sid),
     })
@@ -104,14 +100,7 @@ export async function serve({ home }: { home: string }) {
     process.exit(1)
   }
 
-  const sweep = setInterval(() => {
-    const now = Date.now()
-    for (const [id, entry] of sessions)
-      if (entry.session.inflight() === 0 && !entry.session.listening() && now - entry.lastSeen > IDLE_MS) close(id)
-  }, Math.min(60_000, IDLE_MS))
-
   const stop = () => {
-    clearInterval(sweep)
     for (const id of [...sessions.keys()]) close(id)
     server.stop(true)
     process.exit(0)

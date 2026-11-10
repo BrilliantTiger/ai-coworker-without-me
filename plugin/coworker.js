@@ -16809,9 +16809,7 @@ function isSavedBridge(v) {
 }
 var now = () => new Date().toISOString();
 var NO_PEERS = "no connected session yet; open the bridge and exchange a connection code first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result";
-var span = (ms) => ms >= 3600000 ? `${Math.round(ms / 3600000)} hours` : `${Math.round(ms / 60000)} minutes`;
 var POLL_FRESH_MS = 60000;
-var INVITE_TTL_MS = 10 * 60000;
 var firstLine = (text) => text.trim().split(`
 `)[0].slice(0, 80);
 var counted = (t) => t.messages.filter((m) => m.kind === "question" || m.kind === "answer").length;
@@ -16871,7 +16869,6 @@ class Bridge {
       ports: DEFAULT_PORTS,
       addrs: localAddresses,
       retryMs: 3000,
-      expireMs: 24 * 60 * 60000,
       tokenTtlMs: 60 * 60000,
       connectTimeoutMs: 2000,
       pollWaitMs: 20000,
@@ -17263,7 +17260,7 @@ ${f.evidence}`).join(`
       if (payload.type !== "hello" || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port))
         return forbidden;
       const invite = this.invites.get(from);
-      const invited = !!invite && invite.expires > Date.now();
+      const invited = !!invite;
       const token = invited ? undefined : this.takeToken(payload.token);
       if (!invited && !token)
         return forbidden;
@@ -17402,18 +17399,13 @@ ${f.evidence}`).join(`
     if (!isMember(member) || member.key === this.key || this.peers.has(member.key))
       return;
     const { key, name, addrs, port } = member;
-    this.invites.set(key, { key, name, addrs, port, by, expires: Date.now() + INVITE_TTL_MS, nextTry: 0, backoff: this.opts.retryMs });
+    this.invites.set(key, { key, name, addrs, port, by, nextTry: 0, backoff: this.opts.retryMs });
     this.tryInvites();
   }
   async tryInvites() {
     await Promise.all([...this.invites.values()].map(async (invite) => {
       if (this.peers.has(invite.key))
         return void this.invites.delete(invite.key);
-      if (invite.expires <= Date.now()) {
-        this.invites.delete(invite.key);
-        this.emit({ type: "undelivered", to: invite.name, reason: `could not connect to ${invite.name}, introduced by ${invite.by}`, at: now() });
-        return;
-      }
       if (invite.trying || invite.nextTry > Date.now() || !this.server)
         return;
       invite.trying = true;
@@ -17754,10 +17746,6 @@ ${f.evidence}`).join(`
           drop("the session disconnected");
           continue;
         }
-        if (Date.now() - item.since > this.opts.expireMs) {
-          drop(`gave up after ${span(this.opts.expireMs)} without reaching the session`);
-          continue;
-        }
         try {
           await this.deliver(peer, item.payload);
           this.outbox = this.outbox.filter((o) => o !== item);
@@ -17839,7 +17827,6 @@ ${log.join(`
 }
 
 // src/resume.ts
-var KEEP_MS = 7 * 24 * 60 * 60000;
 var savedPath = (home, id) => join3(home, "sessions", `${id.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 function readSaved(path) {
   try {
@@ -17869,10 +17856,6 @@ async function findSession(home, id) {
   const saved = readSaved(path);
   if (!saved)
     return { sessionId: id };
-  if (Date.now() - Date.parse(saved.savedAt) > KEEP_MS) {
-    rmSync3(path, { force: true });
-    return { sessionId: id };
-  }
   for (let i = 0;i < 10; i++) {
     if (!await stillRunning(saved))
       return { sessionId: id, restore: readSaved(path) ?? saved };
@@ -17880,7 +17863,7 @@ async function findSession(home, id) {
   }
   return {};
 }
-function pruneSaved(home, keepMs = KEEP_MS) {
+function pruneSaved(home) {
   const dir = join3(home, "sessions");
   let names;
   try {
@@ -17891,8 +17874,7 @@ function pruneSaved(home, keepMs = KEEP_MS) {
   for (const name of names) {
     const path = join3(dir, name);
     try {
-      const age = Date.now() - statSync(path).mtimeMs;
-      if (age > keepMs || name.endsWith(".tmp") && age > 60000)
+      if (name.endsWith(".tmp") && Date.now() - statSync(path).mtimeMs > 60000)
         rmSync3(path, { force: true });
     } catch {}
   }
@@ -26540,7 +26522,7 @@ function createSession(opts) {
   const RESTARTS = `If coworker restarts
   - When the same Claude Code session starts again (for example claude --resume), its bridge comes back by itself with the same identity and connections. The other side keeps it and nobody needs a new code.
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
-  - What is sent to a session that is asleep or restarting waits up to 24 hours and is delivered when it is back.`;
+  - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.`;
   const LISTENING = channel ? `Stay open until your human says stop
   - In this session, what the other side sends comes in by itself as a <channel> notice from coworker: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
   - Keep the bridge open until your human tells you to stop. Only then call close_bridge.
@@ -26679,7 +26661,7 @@ ${text}` : "";
     }
     const saved = readSaved(savedPath(home, id));
     if (!saved)
-      throw new Error(`no saved bridge for session_id ${id}: it was closed with close_bridge, was not used for 7 days, or belongs to another PC. Open a new bridge and exchange a new code`);
+      throw new Error(`no saved bridge for session_id ${id}: it was closed with close_bridge, or belongs to another PC. Open a new bridge and exchange a new code`);
     if (await stillRunning(saved))
       throw new Error("that bridge is still running in another session on this PC; use that session");
     switchTo(id);
@@ -26724,16 +26706,12 @@ ${text}` : "";
   }
   const KEEPALIVE_MS = Number(process.env.COWORKER_KEEPALIVE_MS) || 5 * 60000;
   const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value, null, 2) }] });
-  let inflight = 0;
   function tool(run) {
     return async (args, extra) => {
-      inflight++;
       try {
         return result(await run(args, extra));
       } catch (e) {
         return { isError: true, content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }] };
-      } finally {
-        inflight--;
       }
     };
   }
@@ -26952,8 +26930,6 @@ ${text}` : "";
   }
   return {
     server,
-    inflight: () => inflight,
-    listening: () => !!viewer?.listening,
     shutdown() {
       if (bridge && live.get(identity)?.bridge === bridge)
         live.delete(identity);
@@ -26965,7 +26941,6 @@ ${text}` : "";
 
 // src/serve.ts
 var APP_PORT = 7690;
-var IDLE_MS = Number(process.env.COWORKER_APP_IDLE_MS) || 30 * 60000;
 var jsonError = (status, message) => new Response(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message }, id: null }), {
   status,
   headers: { "content-type": "application/json" }
@@ -27015,7 +26990,6 @@ async function serve({ home }) {
       const entry = sessions.get(id);
       if (!entry)
         return jsonError(404, "Session not found");
-      entry.lastSeen = Date.now();
       return entry.transport.handleRequest(req);
     }
     if (req.method !== "POST" || !await isInitialize(req))
@@ -27032,7 +27006,7 @@ async function serve({ home }) {
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID3(),
       onsessioninitialized: (sid) => {
-        sessions.set(sid, { transport, session, lastSeen: Date.now() });
+        sessions.set(sid, { transport, session });
       },
       onsessionclosed: (sid) => close(sid)
     });
@@ -27051,14 +27025,7 @@ async function serve({ home }) {
     console.error(`could not open 127.0.0.1:${port}: ${e instanceof Error ? e.message : e}. Another program uses this port. The Claude directory plugin connects to 127.0.0.1:${APP_PORT}, so close that program and start the app again.`);
     process.exit(1);
   }
-  const sweep = setInterval(() => {
-    const now = Date.now();
-    for (const [id, entry] of sessions)
-      if (entry.session.inflight() === 0 && !entry.session.listening() && now - entry.lastSeen > IDLE_MS)
-        close(id);
-  }, Math.min(60000, IDLE_MS));
   const stop = () => {
-    clearInterval(sweep);
     for (const id of [...sessions.keys()])
       close(id);
     server.stop(true);

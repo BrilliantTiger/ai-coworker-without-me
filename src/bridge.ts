@@ -47,7 +47,8 @@ export type Peer = {
 type Member = { key: string; name: string; addrs: string[]; port: number }
 
 // 소개받은 세션. 양쪽이 서로를 기다리다가 먼저 닿는 쪽이 인사한다.
-type Invite = Member & { by: string; expires: number; nextTry: number; backoff: number; trying?: boolean }
+// 사람이 닫거나 세션이 끝날 때까지 기다린다. 시간으로 포기하지 않는다.
+type Invite = Member & { by: string; nextTry: number; backoff: number; trying?: boolean }
 
 // checking_with_your_human: 결정이 필요해 이쪽 사람에게 묻는 중. peer_checking_with_their_human: 상대가 자기 사람에게 묻는 중.
 // closed: 여럿에게 한 명만 답하면 되는 질문을 했고, 다른 사람이 먼저 답했다. agreed: 어느 한쪽이 합의문을 썼다.
@@ -165,7 +166,6 @@ export type BridgeOptions = {
   home?: string
   addrs?: () => string[]
   retryMs?: number
-  expireMs?: number
   tokenTtlMs?: number
   connectTimeoutMs?: number
   pollWaitMs?: number
@@ -226,11 +226,8 @@ export type RelayState = 'off' | 'connecting' | 'ok' | { error: string }
 const now = () => new Date().toISOString()
 const NO_PEERS =
   'no connected session yet; open the bridge and exchange a connection code first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result'
-const span = (ms: number) => (ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)} hours` : `${Math.round(ms / 60_000)} minutes`)
 // 상대가 이 시간 안에 가져가러 왔으면, 상대는 이쪽 메시지를 스스로 가져가는 중이다.
 const POLL_FRESH_MS = 60_000
-// 소개받은 세션과 이 시간 안에 이어지지 않으면 포기한다.
-const INVITE_TTL_MS = 10 * 60_000
 const firstLine = (text: string) => text.trim().split('\n')[0]!.slice(0, 80)
 const counted = (t: Thread) => t.messages.filter(m => m.kind === 'question' || m.kind === 'answer').length
 const memberOf = (p: Peer): Member => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port })
@@ -307,8 +304,6 @@ export class Bridge {
       ports: DEFAULT_PORTS,
       addrs: localAddresses,
       retryMs: 3000,
-      // 상대 PC가 잠들어 있거나 세션이 꺼져 있어도 하루 동안은 보낼 것을 들고 있다가, 돌아오면 넘긴다.
-      expireMs: 24 * 60 * 60_000,
       tokenTtlMs: 60 * 60_000,
       connectTimeoutMs: 2000,
       pollWaitMs: 20_000,
@@ -727,7 +722,7 @@ export class Bridge {
     if (!peer) {
       if (payload.type !== 'hello' || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port)) return forbidden
       const invite = this.invites.get(from)
-      const invited = !!invite && invite.expires > Date.now()
+      const invited = !!invite
       const token = invited ? undefined : this.takeToken(payload.token)
       if (!invited && !token) return forbidden
       // 다른 PC에서 왔으면 상대가 적어 보낸 127.0.0.1 은 이 PC를 가리키므로 뺀다. 중계 서버로 온 것도 다른 PC로 본다.
@@ -872,7 +867,7 @@ export class Bridge {
   private invite(member: unknown, by: string) {
     if (!isMember(member) || member.key === this.key || this.peers.has(member.key)) return
     const { key, name, addrs, port } = member
-    this.invites.set(key, { key, name, addrs, port, by, expires: Date.now() + INVITE_TTL_MS, nextTry: 0, backoff: this.opts.retryMs })
+    this.invites.set(key, { key, name, addrs, port, by, nextTry: 0, backoff: this.opts.retryMs })
     void this.tryInvites()
   }
 
@@ -880,11 +875,6 @@ export class Bridge {
     await Promise.all(
       [...this.invites.values()].map(async invite => {
         if (this.peers.has(invite.key)) return void this.invites.delete(invite.key)
-        if (invite.expires <= Date.now()) {
-          this.invites.delete(invite.key)
-          this.emit({ type: 'undelivered', to: invite.name, reason: `could not connect to ${invite.name}, introduced by ${invite.by}`, at: now() })
-          return
-        }
         if (invite.trying || invite.nextTry > Date.now() || !this.server) return
         invite.trying = true
         const peer: Peer = { key: invite.key, name: invite.name, addrs: invite.addrs, port: invite.port }
@@ -1222,10 +1212,6 @@ export class Bridge {
         }
         if (!peer) {
           drop('the session disconnected')
-          continue
-        }
-        if (Date.now() - item.since > this.opts.expireMs) {
-          drop(`gave up after ${span(this.opts.expireMs)} without reaching the session`)
           continue
         }
         try {

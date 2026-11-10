@@ -3,8 +3,7 @@ import { join } from 'node:path'
 import { isSavedBridge, routeId, type SavedBridge } from './bridge'
 
 // 다시 켠 세션이 되살릴 브릿지 상태는 ~/.coworker/sessions/<이름표>.json 에 있다.
-// 사람이 close_bridge 로 닫으면 지우고, 7일 동안 다시 켜지 않으면 지운다.
-export const KEEP_MS = 7 * 24 * 60 * 60_000
+// 사람이 close_bridge 로 닫을 때만 지운다. 시간이 지났다고 지우지 않는다(사람이 정함, 2026-11-10).
 
 export const savedPath = (home: string, id: string) => join(home, 'sessions', `${id.replace(/[^A-Za-z0-9._-]/g, '_')}.json`)
 
@@ -42,10 +41,6 @@ export async function findSession(home: string, id: string | undefined): Promise
   const path = savedPath(home, id)
   const saved = readSaved(path)
   if (!saved) return { sessionId: id }
-  if (Date.now() - Date.parse(saved.savedAt) > KEEP_MS) {
-    rmSync(path, { force: true })
-    return { sessionId: id }
-  }
   for (let i = 0; i < 10; i++) {
     // 앞 프로세스가 끝나면서 마지막 상태를 남겼을 수 있으니 다시 읽는다.
     if (!(await stillRunning(saved))) return { sessionId: id, restore: readSaved(path) ?? saved }
@@ -54,8 +49,8 @@ export async function findSession(home: string, id: string | undefined): Promise
   return {}
 }
 
-// 오래된 상태 파일을 지운다. 저장하다 남은 임시 파일도 함께 지운다.
-export function pruneSaved(home: string, keepMs = KEEP_MS) {
+// 저장하다 멈춘 프로세스가 남긴 임시 파일만 지운다. 상태 파일은 건드리지 않는다.
+export function pruneSaved(home: string) {
   const dir = join(home, 'sessions')
   let names: string[]
   try {
@@ -66,8 +61,7 @@ export function pruneSaved(home: string, keepMs = KEEP_MS) {
   for (const name of names) {
     const path = join(dir, name)
     try {
-      const age = Date.now() - statSync(path).mtimeMs
-      if (age > keepMs || (name.endsWith('.tmp') && age > 60_000)) rmSync(path, { force: true })
+      if (name.endsWith('.tmp') && Date.now() - statSync(path).mtimeMs > 60_000) rmSync(path, { force: true })
     } catch {}
   }
 }
