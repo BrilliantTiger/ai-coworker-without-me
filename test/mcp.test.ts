@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { waitSeconds } from '../src/limits'
+import { readSaved, savedPath, stillRunning } from '../src/resume'
 
 // 실제 MCP 서버 두 개를 띄워, Claude Code 쪽과 Codex 쪽이 도구만으로 주고받는지 본다.
 const home = mkdtempSync(join(tmpdir(), 'coworker-mcp-'))
@@ -17,7 +18,8 @@ async function session(clientName: string, env: Record<string, string> = {}, cli
       command: process.execPath,
       args: [join(import.meta.dir, '..', 'src', 'mcp.ts')],
       // 시험을 채널로 켠 Claude Code 안에서 돌려도 채널로 바뀌지 않게 정해 둔다.
-      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', ...env } as Record<string, string>,
+      // Claude Code 안에서 돌려도 그 세션 ID를 물려받지 않게 비운다. 다시 켜기 시험만 따로 준다.
+      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDE_CODE_SESSION_ID: '', ...env } as Record<string, string>,
       stderr: 'inherit',
     }),
   )
@@ -333,3 +335,69 @@ test('a Claude Code session not started as a channel passes on how to start one,
   const codex = await session('codex-mcp-client', { COWORKER_HOME: mkdtempSync(join(tmpdir(), 'coworker-hint-mcp-')), CLAUDECODE: '' })
   expect((await codex('open_bridge', {})).next).not.toContain('claude-cw')
 })
+
+// 세션을 닫으면 MCP 서버가 끝난다. 끝나서 그 포트가 답하지 않을 때까지 기다린다.
+async function ended(client: Client, homeDir: string, id: string) {
+  await client.close()
+  for (let i = 0; i < 100; i++) {
+    const saved = readSaved(savedPath(homeDir, id))
+    if (saved && !(await stillRunning(saved))) return saved
+    await Bun.sleep(50)
+  }
+  throw new Error('the server did not end')
+}
+
+test('the same Claude Code session started again gets its bridge back by itself, and the other side needs no new code', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-resume-'))
+  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'session-one' }
+  const first = new Client({ name: 'claude-code', version: '1.0.0' })
+  const claude = await session('claude-code', env, first)
+  const codex = await session('codex-mcp-client')
+  const opened = await claude('open_bridge', {})
+  expect(opened.session_id).toBe('session-one')
+  const joined = await codex('connect', { code: opened.code })
+  expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'connected' })
+  const asked = await claude('send_question', { question: 'Which port?' })
+
+  // Claude Code 를 닫았다. 그사이 상대가 답한다.
+  await ended(first, own, 'session-one')
+  const q = (await codex('wait_for_message', { timeout_sec: 5 })).events.find((e: { kind?: string }) => e.kind === 'question')
+  expect((await codex('reply', { thread: q.thread, text: '7690' })).delivery).toBe('queued')
+
+  // 같은 세션을 이어서 켰다(claude --resume). 브릿지가 저절로 돌아오고, 그사이 온 답을 받는다.
+  const second = new Client({ name: 'claude-code', version: '1.0.0' })
+  const again = await session('claude-code', env, second)
+  expect(second.getInstructions()).toMatch(/came back by itself with the same identity: it is open again and still connected to /)
+  const conns = await again('list_connections')
+  expect(conns).toMatchObject({ session_id: 'session-one', peers: [expect.objectContaining({ name: joined.myName })] })
+  const got = (await again('wait_for_message', { timeout_sec: 10 })).events
+  expect(got).toEqual([expect.objectContaining({ kind: 'answer', text: '7690', thread: asked.thread })])
+  // 상대는 이쪽이 돌아온 것을 안다.
+  expect((await codex('wait_for_message', { timeout_sec: 5 })).events).toEqual([expect.objectContaining({ type: 'connected', again: true })])
+}, 30_000)
+
+test('a session without a session id, like Codex, brings its bridge back with resume', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-resume-'))
+  const first = new Client({ name: 'codex-mcp-client', version: '1.0.0' })
+  const codex = await session('codex-mcp-client', { COWORKER_HOME: own }, first)
+  const claude = await session('claude-code')
+  const opened = await codex('open_bridge', {})
+  const joined = await claude('connect', { code: opened.code })
+  expect((await codex('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'connected' })
+  await ended(first, own, opened.session_id)
+
+  // Codex 를 다시 켜면 새 서버는 이 세션을 모른다. AI는 앞의 결과에 있던 session_id 로 되살린다.
+  const again = await session('codex-mcp-client', { COWORKER_HOME: own })
+  await expect(again('wait_for_message', { timeout_sec: 1 })).rejects.toThrow(/open_bridge with resume set to the session_id/)
+  await expect(again('open_bridge', { resume: 'nothing-saved' })).rejects.toThrow(/no saved bridge for session_id nothing-saved/)
+  const back = await again('open_bridge', { resume: opened.session_id })
+  expect(back).toMatchObject({ resumed: true, session_id: opened.session_id, connected: [joined.myName] })
+  expect(back.code).toBeUndefined()
+  expect((await claude('wait_for_message', { timeout_sec: 5 })).events).toEqual([expect.objectContaining({ type: 'connected', again: true })])
+  await claude('send_question', { question: 'Back?' })
+  expect((await again('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ kind: 'question', text: 'Back?' })
+
+  // 사람이 닫으라고 하면 저장한 상태도 지운다. 다시 되살릴 수 없다.
+  await again('close_bridge')
+  expect(readSaved(savedPath(own, opened.session_id))).toBeUndefined()
+}, 30_000)

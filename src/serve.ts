@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { version } from '../package.json'
+import { pruneSaved } from './resume'
 import { createSession } from './session'
 
 // coworker 앱. 이 PC에서 따로 켜 두면, Claude 플러그인 디렉터리판 플러그인이 http://127.0.0.1:7690/mcp 로 붙는다.
@@ -12,7 +13,8 @@ import { createSession } from './session'
 // 주소로 붙는 서버는 채널이 될 수 없어서, 이 앱에 붙은 세션은 wait_for_message 로 기다린다.
 export const APP_PORT = 7690
 
-// 도구 호출이 돌고 있지 않고 이 시간 동안 요청이 없는 세션은 브릿지를 닫고 정리한다. COWORKER_APP_IDLE_MS 는 시험용이다.
+// 도구 호출도 백그라운드 명령도 기다리고 있지 않고 이 시간 동안 요청이 없는 세션은 브릿지를 멈추고 정리한다.
+// 멈춘 브릿지는 상태가 남아 있어서, 다시 붙은 세션의 AI가 resume 으로 되살릴 수 있다. COWORKER_APP_IDLE_MS 는 시험용이다.
 const IDLE_MS = Number(process.env.COWORKER_APP_IDLE_MS) || 30 * 60_000
 
 type Entry = { transport: WebStandardStreamableHTTPServerTransport; session: ReturnType<typeof createSession>; lastSeen: number }
@@ -39,6 +41,7 @@ async function rootsFolder(server: McpServer) {
 export async function serve({ home }: { home: string }) {
   const port = Number(process.env.COWORKER_APP_PORT) || APP_PORT
   const sessions = new Map<string, Entry>()
+  pruneSaved(home)
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`])
 
   const close = (id: string) => {
@@ -103,7 +106,8 @@ export async function serve({ home }: { home: string }) {
 
   const sweep = setInterval(() => {
     const now = Date.now()
-    for (const [id, entry] of sessions) if (entry.session.inflight() === 0 && now - entry.lastSeen > IDLE_MS) close(id)
+    for (const [id, entry] of sessions)
+      if (entry.session.inflight() === 0 && !entry.session.listening() && now - entry.lastSeen > IDLE_MS) close(id)
   }, Math.min(60_000, IDLE_MS))
 
   const stop = () => {

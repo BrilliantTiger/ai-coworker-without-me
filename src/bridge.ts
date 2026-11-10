@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { Server } from 'bun'
 import { isAgreement, renderAgreement, type Agreement } from './agreement'
 import { decodeCode, encodeCode } from './code'
@@ -97,7 +97,8 @@ export type Thread = {
 export type AskProgress = { id: string; answers: AnswerMode; asked: string[]; answered: string[]; closedBy?: string }
 
 export type BridgeEvent =
-  | { type: 'connected'; peer: string; via?: string; at: string }
+  // again: 이미 이어져 있던 상대가 다시 켜져 돌아왔다.
+  | { type: 'connected'; peer: string; via?: string; again?: boolean; at: string }
   | {
       type: 'message'
       thread: string
@@ -136,8 +137,9 @@ export type AgreementInput = {
 }
 
 // hello 는 연결 코드의 토큰을 들고 오거나, 그룹 안의 누군가가 이쪽에 소개해 둔 세션이 토큰 없이 온다.
+// 이미 이어진 상대도 주소나 포트가 바뀌면 hello 로 알린다. back 은 그 상대가 다시 켜져 돌아왔다는 뜻이다.
 type Payload =
-  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number }
+  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean }
   | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean }
   | { type: 'introduce'; member: Member }
   | { type: 'msg'; msg: WireMessage }
@@ -149,7 +151,7 @@ type Payload =
   | { type: 'batch'; items: { id: string; payload: Payload }[] }
 
 // 상대가 가져간 뒤 「받았다」고 알려 와야 줄에서 지운다. 가져가던 연결이 끊겨도 다음에 다시 넘긴다.
-type Outgoing = { id: string; peer: string; payload: Payload; thread?: string; since: number }
+export type Outgoing = { id: string; peer: string; payload: Payload; thread?: string; since: number }
 
 class DeliveryError extends Error {
   constructor(readonly reason: 'unreachable' | 'rejected', message: string) {
@@ -172,12 +174,59 @@ export type BridgeOptions = {
   relayKey?: string
   // 중계 서버를 거치면 상대가 우편함에서 꺼내 처리할 때까지 기다려야 해서, 바로 보낼 때보다 오래 기다린다.
   relayTimeoutMs?: number
+  // 되살릴 때 쓰는 키. 없으면 새로 만든다.
+  keys?: KeyPair
+  // 이 세션을 다시 켰을 때 되살릴 수 있게 상태를 저장할 파일. 없으면 저장하지 않는다.
+  saveTo?: string
+}
+
+// 세션을 다시 켰을 때 되살릴 것. 이 세션의 비밀키와 아직 쓰지 않은 연결 코드가 들어 있어서, 이 PC의 사용자만 읽게 쓴다.
+export type SavedBridge = {
+  v: 1
+  name: string
+  publicKey: string
+  secretKey: string
+  port: number
+  peers: Peer[]
+  threads: Thread[]
+  outbox: Outgoing[]
+  tokens: { token: string; expires: number | null; private: boolean }[]
+  seen: string[]
+  closedAsks: [string, string][]
+  // 왔지만 AI가 아직 읽지 않은 소식. 다시 켠 뒤 inbox 나 기다리기로 받는다.
+  events?: BridgeEvent[]
+  pid: number
+  savedAt: string
+}
+
+export function isSavedBridge(v: unknown): v is SavedBridge {
+  const s = v as SavedBridge
+  return (
+    !!s &&
+    s.v === 1 &&
+    typeof s.name === 'string' &&
+    typeof s.publicKey === 'string' &&
+    typeof s.secretKey === 'string' &&
+    Number.isInteger(s.port) &&
+    Array.isArray(s.peers) &&
+    s.peers.every(isMember) &&
+    Array.isArray(s.threads) &&
+    Array.isArray(s.outbox) &&
+    Array.isArray(s.tokens) &&
+    Array.isArray(s.seen) &&
+    Array.isArray(s.closedAsks) &&
+    (s.events === undefined || Array.isArray(s.events)) &&
+    typeof s.savedAt === 'string'
+  )
 }
 
 // 중계 서버의 우편함 상태. off: 중계 서버를 쓰지 않는다.
 export type RelayState = 'off' | 'connecting' | 'ok' | { error: string }
 
 const now = () => new Date().toISOString()
+const NO_PEERS =
+  'no connected session yet; open the bridge and exchange a connection code first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result'
+const span = (ms: number) => (ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)} hours` : `${Math.round(ms / 60_000)} minutes`)
 // 상대가 이 시간 안에 가져가러 왔으면, 상대는 이쪽 메시지를 스스로 가져가는 중이다.
 const POLL_FRESH_MS = 60_000
 // 소개받은 세션과 이 시간 안에 이어지지 않으면 포기한다.
@@ -208,9 +257,9 @@ const whereIs = (p: Peer) => {
 }
 
 export class Bridge {
-  readonly keys: KeyPair = newKeyPair()
-  readonly key = toB64(this.keys.publicKey)
-  private readonly route = routeId(this.key)
+  readonly keys: KeyPair
+  readonly key: string
+  private readonly route: string
   name: string
   port = 0
   readonly peers = new Map<string, Peer>()
@@ -239,21 +288,77 @@ export class Bridge {
   private relayBox?: string
   relayState: RelayState = 'off'
   private relayWaiters: Array<() => void> = []
-  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey'>> & { home?: string; relay?: string; relayKey?: string }
+  private saveTimer?: ReturnType<typeof setTimeout>
+  // close 로 닫았으면 저장한 상태를 지운다. 프로세스가 끝나서 닫힐 때는 다시 켤 때를 위해 남긴다.
+  private forget = false
+  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey' | 'keys' | 'saveTo'>> & {
+    home?: string
+    relay?: string
+    relayKey?: string
+    saveTo?: string
+  }
 
   constructor(options: BridgeOptions) {
+    this.keys = options.keys ?? newKeyPair()
+    this.key = toB64(this.keys.publicKey)
+    this.route = routeId(this.key)
     this.name = options.name
     this.opts = {
       ports: DEFAULT_PORTS,
       addrs: localAddresses,
       retryMs: 3000,
-      expireMs: 30 * 60_000,
+      // 상대 PC가 잠들어 있거나 세션이 꺼져 있어도 하루 동안은 보낼 것을 들고 있다가, 돌아오면 넘긴다.
+      expireMs: 24 * 60 * 60_000,
       tokenTtlMs: 60 * 60_000,
       connectTimeoutMs: 2000,
       pollWaitMs: 20_000,
       relayTimeoutMs: 15_000,
       ...options,
       relay: options.relay?.trim().replace(/\/+$/, '') || undefined,
+    }
+  }
+
+  // 저장해 둔 세션을 같은 키로 되살린다. 전에 쓰던 포트가 비어 있으면 그 포트로 연다.
+  // 상대들은 이 세션을 같은 키로 알고 있으므로 새 연결 코드 없이 다시 이어진다. 바뀐 주소와 포트는 인사로 알린다.
+  static restore(saved: SavedBridge, options: Omit<BridgeOptions, 'name' | 'keys'>): Bridge {
+    const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } })
+    for (const p of saved.peers) b.peers.set(p.key, { key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined })
+    for (const t of saved.threads) b.threads.set(t.id, t)
+    b.outbox = saved.outbox.filter(o => b.peers.has(o.peer))
+    for (const t of saved.tokens) b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private })
+    b.seen = new Set(saved.seen)
+    b.closedAsks = new Map(saved.closedAsks)
+    b.events = saved.events ?? []
+    try {
+      b.open(saved.port)
+    } catch {
+      b.open()
+    }
+    for (const peer of b.peers.values()) {
+      void b.deliver(peer, { type: 'hello', name: b.name, addrs: b.addrs(), port: b.port, back: true }).catch(() => {})
+      void b.pollLoop(peer.key)
+    }
+    return b
+  }
+
+  snapshot(): SavedBridge {
+    return {
+      v: 1,
+      name: this.name,
+      publicKey: toB64(this.keys.publicKey),
+      secretKey: toB64(this.keys.secretKey),
+      port: this.port,
+      peers: [...this.peers.values()].map(p => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined })),
+      threads: [...this.threads.values()],
+      outbox: this.outbox,
+      tokens: [...this.tokens]
+        .filter(([, t]) => t.expires > Date.now())
+        .map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private })),
+      seen: [...this.seen].slice(-2000),
+      closedAsks: [...this.closedAsks],
+      events: this.events,
+      pid: process.pid,
+      savedAt: now(),
     }
   }
 
@@ -306,6 +411,7 @@ export class Bridge {
     this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: !!options.private })
     this.lastCode = encodeCode({ v: 1, name: this.name, addrs: this.addrs(), port: this.port, key: this.key, token })
     this.writeState()
+    this.dirty()
     return this.lastCode
   }
 
@@ -460,7 +566,7 @@ export class Bridge {
   // 기다림은 마지막 하나만 산다. 사람이 끊었거나 아무도 결과를 읽지 않는 기다림이 소식을 가져가면
   // 그 소식은 사라진다. 그래서 새 기다림이 시작되거나 호출이 취소되면 앞의 기다림은 빈손으로 끝난다.
   async wait(timeoutMs: number, signal?: AbortSignal): Promise<BridgeEvent[]> {
-    if (timeoutMs <= 0) return this.events.splice(0)
+    if (timeoutMs <= 0) return this.take()
     const turn = ++this.waiting
     for (const wake of [...this.waiters]) wake()
     const live = () => turn === this.waiting && !signal?.aborted
@@ -479,7 +585,14 @@ export class Bridge {
         this.waiters.push(done)
       })
     }
-    return live() ? this.events.splice(0) : []
+    return live() ? this.take() : []
+  }
+
+  // AI가 읽어 간 소식은 줄에서 빼고, 저장한 상태에서도 뺀다.
+  private take() {
+    const taken = this.events.splice(0)
+    if (taken.length) this.dirty()
+    return taken
   }
 
   async connections() {
@@ -537,9 +650,10 @@ export class Bridge {
     return this.relayState
   }
 
-  // 연결된 세션에 끝났다고 알리고 포트를 닫는다.
+  // 연결된 세션에 끝났다고 알리고 포트를 닫는다. 사람이 닫은 것이므로 저장한 상태도 지운다.
   async close() {
     if (!this.server) return
+    this.forget = true
     await Promise.all(
       [...this.peers.values()].map(async p => {
         try {
@@ -552,8 +666,15 @@ export class Bridge {
     this.shutdown()
   }
 
-  // 알리지 않고 바로 닫는다. 프로세스가 끝날 때 쓴다.
+  // 알리지 않고 바로 닫는다. 프로세스가 끝날 때 쓴다. 그때는 다시 켤 때를 위해 상태를 남긴다.
   shutdown() {
+    clearTimeout(this.saveTimer)
+    this.saveTimer = undefined
+    if (this.opts.saveTo) {
+      if (this.forget) rmSync(this.opts.saveTo, { force: true })
+      else this.save()
+    }
+    this.forget = false
     this.abort.abort()
     for (const wakers of this.pollWaiters.values()) for (const wake of [...wakers]) wake()
     clearInterval(this.timer)
@@ -621,10 +742,14 @@ export class Bridge {
       return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined })
     }
 
+    if (payload.type === 'hello') return answer(this.welcomeBack(peer, payload, seenAt, relayed))
     if (payload.type === 'poll') {
       peer.lastPollAt = Date.now()
       const acked = new Set(Array.isArray(payload.ack) ? payload.ack : [])
-      if (acked.size) this.outbox = this.outbox.filter(o => !(o.peer === peer.key && acked.has(o.id)))
+      if (acked.size) {
+        this.outbox = this.outbox.filter(o => !(o.peer === peer.key && acked.has(o.id)))
+        this.dirty()
+      }
       const items = await this.pending(peer.key, Math.min(Math.max(payload.wait, 0), 25_000))
       return answer({ type: 'batch', items })
     }
@@ -686,6 +811,23 @@ export class Bridge {
       body: JSON.stringify({ id: item.id, status, body }),
       signal: AbortSignal.any([AbortSignal.timeout(10_000), this.abort.signal]),
     }).catch(() => {})
+  }
+
+  // 이미 이어진 상대가 다시 인사했다. 다시 켜졌거나 잠에서 깨어 주소나 포트가 바뀌었을 수 있으니 새로 받는다.
+  // 상대가 다시 켜져 돌아온 것이면(back) 사람에게 알릴 수 있게 소식을 남긴다. 밀려 있던 것은 바로 다시 보낸다.
+  private welcomeBack(peer: Peer, hello: Extract<Payload, { type: 'hello' }>, seenAt: string | undefined, relayed: boolean): Payload {
+    if (Array.isArray(hello.addrs) && hello.addrs.every(a => typeof a === 'string') && Number.isInteger(hello.port)) {
+      const remote = relayed || (!!seenAt && !isLoopback(seenAt))
+      const given = remote ? hello.addrs.filter(a => !isLoopback(a)) : hello.addrs
+      peer.addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
+      peer.port = hello.port
+      peer.lastAddr = undefined
+      peer.directFailed = false
+    }
+    if (hello.back) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
+    else this.changed()
+    void this.flush()
+    return { type: 'hello_ack', name: this.name }
   }
 
   // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
@@ -808,6 +950,7 @@ export class Bridge {
   private async handOver(peer: Peer, payload: Payload, waitMs: number, thread?: string): Promise<boolean> {
     const item: Outgoing = { id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() }
     this.outbox.push(item)
+    this.dirty()
     this.wakePoll(peer.key)
     for (let waited = 0; waited < waitMs && this.outbox.includes(item); waited += 50) await Bun.sleep(50)
     return !this.outbox.includes(item)
@@ -844,6 +987,8 @@ export class Bridge {
     // 막 연결된 직후에는 상대가 아직 이쪽을 등록하기 전이라 거절할 수 있다. 여러 번 거절하면 그때 끊는다.
     let refusals = 0
     let ack: string[] = []
+    // 닿지 않다가 다시 닿으면(이쪽 PC가 잠에서 깼다) 이쪽의 지금 주소와 포트를 다시 알린다.
+    let lost = false
     try {
       while (this.server && !this.abort.signal.aborted) {
         const peer = this.peers.get(key)
@@ -857,6 +1002,10 @@ export class Bridge {
           backoff = this.opts.retryMs
           refusals = 0
           ack = []
+          if (lost) {
+            lost = false
+            void this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {})
+          }
           if (reply.type === 'batch')
             for (const item of reply.items) {
               this.process(peer, item.payload)
@@ -869,6 +1018,7 @@ export class Bridge {
             break
           }
           peer.lastAddr = undefined
+          lost = true
           await Bun.sleep(backoff)
           backoff = Math.min(backoff * 2, 30_000)
         }
@@ -943,20 +1093,43 @@ export class Bridge {
   }
 
   private changed() {
+    this.dirty()
     for (const onChange of [...this.watchers]) onChange()
+  }
+
+  // 바뀐 것을 조금 모았다가 한 번에 저장한다.
+  private dirty() {
+    if (!this.opts.saveTo || this.saveTimer || !this.server) return
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined
+      this.save()
+    }, 100)
+    this.saveTimer.unref?.()
+  }
+
+  private save() {
+    const path = this.opts.saveTo
+    if (!path || !this.server) return
+    try {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+      const tmp = `${path}.${process.pid}.tmp`
+      writeFileSync(tmp, JSON.stringify(this.snapshot()), { mode: 0o600 })
+      renameSync(tmp, path)
+    } catch {}
   }
 
   private takeToken(token: unknown) {
     if (typeof token !== 'string') return undefined
     const entry = this.tokens.get(token)
     this.tokens.delete(token)
+    this.dirty()
     return entry && entry.expires > Date.now() ? entry : undefined
   }
 
   private resolvePeers(to?: string | string[]): Peer[] {
     const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map(n => n.trim()).filter(Boolean)
     if (names.some(n => EVERYONE.includes(n.toLowerCase()))) {
-      if (this.peers.size === 0) throw new Error('no connected session yet; open the bridge and exchange a connection code first')
+      if (this.peers.size === 0) throw new Error(NO_PEERS)
       return [...this.peers.values()]
     }
     if (names.length === 0) return [this.resolvePeer(undefined)]
@@ -965,7 +1138,7 @@ export class Bridge {
 
   private resolvePeer(to?: string): Peer {
     const peers = [...this.peers.values()]
-    if (peers.length === 0) throw new Error('no connected session yet; open the bridge and exchange a connection code first')
+    if (peers.length === 0) throw new Error(NO_PEERS)
     if (!to) {
       if (peers.length === 1) return peers[0]!
       throw new Error(`several sessions are connected; say which one, several, or "everyone": ${peers.map(p => p.name).join(', ')}`)
@@ -1031,6 +1204,7 @@ export class Bridge {
     }
     if (this.isPulling(peer)) return (await this.handOver(peer, payload, 3000, thread)) ? 'delivered' : 'queued'
     this.outbox.push({ id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() })
+    this.dirty()
     return 'queued'
   }
 
@@ -1051,12 +1225,13 @@ export class Bridge {
           continue
         }
         if (Date.now() - item.since > this.opts.expireMs) {
-          drop('gave up after 30 minutes without reaching the session')
+          drop(`gave up after ${span(this.opts.expireMs)} without reaching the session`)
           continue
         }
         try {
           await this.deliver(peer, item.payload)
           this.outbox = this.outbox.filter(o => o !== item)
+          this.dirty()
         } catch (e) {
           if (e instanceof DeliveryError && e.reason === 'rejected') drop('the session refused it')
           else blocked.add(item.peer)

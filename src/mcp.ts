@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { autostart } from './autostart'
 import { detectChannel } from './channel'
+import { findSession, pruneSaved } from './resume'
 import { serve } from './serve'
 import { createSession } from './session'
 
@@ -22,6 +23,10 @@ async function stdio() {
   // Claude Code 를 Channels 로 켰으면(claude --dangerously-load-development-channels server:coworker)
   // 상대 메시지를 세션에 바로 밀어 넣는다. 아니면 AI가 wait_for_message 로 기다린다.
   const channel = detectChannel()
+  // Claude Code 는 세션 ID를 넘겨 준다. 같은 세션을 다시 켜면(claude --resume) 저장해 둔 브릿지를 되살린다.
+  pruneSaved(home)
+  const claudeSession = process.env.CLAUDECODE === '1' ? process.env.CLAUDE_CODE_SESSION_ID || undefined : undefined
+  const { sessionId, restore } = await findSession(home, claudeSession)
   const session = createSession({
     channel,
     hint: !channel && process.env.CLAUDECODE === '1',
@@ -30,6 +35,8 @@ async function stdio() {
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
     folder: projectFolder,
+    sessionId,
+    restore,
   })
   let exiting = false
   const exit = () => {

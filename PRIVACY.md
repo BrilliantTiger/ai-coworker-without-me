@@ -20,6 +20,7 @@ What you send also reaches the other person's AI session, under the terms of the
 ## What stays on your computer
 
 - `~/.coworker/bridges/<port>.json`: the open bridge and its last connection code, readable only by you. Deleted when the bridge closes.
+- `~/.coworker/sessions/<session>.json`: what a session needs to come back after it restarts: its keys, the sessions it is connected to, its conversations, messages not yet delivered or read, and unused connection codes. Readable only by you. Deleted when you close the bridge, and after 7 days without the session starting again.
 - `~/.coworker/agreements/`: agreements with the conversation they came from. Kept until you delete them.
 - `~/.coworker/hint-shown`: marks that the hint on starting Claude Code as a channel was passed on.
 - If you use the coworker app (the Claude plugin directory edition): the app file `~/.coworker/coworker.js`, its log `~/.coworker/app.log`, and what starts it at login (`~/Library/LaunchAgents/com.brillianttiger.coworker.plist` on Mac, a `coworker.lnk` shortcut in the Startup folder on Windows). The app listens only on `127.0.0.1:7690` and refuses requests from web pages.
@@ -51,6 +52,7 @@ AI Co-worker Without Me는 만든 사람이 운영하는 서버가 없고, 아�
 ## 이 PC에 남는 것
 
 - `~/.coworker/bridges/<포트>.json`: 열린 브릿지와 마지막 연결 코드. 본인만 읽을 수 있고, 브릿지를 닫으면 지워진다.
+- `~/.coworker/sessions/<세션>.json`: 세션을 다시 켰을 때 되살릴 것. 이 세션의 키, 연결된 세션, 대화, 아직 못 보냈거나 AI가 못 읽은 메시지, 아직 쓰지 않은 연결 코드다. 본인만 읽을 수 있고, 브릿지를 닫거나 7일 동안 그 세션을 다시 켜지 않으면 지워진다.
 - `~/.coworker/agreements/`: 합의문과 그 대화 기록. 지울 때까지 남는다.
 - `~/.coworker/hint-shown`: Claude Code를 채널로 켜는 법 안내를 한 번 전했다는 표시.
 - coworker 앱(Claude 플러그인 디렉터리판)을 쓰면: 앱 파일 `~/.coworker/coworker.js`, 기록 `~/.coworker/app.log`, 로그인할 때 앱을 켜는 설정(Mac은 `~/Library/LaunchAgents/com.brillianttiger.coworker.plist`, Windows는 시작프로그램 폴더의 `coworker.lnk`). 앱은 `127.0.0.1:7690`에서만 열리고 웹페이지가 보낸 요청은 거절한다.

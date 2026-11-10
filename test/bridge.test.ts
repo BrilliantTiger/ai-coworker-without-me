@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Bridge, parsePorts, routeId, type BridgeEvent } from '../src/bridge'
+import { Bridge, isSavedBridge, parsePorts, routeId, type BridgeEvent, type SavedBridge } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, seal, fromB64 } from '../src/crypto'
 import { Viewer } from '../src/viewer'
@@ -619,5 +619,89 @@ describe('viewer', () => {
     } finally {
       viewer.stop()
     }
+  })
+})
+
+describe('coming back after a restart', () => {
+  type Message = Extract<BridgeEvent, { type: 'message' }>
+  const restoreOptions = (saveTo: string, ports: [number, number]) => ({ ports, addrs: () => ['127.0.0.1'], retryMs: 50, connectTimeoutMs: 500, saveTo })
+  const load = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as SavedBridge
+
+  async function pairWithSavedJoiner() {
+    const dir = mkdtempSync(join(tmpdir(), 'coworker-restore-'))
+    const saveTo = join(dir, 'sessions', 'b.json')
+    const a = make('A · Claude Code')
+    const b = make('B · Codex', { saveTo })
+    a.open()
+    await b.connect(a.newCode())
+    await next(a, 'connected')
+    return { a, b, saveTo }
+  }
+
+  test('a session that comes back with its saved state reconnects without a new code and keeps its conversations', async () => {
+    const { a, b, saveTo } = await pairWithSavedJoiner()
+    const asked = await b.ask(undefined, 'Which port does the L2 API use?')
+    const q = (await next(a, 'message')) as Message
+    await a.reply(q.thread, '18001')
+    expect(await next(b, 'message')).toMatchObject({ kind: 'answer', text: '18001' })
+    const [port, ports] = [b.port, [b.port, b.port + 9] as [number, number]]
+
+    // B 의 프로세스가 끝났다. 다시 켤 때를 위해 상태가 남고, 이 PC의 사용자만 읽을 수 있다.
+    b.shutdown()
+    const saved = load(saveTo)
+    expect(isSavedBridge(saved)).toBe(true)
+    if (process.platform !== 'win32') expect(statSync(saveTo).mode & 0o777).toBe(0o600)
+    // 그사이 A가 보낸 질문은 버리지 않고 들고 있는다.
+    const waiting = await a.ask(undefined, 'Are you back?')
+    expect(waiting.delivery).toBe('queued')
+
+    const b2 = Bridge.restore(saved, restoreOptions(saveTo, ports))
+    opened.push(b2)
+    expect([b2.key, b2.port, b2.name]).toEqual([b.key, port, 'B · Codex'])
+    expect(b2.threads.get(asked.thread)?.messages.map(m => m.text)).toEqual(['Which port does the L2 API use?', '18001'])
+    // A 는 B 가 돌아온 것을 알고, 들고 있던 질문을 넘긴다.
+    expect(await next(a, 'connected')).toMatchObject({ peer: 'B · Codex', again: true })
+    const back = (await next(b2, 'message')) as Message
+    expect(back).toMatchObject({ kind: 'question', text: 'Are you back?' })
+    await b2.reply(back.thread, 'yes')
+    expect(await next(a, 'message')).toMatchObject({ kind: 'answer', text: 'yes', thread: waiting.thread })
+  }, 15_000)
+
+  test('if its old port is taken, the session comes back on another port and the other side follows', async () => {
+    const { a, b, saveTo } = await pairWithSavedJoiner()
+    const [port, ports] = [b.port, [b.port, b.port + 9] as [number, number]]
+    b.shutdown()
+    const blocker = Bun.serve({ port, hostname: '0.0.0.0', fetch: () => new Response('') })
+    try {
+      const b2 = Bridge.restore(load(saveTo), restoreOptions(saveTo, ports))
+      opened.push(b2)
+      expect(b2.port).not.toBe(port)
+      expect(await next(a, 'connected')).toMatchObject({ again: true })
+      // A 는 새 포트로 바로 보낸다.
+      expect((await a.ask(undefined, 'New port?')).delivery).toBe('delivered')
+      expect(await next(b2, 'message')).toMatchObject({ text: 'New port?' })
+    } finally {
+      blocker.stop(true)
+    }
+  })
+
+  test('news that arrived but was not read yet is still there after the restart', async () => {
+    const { a, b, saveTo } = await pairWithSavedJoiner()
+    await a.ask(undefined, 'Read me after the restart')
+    for (let i = 0; i < 100 && !b.unread().length; i++) await Bun.sleep(20)
+    b.shutdown()
+    const b2 = Bridge.restore(load(saveTo), restoreOptions(saveTo, [b.port, b.port + 9]))
+    opened.push(b2)
+    expect(await b2.wait(0)).toEqual([expect.objectContaining({ type: 'message', kind: 'question', text: 'Read me after the restart' })])
+  })
+
+  test('closing on purpose forgets the saved state; stopping with the process keeps it', async () => {
+    const { b, saveTo } = await pairWithSavedJoiner()
+    b.shutdown()
+    expect(existsSync(saveTo)).toBe(true)
+    const b2 = Bridge.restore(load(saveTo), restoreOptions(saveTo, [b.port, b.port + 9]))
+    opened.push(b2)
+    await b2.close()
+    expect(existsSync(saveTo)).toBe(false)
   })
 })

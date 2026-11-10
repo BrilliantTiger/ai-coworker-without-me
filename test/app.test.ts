@@ -122,6 +122,25 @@ test('a session that ends or goes quiet closes its bridge', async () => {
   expect(readdirSync(join(home, 'bridges'))).not.toContain(`${p2}.json`)
 }, 15_000)
 
+test('a quiet session whose background listen command is waiting stays, and a stopped bridge comes back with resume', async () => {
+  const { port, home } = await startApp({ COWORKER_APP_IDLE_MS: '1500' })
+  const first = await session(port, 'claude-code')
+  const opened = await first.call('open_bridge')
+  // 채널 없는 Claude Code 는 백그라운드 명령으로 기다린다. 그동안 MCP 요청이 없어도 정리하지 않는다.
+  const stop = new AbortController()
+  const listening = fetch(`${opened.viewer}/next`, { signal: stop.signal }).catch(() => 'stopped')
+  await Bun.sleep(4000)
+  expect(existsSync(join(home, 'bridges', `${opened.port}.json`))).toBe(true)
+  // 명령이 멈추고 조용하면 정리한다. 상태는 남는다.
+  stop.abort()
+  expect(await listening).toBe('stopped')
+  for (let i = 0; i < 60 && existsSync(join(home, 'bridges', `${opened.port}.json`)); i++) await Bun.sleep(100)
+  expect(existsSync(join(home, 'bridges', `${opened.port}.json`))).toBe(false)
+  // 다시 붙은 세션의 AI는 앞서 받은 session_id 로 같은 브릿지를 되살린다.
+  const second = await session(port, 'claude-code')
+  expect(await second.call('open_bridge', { resume: opened.session_id })).toMatchObject({ resumed: true, session_id: opened.session_id, name: opened.name })
+}, 20_000)
+
 test('starting the app twice leaves the running one alone', async () => {
   const { port, home } = await startApp()
   const second = Bun.spawn([process.execPath, entry, 'serve'], {

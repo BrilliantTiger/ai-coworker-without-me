@@ -1,10 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { version } from '../package.json'
-import { Bridge, parsePorts, type BridgeEvent } from './bridge'
+import { Bridge, parsePorts, type BridgeEvent, type SavedBridge } from './bridge'
 import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
+import { readSaved, savedPath, stillRunning } from './resume'
 import { Viewer } from './viewer'
 
 // 연결 코드를 쓸 수 있는 시간(분). 0 을 주면 시간 제한 없이 브릿지를 닫을 때까지 쓴다. 어느 쪽이든 한 번만 쓴다.
@@ -24,11 +26,31 @@ export type SessionOptions = {
   relayKey?: string
   // 세션 이름에 붙일 프로젝트 폴더를 알아내는 방법. stdio 는 실행 환경에서, 앱은 클라이언트가 알려 주는 폴더(roots)에서 찾는다.
   folder: (server: McpServer) => string | undefined | Promise<string | undefined>
+  // 이 세션을 다시 켰을 때 알아볼 이름표. Claude Code 는 세션 ID(CLAUDE_CODE_SESSION_ID)를 MCP 서버에 넘기고, 이어서 켜도 같은 값을 준다.
+  sessionId?: string
+  // 다시 켠 세션이면 되살릴 브릿지 상태. stdio 서버가 뜰 때 찾아서 넘긴다.
+  restore?: SavedBridge
 }
+
+// 이 프로세스에서 지금 돌고 있는 브릿지. 앱은 Claude Code 가 다시 켜지면 새 MCP 세션을 받으므로,
+// 그 세션이 resume 으로 같은 이름표의 브릿지를 넘겨받게 한다.
+const live = new Map<string, { bridge: Bridge; release: () => void }>()
 
 // 세션 하나. stdio 플러그인은 프로세스마다 하나를, 앱은 연결된 세션마다 하나를 만든다.
 export function createSession(opts: SessionOptions) {
   const channel = opts.channel
+  // 이 세션의 이름표. 상태 파일 이름이 되고, AI가 resume 으로 되살릴 때 쓴다.
+  let identity = opts.sessionId ?? randomUUID()
+  const restoredPeers = opts.restore?.peers.map(p => p.name)
+  const RESTORED = restoredPeers
+    ? `This session restarted, and its coworker bridge came back by itself with the same identity: it is open again and still connected to ${restoredPeers.join(', ') || 'nobody yet'}. Nobody needs a new code. The next time you talk with your human, tell them in one line, then call inbox to see what arrived meanwhile and keep listening as before.
+
+  `
+    : ''
+  const RESTARTS = `If coworker restarts
+  - When the same Claude Code session starts again (for example claude --resume), its bridge comes back by itself with the same identity and connections. The other side keeps it and nobody needs a new code.
+  - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
+  - What is sent to a session that is asleep or restarting waits up to 24 hours and is delivered when it is back.`
   const LISTENING = channel
     ? `Stay open until your human says stop
   - In this session, what the other side sends comes in by itself as a <channel> notice from coworker: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
@@ -49,7 +71,7 @@ export function createSession(opts: SessionOptions) {
   - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you listen again.
   - When nothing new arrived, say nothing to your human. No "still listening" or "nothing new" lines; just keep listening.`
 
-  const INSTRUCTIONS = `Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
+  const INSTRUCTIONS = `${RESTORED}Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
 
   Groups
   - A connection code from open_bridge is a group code by default: whoever joins with it is also connected, automatically, with every session already in this session's group. You get a "connected" event for each, with "via" naming who introduced them. A private code (open_bridge with private: true) links only the two sessions.
@@ -58,6 +80,8 @@ export function createSession(opts: SessionOptions) {
   - When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
 
   ${LISTENING}
+
+  ${RESTARTS}
 
   Answer what is settled, ask your human what needs deciding
   - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
@@ -130,17 +154,71 @@ export function createSession(opts: SessionOptions) {
     } catch {}
   }
 
+  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity) })
+
   function getBridge() {
     if (!bridge) {
       const name = `${folder ? `${folder} · ` : ''}${clientLabel()} @ ${shortHostname()}`
-      bridge = new Bridge({ name, home, ports: parsePorts(portsText), relay, relayKey })
-      if (channel) bridge.onEvent = () => void (pushing = pushing.then(pushEvents))
+      adopt(new Bridge({ name, ...bridgeOptions() }))
     }
-    return bridge
+    return bridge!
+  }
+
+  // 이 세션이 쓸 브릿지를 정한다. 앱에서 다른 MCP 세션이 넘겨받아 가면 이 세션은 그 브릿지를 놓는다.
+  function adopt(b: Bridge) {
+    viewer?.stop()
+    viewer = undefined
+    bridge = b
+    if (channel) b.onEvent = () => void (pushing = pushing.then(pushEvents))
+    live.set(identity, {
+      bridge: b,
+      release: () => {
+        if (bridge !== b) return
+        bridge = undefined
+        viewer?.stop()
+        viewer = undefined
+      },
+    })
+  }
+
+  // 지금 쥔 브릿지(열리지 않은 것)를 놓고, 이름표를 바꾼다.
+  function switchTo(id: string) {
+    if (bridge) {
+      if (live.get(identity)?.bridge === bridge) live.delete(identity)
+      bridge.shutdown()
+      bridge = undefined
+    }
+    identity = id
+  }
+
+  // AI가 resume 으로 부르면: 이 프로세스에서 돌고 있으면 넘겨받고, 아니면 저장해 둔 상태로 되살린다.
+  async function resumeBridge(id: string) {
+    if (bridge?.isOpen) {
+      if (id !== identity) throw new Error(`this session already has an open bridge (session_id ${identity}); keep using it, or close it first`)
+      return bridge
+    }
+    const held = live.get(id)
+    if (held?.bridge.isOpen) {
+      held.release()
+      switchTo(id)
+      adopt(held.bridge)
+      return held.bridge
+    }
+    const saved = readSaved(savedPath(home, id))
+    if (!saved)
+      throw new Error(
+        `no saved bridge for session_id ${id}: it was closed with close_bridge, was not used for 7 days, or belongs to another PC. Open a new bridge and exchange a new code`,
+      )
+    if (await stillRunning(saved)) throw new Error('that bridge is still running in another session on this PC; use that session')
+    switchTo(id)
+    adopt(Bridge.restore(saved, bridgeOptions()))
+    return bridge!
   }
 
   // Channels: 새 일이 생기면 순서대로 세션에 밀어 넣는다. Claude 는 <channel source="coworker" ...> 로 받는다.
   let pushing = Promise.resolve()
+  const NOT_OPEN =
+    'the bridge is not open; call open_bridge or connect first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result'
   const NEWS =
     'First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for decisions, call check_with_human and ask your human.'
   const PUSHED = `${NEWS} Then end your turn; the next message comes in by itself.`
@@ -238,9 +316,33 @@ export function createSession(opts: SessionOptions) {
           .max(MAX_CODE_MINUTES)
           .optional()
           .describe(`How many minutes the code can be used. Default ${DEFAULT_CODE_MINUTES}. 0: no time limit; the code works until this bridge closes. Either way the code works only once.`),
+        resume: z
+          .string()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe(
+            'Only after coworker restarted: the session_id from your earlier open_bridge or connect result. Brings that bridge back with the same identity and connections, without a new code. Leave it out to open a bridge normally.',
+          ),
       },
     },
-    tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES }: { port?: number; name?: string; private?: boolean; expires_minutes?: number }) => {
+    tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume }: { port?: number; name?: string; private?: boolean; expires_minutes?: number; resume?: string }) => {
+      if (resume) {
+        const b = await resumeBridge(resume.trim())
+        const { relay: relayInfo, warn = '' } = await relayStatus(b)
+        const connected = [...b.peers.values()].map(p => p.name)
+        return {
+          resumed: true,
+          session_id: identity,
+          name: b.name,
+          port: b.port,
+          connected,
+          relay: relayInfo,
+          viewer: viewerUrl(),
+          listen_command: listenCommand(),
+          next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(', ')}` : ''}; nobody needs a new code.${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`,
+        }
+      }
       await resolveFolder()
       const b = getBridge()
       if (name) b.name = name
@@ -249,6 +351,7 @@ export function createSession(opts: SessionOptions) {
       const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60_000).toISOString()
       return {
         code: b.newCode({ private: only, ttlMs: minutes === 0 ? null : minutes * 60_000 }),
+        session_id: identity,
         expires: expires ?? 'never: works until this bridge closes',
         kind: only ? 'private: links only this session and the one who joins' : 'group: whoever joins is also connected with everyone in this group',
         name: b.name,
@@ -285,6 +388,7 @@ export function createSession(opts: SessionOptions) {
       return {
         connected: peer.name,
         joining,
+        session_id: identity,
         myName: b.name,
         myPort: b.port,
         relay: relayInfo,
@@ -303,7 +407,12 @@ export function createSession(opts: SessionOptions) {
       description: 'Show this session\'s bridge and the connected sessions, with whether each one can be reached right now, and the viewer link for the human.',
       inputSchema: {},
     },
-    tool(async () => ({ ...(await getBridge().connections()), viewer: viewer?.url, listen_command: getBridge().isOpen ? listenCommand() : undefined })),
+    tool(async () => ({
+      ...(await getBridge().connections()),
+      session_id: identity,
+      viewer: viewer?.url,
+      listen_command: getBridge().isOpen ? listenCommand() : undefined,
+    })),
   )
 
   server.registerTool(
@@ -435,7 +544,7 @@ export function createSession(opts: SessionOptions) {
     },
     tool(async ({ timeout_sec }: { timeout_sec?: number }, { signal, _meta, sendNotification }) => {
       const b = getBridge()
-      if (!b.isOpen) throw new Error('the bridge is not open; call open_bridge or connect first')
+      if (!b.isOpen) throw new Error(NOT_OPEN)
       if (channel) return { events: [], next: listen() }
       // Claude Code 는 응답도 진행 알림도 없이 30분이 지난 호출을 끊는다(stdio 서버의 기본값).
       // 시간 제한 없이 기다리는 동안 몇 분마다 진행 알림을 보내 호출을 살려 둔다.
@@ -498,10 +607,20 @@ export function createSession(opts: SessionOptions) {
     }),
   )
 
+  // 다시 켠 세션이면, 저장해 둔 브릿지를 바로 되살린다. 상대들은 새 코드 없이 다시 이어진다.
+  if (opts.restore) {
+    try {
+      adopt(Bridge.restore(opts.restore, bridgeOptions()))
+    } catch {}
+  }
+
   return {
     server,
     inflight: () => inflight,
+    // 백그라운드 명령이 기다리고 있으면 그 세션은 살아 있다. 앱은 이런 세션을 정리하지 않는다.
+    listening: () => !!viewer?.listening,
     shutdown() {
+      if (bridge && live.get(identity)?.bridge === bridge) live.delete(identity)
       bridge?.shutdown()
       viewer?.stop()
     },
