@@ -16988,6 +16988,7 @@ class Bridge {
     this.timer.unref?.();
     this.writeState();
     this.changed();
+    this.save();
   }
   newCode(options = {}) {
     if (!this.server)
@@ -18832,7 +18833,7 @@ import { randomUUID as randomUUID3 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.10";
+var version2 = "0.4.11";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26407,11 +26408,14 @@ import { rmSync as rmSync4 } from "fs";
 // src/viewer.ts
 class Viewer {
   bridge;
+  options;
   server;
   token;
   listener;
-  constructor(bridge) {
+  wakers = new Set;
+  constructor(bridge, options = {}) {
     this.bridge = bridge;
+    this.options = options;
     this.token = bridge.viewerAt?.token ?? randomToken();
   }
   get url() {
@@ -26436,6 +26440,8 @@ class Viewer {
     }
   }
   stop() {
+    for (const done of [...this.wakers])
+      done("");
     this.listener = undefined;
     this.server?.stop(true);
     this.server = undefined;
@@ -26466,10 +26472,14 @@ class Viewer {
       return this.events(req, headers);
     if (req.method === "GET" && path === `/${this.token}/next`)
       return this.next(req, headers);
+    if (req.method === "GET" && path === `/${this.token}/wake`)
+      return this.wake(req, headers);
     return new Response("not found", { status: 404 });
   }
   next(req, headers) {
     this.listener?.("coworker: a newer listen command took over from this one. Nothing to do.");
+    for (const done of [...this.wakers])
+      done(LISTENING_ITSELF);
     return new Promise((resolve) => {
       let unwatch = () => {};
       const finish = (text) => {
@@ -26485,6 +26495,31 @@ class Viewer {
           finish(text);
       };
       this.listener = finish;
+      unwatch = this.bridge.watch(check);
+      req.signal.addEventListener("abort", () => finish(""), { once: true });
+      check();
+    });
+  }
+  wake(req, headers) {
+    const reply = (text) => new Response(text && `${text}
+`, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
+    if (this.options.pushes)
+      return reply("coworker: this session gets messages pushed in by itself. Nothing to do.");
+    if (this.listener)
+      return reply(LISTENING_ITSELF);
+    return new Promise((resolve) => {
+      let unwatch = () => {};
+      const finish = (text) => {
+        this.wakers.delete(finish);
+        unwatch();
+        resolve(reply(text));
+      };
+      const check = () => {
+        const text = newsLine(this.bridge.unread(), this.bridge.isOpen, "after-restart");
+        if (text)
+          finish(text);
+      };
+      this.wakers.add(finish);
       unwatch = this.bridge.watch(check);
       req.signal.addEventListener("abort", () => finish(""), { once: true });
       check();
@@ -26533,7 +26568,8 @@ class Viewer {
     return new Response(body, { headers: { ...headers, "content-type": "text/event-stream; charset=utf-8" } });
   }
 }
-function newsLine(events, open) {
+var LISTENING_ITSELF = "coworker: this session is listening by itself now. Nothing to do.";
+function newsLine(events, open, when = "listening") {
   if (events.length) {
     const counts = new Map;
     for (const e of events) {
@@ -26541,6 +26577,8 @@ function newsLine(events, open) {
       counts.set(what, (counts.get(what) ?? 0) + 1);
     }
     const list = [...counts].map(([what, n]) => `${n} ${what}`).join(", ");
+    if (when === "after-restart")
+      return `coworker: new for this session (${list}). It arrived after this session restarted, while nothing was listening. Call the coworker inbox tool to read and handle it, then start listening in the background again with the listen_command it gives.`;
     return `coworker: new for this session (${list}). Call the coworker inbox tool to read it and handle it, then run this listen command in the background again.`;
   }
   if (!open)
@@ -27012,7 +27050,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     windows.clear();
   }
   let viewer;
-  const viewerOf = () => viewer ??= new Viewer(getBridge());
+  const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel });
   const viewerUrl = () => viewerOf().start();
   const viewerNote = (url) => `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url}`;
   async function relayStatus(b) {
@@ -27395,6 +27433,42 @@ async function serve({ home }) {
   console.log(`coworker app ${version2} listening at http://127.0.0.1:${server.port}/mcp`);
 }
 
+// src/wake.ts
+async function wake(home, input) {
+  let sessionId;
+  try {
+    sessionId = JSON.parse(input).session_id;
+  } catch {}
+  if (typeof sessionId !== "string" || !sessionId)
+    return 0;
+  const path = savedPath(home, `${sessionId}${process.env.CLAUDE_PLUGIN_ROOT ? "" : ".direct"}`);
+  let misses = 0;
+  for (;; ) {
+    const saved = readSaved(path);
+    if (!saved)
+      return 0;
+    if (saved.viewer) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${saved.viewer.port}/${saved.viewer.token}/wake`);
+        if (res.ok) {
+          const text = (await res.text()).trim();
+          if (text.startsWith("coworker: new for this session")) {
+            process.stderr.write(`${text}
+`);
+            return 2;
+          }
+          if (text)
+            return 0;
+          misses = 0;
+        }
+      } catch {}
+    }
+    if (++misses > 600)
+      return 0;
+    await Bun.sleep(200);
+  }
+}
+
 // src/mcp.ts
 var home = process.env.COWORKER_HOME ?? join5(homedir2(), ".coworker");
 var command = process.argv[2];
@@ -27402,6 +27476,8 @@ if (command === "serve")
   await serve({ home });
 else if (command === "autostart")
   process.exit(await autostart(process.argv[3], home));
+else if (command === "wake")
+  process.exit(await wake(home, await Bun.stdin.text()));
 else
   await stdio();
 async function stdio() {
