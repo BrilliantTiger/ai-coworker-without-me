@@ -19,11 +19,20 @@ test('the plugin folder holds the bundled server and no package install', () => 
   for (const f of ['package.json', 'bun.lock', 'bun.lockb', 'package-lock.json', 'node_modules', 'src']) expect(files).not.toContain(f)
 })
 
-test('Claude Code and Codex start the bundle with bun --no-install, and nothing runs as a hook', () => {
+test('Claude Code and Codex start the bundle with bun --no-install; the only hook wakes the AI after a restart', () => {
   const claude = json(join(pluginDir, '.claude-plugin', 'plugin.json'))
   expect(claude.mcpServers.coworker.command).toBe('bun')
   expect(claude.mcpServers.coworker.args).toEqual(['--no-install', '${CLAUDE_PLUGIN_ROOT}/coworker.js'])
-  expect(claude.hooks).toBeUndefined()
+  // 세션을 다시 켰을 때만, 백그라운드로 돌며(asyncRewake) 그사이 온 소식으로 AI를 깨운다. 다른 훅은 없다(디렉터리판에는 훅이 아예 없다).
+  expect(Object.keys(claude.hooks)).toEqual(['SessionStart'])
+  expect(claude.hooks.SessionStart).toEqual([
+    {
+      matcher: 'resume',
+      hooks: [expect.objectContaining({ type: 'command', command: 'bun --no-install "${CLAUDE_PLUGIN_ROOT}/coworker.js" wake', asyncRewake: true })],
+    },
+  ])
+  // 훅의 시간 제한을 밀리초로 바꿔도 타이머가 받는 값 안에 든다.
+  expect(claude.hooks.SessionStart[0].hooks[0].timeout * 1000).toBeLessThanOrEqual(2 ** 31 - 1)
   expect(claude.mcpServers.coworker.env.BUN_OPTIONS).toBeUndefined()
   const codex = json(join(pluginDir, '.codex-plugin', 'plugin.json'))
   expect(codex.mcpServers.coworker.args).toEqual(['--no-install', './coworker.js'])

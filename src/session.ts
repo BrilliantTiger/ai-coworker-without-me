@@ -409,7 +409,7 @@ export function createSession(opts: SessionOptions) {
 
   // 브라우저로 대화를 보는 화면. 브릿지가 닫혀도 세션이 살아 있는 동안은 지난 대화를 보여 준다.
   let viewer: Viewer | undefined
-  const viewerOf = () => (viewer ??= new Viewer(getBridge()))
+  const viewerOf = () => (viewer ??= new Viewer(getBridge(), { pushes: channel }))
   const viewerUrl = () => viewerOf().start()
   // 연 쪽과 연결한 쪽 모두 자기 PC의 링크를 받는다. 링크를 안내 문장에 넣어야 AI가 다른 일을 이어 할 때도 빠뜨리지 않는다.
   const viewerNote = (url: string) =>

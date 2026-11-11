@@ -11,8 +11,14 @@ export class Viewer {
   private readonly token: string
   // 지금 기다리고 있는 백그라운드 명령. 하나만 산다.
   private listener?: (text: string) => void
+  // 세션을 다시 켰을 때 플러그인 훅이 거는 기다림(/wake). AI가 스스로 기다리기를 걸면 끝난다.
+  private wakers = new Set<(text: string) => void>()
 
-  constructor(private readonly bridge: Bridge) {
+  // pushes: 채널로 켠 세션이라 소식이 세션에 바로 들어간다. 그때는 기다릴 것이 없다.
+  constructor(
+    private readonly bridge: Bridge,
+    private readonly options: { pushes?: boolean } = {},
+  ) {
     this.token = bridge.viewerAt?.token ?? randomToken()
   }
 
@@ -41,6 +47,7 @@ export class Viewer {
   }
 
   stop() {
+    for (const done of [...this.wakers]) done('')
     this.listener = undefined
     this.server?.stop(true)
     this.server = undefined
@@ -75,6 +82,7 @@ export class Viewer {
     if (req.method === 'GET' && path === `/${this.token}/data`) return Response.json(this.data(), { headers })
     if (req.method === 'GET' && path === `/${this.token}/events`) return this.events(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/next`) return this.next(req, headers)
+    if (req.method === 'GET' && path === `/${this.token}/wake`) return this.wake(req, headers)
     return new Response('not found', { status: 404 })
   }
 
@@ -84,6 +92,8 @@ export class Viewer {
   // 기다림은 마지막 하나만 산다. 새 명령이 오면 앞의 명령은 바로 끝나서, 백그라운드 명령이 쌓이지 않는다.
   private next(req: Request, headers: Record<string, string>): Promise<Response> {
     this.listener?.('coworker: a newer listen command took over from this one. Nothing to do.')
+    // AI가 스스로 기다리기 시작했으니, 다시 켤 때 훅이 걸어 둔 기다림은 끝낸다. 두 번 깨우지 않는다.
+    for (const done of [...this.wakers]) done(LISTENING_ITSELF)
     return new Promise(resolve => {
       let unwatch = () => {}
       const finish = (text: string) => {
@@ -98,6 +108,31 @@ export class Viewer {
       this.listener = finish
       unwatch = this.bridge.watch(check)
       // 명령이 멈췄으면(사람이 백그라운드 작업을 멈췄거나 세션이 끝났다) 더 기다리지 않는다.
+      req.signal.addEventListener('abort', () => finish(''), { once: true })
+      check()
+    })
+  }
+
+  // 세션을 다시 켜면(Claude Code resume) 백그라운드 대기 명령이 사라진다. 사람이 말을 걸기 전까지 AI는 그것을 다시 걸지 않는다.
+  // 그래서 플러그인의 세션 시작 훅(asyncRewake)이 여기서 기다린다. 소식이 오면 한 줄을 돌려주고, 훅이 코드 2로 끝나 Claude Code가 AI를 깨운다.
+  // AI가 스스로 기다리고 있거나(또는 그렇게 되면), 채널로 받는 세션이거나, 브릿지가 닫혔으면 할 일이 없다고 돌려준다.
+  private wake(req: Request, headers: Record<string, string>): Promise<Response> | Response {
+    const reply = (text: string) => new Response(text && `${text}\n`, { headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' } })
+    if (this.options.pushes) return reply('coworker: this session gets messages pushed in by itself. Nothing to do.')
+    if (this.listener) return reply(LISTENING_ITSELF)
+    return new Promise(resolve => {
+      let unwatch = () => {}
+      const finish = (text: string) => {
+        this.wakers.delete(finish)
+        unwatch()
+        resolve(reply(text))
+      }
+      const check = () => {
+        const text = newsLine(this.bridge.unread(), this.bridge.isOpen, 'after-restart')
+        if (text) finish(text)
+      }
+      this.wakers.add(finish)
+      unwatch = this.bridge.watch(check)
       req.signal.addEventListener('abort', () => finish(''), { once: true })
       check()
     })
@@ -146,7 +181,9 @@ export class Viewer {
 
 // 백그라운드 명령이 찍는 한 줄. 무엇이 몇 건 왔는지만 알린다. 상대가 정한 이름이나 보낸 글은 넣지 않는다.
 // 내용은 AI가 inbox 로 읽는다. 아무 일도 없으면 아무것도 돌려주지 않아 명령이 계속 기다린다.
-export function newsLine(events: readonly BridgeEvent[], open: boolean): string | undefined {
+const LISTENING_ITSELF = 'coworker: this session is listening by itself now. Nothing to do.'
+
+export function newsLine(events: readonly BridgeEvent[], open: boolean, when: 'listening' | 'after-restart' = 'listening'): string | undefined {
   if (events.length) {
     const counts = new Map<string, number>()
     for (const e of events) {
@@ -154,6 +191,8 @@ export function newsLine(events: readonly BridgeEvent[], open: boolean): string 
       counts.set(what, (counts.get(what) ?? 0) + 1)
     }
     const list = [...counts].map(([what, n]) => `${n} ${what}`).join(', ')
+    if (when === 'after-restart')
+      return `coworker: new for this session (${list}). It arrived after this session restarted, while nothing was listening. Call the coworker inbox tool to read and handle it, then start listening in the background again with the listen_command it gives.`
     return `coworker: new for this session (${list}). Call the coworker inbox tool to read it and handle it, then run this listen command in the background again.`
   }
   if (!open) return "coworker: this session's bridge is closed, so there is nothing to listen for. Do not run this command again."

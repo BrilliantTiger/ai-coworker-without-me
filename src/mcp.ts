@@ -7,16 +7,19 @@ import { detectChannel } from './channel'
 import { findSession, pruneSaved } from './resume'
 import { serve } from './serve'
 import { createSession } from './session'
+import { wake } from './wake'
 
 // 실행 방법은 셋이다.
 //   bun coworker.js                    Claude Code·Codex 가 플러그인으로 띄우는 stdio MCP 서버. 세션 하나를 맡는다.
 //   bun coworker.js serve              coworker 앱. 이 PC의 여러 세션을 127.0.0.1 의 HTTP 로 받는다. 디렉터리판 플러그인이 여기에 붙는다.
 //   bun coworker.js autostart on|off   로그인할 때 앱을 켤지 정한다.
+//   bun coworker.js wake               Claude Code 세션을 다시 켰을 때 플러그인 훅이 띄운다. 그사이 온 소식으로 AI를 깨운다.
 const home = process.env.COWORKER_HOME ?? join(homedir(), '.coworker')
 const command = process.argv[2]
 
 if (command === 'serve') await serve({ home })
 else if (command === 'autostart') process.exit(await autostart(process.argv[3], home))
+else if (command === 'wake') process.exit(await wake(home, await Bun.stdin.text()))
 else await stdio()
 
 async function stdio() {

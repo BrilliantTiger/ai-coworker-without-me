@@ -541,6 +541,8 @@ test('a new session takes over the bridge of an earlier session that is still ru
   await codex('wait_for_message', { timeout_sec: 5 })
   const asked = await oldClaude('send_question', { question: '설치 결과를 알려 주세요.' })
 
+  // 앞 세션이 바뀐 것을 모아 저장할 틈을 준다(실제로는 새 세션을 켜는 데 이보다 오래 걸린다).
+  for (let i = 0; i < 100 && (readSaved(savedPath(own, 'qa-old'))?.threads.length ?? 0) < 2; i++) await Bun.sleep(20)
   // context 가 차서 사람이 새 세션을 켰다. 앞 세션은 아직 켜져 있다. 새 세션은 이 PC에 남은 브릿지를 보고 이름으로 이어받는다.
   const newClaude = await session('claude-code', { ...oldEnv, CLAUDE_CODE_SESSION_ID: 'qa-new' })
   expect((await newClaude('list_connections')).earlier_bridges).toEqual([
@@ -579,4 +581,92 @@ test('a new session takes over the bridge of an earlier session that is still ru
   for (let i = 0; i < 50 && readSaved(savedPath(own, 'qa-old')); i++) await Bun.sleep(20)
   expect(readSaved(savedPath(own, 'qa-old'))).toBeUndefined()
   expect(readSaved(savedPath(own, 'qa-new'))?.peers.map(p => p.name)).toEqual([joined.myName])
+}, 30_000)
+
+// 플러그인의 세션 시작 훅이 띄우는 명령. Claude Code 가 훅 입력(JSON)을 표준 입력으로 준다.
+function wakeHook(homeDir: string, sessionId: string, pluginRoot: string) {
+  return Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'mcp.ts'), 'wake'], {
+    env: { ...process.env, COWORKER_HOME: homeDir, CLAUDE_PLUGIN_ROOT: pluginRoot },
+    stdin: new Blob([JSON.stringify({ session_id: sessionId, hook_event_name: 'SessionStart', source: 'resume' })]),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+}
+
+test('a restarted Claude Code session is woken by its plugin hook when a message arrives before anyone listens', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-wake-'))
+  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'wake-session', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
+  const first = new Client({ name: 'claude-code', version: '1.0.0' })
+  const claude = await session('claude-code', env, first)
+  const codex = await session('codex-mcp-client')
+  await codex('connect', { code: (await claude('open_bridge', {})).code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+
+  // 세션을 다시 켰다. 브릿지는 돌아오지만 AI는 아직 아무것도 하지 않았다. 훅만 기다리고 있다.
+  await ended(first, own, 'wake-session')
+  const again = await session('claude-code', env)
+  const hook = wakeHook(own, 'wake-session', env.CLAUDE_PLUGIN_ROOT)
+  await Bun.sleep(700)
+  expect(hook.exitCode).toBeNull()
+
+  await codex('send_question', { question: '재시작한 뒤에도 받나요?' })
+  expect(await hook.exited).toBe(2)
+  expect(await new Response(hook.stderr).text()).toMatch(/^coworker: new for this session \(1 question\)\. It arrived after this session restarted/)
+  // 깨어난 AI는 받은 글함에서 그 질문을 읽는다.
+  expect((await again('inbox')).events).toEqual([expect.objectContaining({ kind: 'question', text: '재시작한 뒤에도 받나요?' })])
+}, 30_000)
+
+test('the restart hook ends quietly when the AI listens by itself, or when there is no bridge to come back to', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-wake-'))
+  const nothing = wakeHook(own, 'no-such-session', join(own, 'plugin'))
+  expect(await nothing.exited).toBe(0)
+
+  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'wake-quiet', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
+  const first = new Client({ name: 'claude-code', version: '1.0.0' })
+  const claude = await session('claude-code', env, first)
+  const codex = await session('codex-mcp-client')
+  await codex('connect', { code: (await claude('open_bridge', {})).code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  await ended(first, own, 'wake-quiet')
+  const again = await session('claude-code', env)
+  const hook = wakeHook(own, 'wake-quiet', env.CLAUDE_PLUGIN_ROOT)
+  await Bun.sleep(700)
+  // 사람이 먼저 말을 걸어 AI가 스스로 기다리기를 걸었다. 훅은 할 일이 없어 조용히 끝난다(두 번 깨우지 않는다).
+  const listen = (await again('inbox')).listen_command as string
+  const stop = new AbortController()
+  const waiting = fetch(listen.split(' ').pop()!, { signal: stop.signal }).catch(() => undefined)
+  expect(await hook.exited).toBe(0)
+  expect(await new Response(hook.stderr).text()).toBe('')
+  stop.abort()
+  await waiting
+}, 30_000)
+
+test('questions that piled up before the restart wake the AI as soon as the session is back', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-wake-'))
+  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'wake-piled', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
+  const first = new Client({ name: 'claude-code', version: '1.0.0' })
+  const claude = await session('claude-code', env, first)
+  const codex = await session('codex-mcp-client')
+  await codex('connect', { code: (await claude('open_bridge', {})).code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  // 끄기 전에 온 질문: AI가 읽지 않았다.
+  expect((await codex('send_question', { question: '끄기 전에 보낸 질문' })).delivery).toBe('delivered')
+  await Bun.sleep(300)
+  await ended(first, own, 'wake-piled')
+  // 꺼져 있는 동안 보낸 질문: 상대가 들고 있다.
+  expect((await codex('send_question', { question: '꺼져 있을 때 보낸 질문' })).delivery).toBe('queued')
+
+  // 다시 켜자마자 훅이 쌓인 것을 보고 바로 깨운다.
+  const started = Date.now()
+  const again = await session('claude-code', env)
+  const hook = wakeHook(own, 'wake-piled', env.CLAUDE_PLUGIN_ROOT)
+  expect(await hook.exited).toBe(2)
+  expect(Date.now() - started).toBeLessThan(5000)
+  expect(await new Response(hook.stderr).text()).toMatch(/^coworker: new for this session \(\d+ question\)/)
+  const texts: string[] = []
+  for (let i = 0; i < 20 && texts.length < 2; i++) {
+    texts.push(...(await again('inbox')).events.filter((e: { kind?: string }) => e.kind === 'question').map((e: { text: string }) => e.text))
+    await Bun.sleep(100)
+  }
+  expect(texts.sort()).toEqual(['꺼져 있을 때 보낸 질문', '끄기 전에 보낸 질문'].sort())
 }, 30_000)

@@ -457,6 +457,8 @@ export class Bridge {
     this.timer.unref?.()
     this.writeState()
     this.changed()
+    // 열자마자 한 번은 바로 저장한다. 이 세션이 곧바로 꺼져도 다시 켜거나 다른 세션이 이어받을 수 있다.
+    this.save()
   }
 
   // 새 연결 코드. 코드마다 토큰이 달라서 한 코드로는 한 세션만 연결할 수 있다.
