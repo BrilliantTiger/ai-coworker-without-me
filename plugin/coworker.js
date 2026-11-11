@@ -16852,6 +16852,7 @@ class Bridge {
   events = [];
   waiters = [];
   onEvent;
+  onMoved;
   watchers = new Set;
   viewerAddress;
   asking = new Map;
@@ -16896,7 +16897,7 @@ class Bridge {
       b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private });
     b.seen = new Set(saved.seen);
     b.closedAsks = new Map(saved.closedAsks);
-    b.events = saved.events ?? [];
+    b.events = (saved.events ?? []).filter((e) => e.type !== "moved");
     b.viewerAddress = saved.viewer;
     for (const q of saved.asking ?? [])
       b.asking.set(q.thread, q);
@@ -16910,6 +16911,25 @@ class Bridge {
       b.pollLoop(peer.key);
     }
     return b;
+  }
+  static async askToMove(saved) {
+    const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) };
+    try {
+      const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(seal({ type: "handover" }, keys.publicKey, keys)),
+        signal: AbortSignal.timeout(5000)
+      });
+      if (!res.ok)
+        return false;
+      return open2(await res.json(), keys)?.type === "handover_ok";
+    } catch {
+      return false;
+    }
+  }
+  persist() {
+    this.save();
   }
   snapshot() {
     return {
@@ -17274,6 +17294,15 @@ ${f.evidence}`).join(`
     const from = sealed.from;
     const answer = (p) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) });
     const forbidden = { status: 403, body: "forbidden" };
+    if (from === this.key && payload.type === "handover" && this.server) {
+      this.emit({ type: "moved", at: now() });
+      this.save();
+      setTimeout(() => {
+        this.shutdown();
+        this.onMoved?.();
+      }, 50);
+      return answer({ type: "handover_ok" });
+    }
     const peer = this.peers.get(from);
     if (!peer) {
       if (payload.type !== "hello" || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port))
@@ -17936,6 +17965,37 @@ async function findSession(home, id) {
     await Bun.sleep(200);
   }
   return {};
+}
+function listSaved(home) {
+  let names;
+  try {
+    names = readdirSync(join3(home, "sessions"));
+  } catch {
+    return [];
+  }
+  const found = [];
+  for (const name of names) {
+    if (!name.endsWith(".json"))
+      continue;
+    const saved = readSaved(join3(home, "sessions", name));
+    if (saved)
+      found.push({ id: name.slice(0, -".json".length), saved });
+  }
+  return found.sort((a, b) => b.saved.savedAt.localeCompare(a.saved.savedAt));
+}
+async function waitUntilStopped(saved) {
+  for (let i = 0;i < 50 && await stillRunning(saved); i++)
+    await Bun.sleep(100);
+  if (!saved.viewer)
+    return;
+  for (let i = 0;i < 30; i++) {
+    try {
+      await fetch(`http://127.0.0.1:${saved.viewer.port}/`, { signal: AbortSignal.timeout(300) });
+    } catch {
+      return;
+    }
+    await Bun.sleep(100);
+  }
 }
 function pruneSaved(home) {
   const dir = join3(home, "sessions");
@@ -18772,7 +18832,7 @@ import { randomUUID as randomUUID3 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.9";
+var version2 = "0.4.10";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26341,6 +26401,9 @@ function waitSeconds(requested, codex) {
   return requested || Infinity;
 }
 
+// src/session.ts
+import { rmSync as rmSync4 } from "fs";
+
 // src/viewer.ts
 class Viewer {
   bridge;
@@ -26487,7 +26550,8 @@ var WHAT = {
   connected: "connected",
   peer_closed: "left",
   undelivered: "undelivered",
-  decision: "decision by your human"
+  decision: "decision by your human",
+  moved: "moved to another session"
 };
 var PAGE = `<!doctype html>
 <html lang="ko">
@@ -26655,6 +26719,7 @@ function createSession(opts) {
   const RESTARTS = `If coworker restarts
   - When the same Claude Code session starts again (for example claude --resume), its bridge comes back by itself with the same identity and connections. The other side keeps it and nobody needs a new code.
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
+  - When your human moves this work to a new session (for example because the context filled up), the new session takes over the same bridge, with its connections and all its conversations, and nobody needs a new code. In the new session, list_connections lists the bridges earlier sessions left on this PC; call open_bridge with resume set to the session_id (or the name) of the one your human means. If it is still running in the other session, it moves here and that session stops listening. Then read the conversations that are still open with read_conversation before you go on.
   - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.`;
   const LISTENING = channel ? `Stay open until your human says stop
   - In this session, what the other side sends comes in by itself as a <channel> notice from coworker: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
@@ -26758,8 +26823,19 @@ ${text}` : "";
     viewer?.stop();
     viewer = undefined;
     bridge = b;
+    moved = false;
     if (channel)
       b.onEvent = () => void (pushing = pushing.then(pushEvents));
+    b.onMoved = () => {
+      if (bridge !== b)
+        return;
+      moved = true;
+      closeWindows(false);
+      viewer?.stop();
+      viewer = undefined;
+      if (live.get(identity)?.bridge === b)
+        live.delete(identity);
+    };
     live.set(identity, {
       bridge: b,
       release: () => {
@@ -26780,7 +26856,26 @@ ${text}` : "";
     }
     identity = id;
   }
-  async function resumeBridge(id) {
+  let moved = false;
+  const MOVED = "This bridge moved to another session on this PC, which carries on with its connections and conversations. Tell your human in one line, and stop listening here: do not run the listen command or call wait_for_message again.";
+  function freshIfMoved() {
+    if (!moved)
+      return;
+    switchTo(randomUUID2());
+    moved = false;
+  }
+  function findEarlier(wanted) {
+    const all = listSaved(home);
+    if (live.has(wanted) || all.some((e) => e.id === wanted))
+      return wanted;
+    const needle = wanted.toLowerCase();
+    const matches = all.filter((e) => e.id !== identity && e.saved.name.toLowerCase().includes(needle));
+    if (matches.length > 1)
+      throw new Error(`"${wanted}" matches more than one earlier bridge: ${matches.map((e) => `${e.saved.name} (session_id ${e.id})`).join(", ")}. Use the session_id`);
+    return matches[0]?.id ?? wanted;
+  }
+  async function resumeBridge(wanted) {
+    const id = findEarlier(wanted);
     if (bridge?.isOpen) {
       if (id !== identity)
         throw new Error(`this session already has an open bridge (session_id ${identity}); keep using it, or close it first`);
@@ -26793,14 +26888,40 @@ ${text}` : "";
       adopt(held.bridge);
       return held.bridge;
     }
-    const saved = readSaved(savedPath(home, id));
+    const path = savedPath(home, id);
+    let saved = readSaved(path);
     if (!saved)
       throw new Error(`no saved bridge for session_id ${id}: it was closed with close_bridge, or belongs to another PC. Open a new bridge and exchange a new code`);
-    if (await stillRunning(saved))
-      throw new Error("that bridge is still running in another session on this PC; use that session");
+    if (await stillRunning(saved)) {
+      if (!await Bridge.askToMove(saved))
+        throw new Error("that bridge is running in another session on this PC and could not be moved here; close that session, then try again");
+      await waitUntilStopped(saved);
+      saved = readSaved(path) ?? saved;
+    }
+    const own = opts.sessionId;
+    const ownSaved = own && own !== id ? readSaved(savedPath(home, own)) : undefined;
+    if (own && own !== id && (!ownSaved || ownSaved.publicKey === saved.publicKey || !await stillRunning(ownSaved))) {
+      switchTo(own);
+      const b = Bridge.restore(saved, bridgeOptions());
+      adopt(b);
+      b.persist();
+      rmSync4(path, { force: true });
+      return b;
+    }
     switchTo(id);
     adopt(Bridge.restore(saved, bridgeOptions()));
     return bridge;
+  }
+  async function earlierBridges() {
+    const all = listSaved(home).filter((e) => e.id !== identity && e.saved.publicKey !== (bridge?.isOpen ? bridge.key : undefined)).slice(0, 10);
+    return Promise.all(all.map(async (e) => ({
+      session_id: e.id,
+      name: e.saved.name,
+      connected: e.saved.peers.map((p) => p.name),
+      conversations: e.saved.threads.length,
+      saved_at: e.saved.savedAt,
+      running_in_another_session: await stillRunning(e.saved)
+    })));
   }
   let pushing = Promise.resolve();
   const NOT_OPEN = "the bridge is not open; call open_bridge or connect first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result";
@@ -26827,6 +26948,8 @@ ${text}` : "";
         return { type: event.type, to: event.to, ...event.thread ? { thread: event.thread } : {} };
       case "decision":
         return { type: event.type, thread: event.thread, ...event.closed ? { closed: "true" } : {} };
+      case "moved":
+        return { type: event.type };
     }
   }
   const canAsk = () => !!server.server.getClientCapabilities()?.elicitation?.form;
@@ -26919,7 +27042,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       name: string2().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>".'),
       private: boolean2().optional().describe("true: the code links only this session and the one who joins; they are not connected with the rest of the group."),
       expires_minutes: number2().int().min(0).max(MAX_CODE_MINUTES).optional().describe(`How many minutes the code can be used. Default ${DEFAULT_CODE_MINUTES}. 0: no time limit; the code works until this bridge closes. Either way the code works only once.`),
-      resume: string2().min(1).max(200).optional().describe("Only after coworker restarted: the session_id from your earlier open_bridge or connect result. Brings that bridge back with the same identity and connections, without a new code. Leave it out to open a bridge normally.")
+      resume: string2().min(1).max(200).optional().describe("To continue a bridge from an earlier session on this PC: after coworker restarted, or when your human moved this work to a new session. Give its session_id (from an earlier result, or from list_connections, which lists the bridges on this PC) or its name. It comes back with the same identity, connections and conversations, without a new code; if it is still running in that other session, it moves here and stops there. Leave it out to open a bridge normally.")
     }
   }, tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume }) => {
     if (resume) {
@@ -26927,19 +27050,23 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       reopenWindows(b);
       const { relay: relayInfo, warn = "" } = await relayStatus(b);
       const connected = [...b.peers.values()].map((p) => p.name);
+      const conversations = b.threadSummaries();
+      const open = conversations.filter((c) => c.status !== "agreed" && c.status !== "closed");
       return {
         resumed: true,
         session_id: identity,
         name: b.name,
         port: b.port,
         connected,
+        conversations,
         relay: relayInfo,
         viewer: viewerUrl(),
         listen_command: listenCommand(),
-        next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(", ")}` : ""}; nobody needs a new code.${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`
+        next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(", ")}` : ""}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map((c) => c.id).join(", ")}), so you know where each one stands.` : ""}${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`
       };
     }
     await resolveFolder();
+    freshIfMoved();
     const b = getBridge();
     if (name)
       b.name = name;
@@ -26971,6 +27098,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     }
   }, tool(async ({ code, name }) => {
     await resolveFolder();
+    freshIfMoved();
     const b = getBridge();
     if (name)
       b.name = name;
@@ -26994,14 +27122,19 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("list_connections", {
     title: "List connections",
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now, and the viewer link for the human.",
+    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
     inputSchema: {}
-  }, tool(async () => ({
-    ...await getBridge().connections(),
-    session_id: identity,
-    viewer: viewer?.url,
-    listen_command: getBridge().isOpen ? listenCommand() : undefined
-  })));
+  }, tool(async () => {
+    const earlier = await earlierBridges();
+    return {
+      ...await getBridge().connections(),
+      session_id: identity,
+      moved: moved || undefined,
+      viewer: viewer?.url,
+      listen_command: getBridge().isOpen ? listenCommand() : undefined,
+      earlier_bridges: earlier.length ? earlier : undefined
+    };
+  }));
   server.registerTool("send_question", {
     title: "Send question",
     annotations: { readOnlyHint: false, openWorldHint: true },
@@ -27094,6 +27227,8 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     }
   }, tool(async ({ timeout_sec }, { signal, _meta, sendNotification }) => {
     const b = getBridge();
+    if (moved)
+      return { events: await b.wait(0), next: MOVED };
     if (!b.isOpen)
       throw new Error(NOT_OPEN);
     if (channel)
@@ -27102,6 +27237,8 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     let beats = 0;
     const alive = token !== undefined ? setInterval(() => void sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++beats, message: "listening" } }).catch(() => {}), KEEPALIVE_MS) : undefined;
     const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal).finally(() => clearInterval(alive));
+    if (events.some((e) => e.type === "moved"))
+      return { events, next: MOVED };
     if (!events.length)
       return { events, next: background() ? `Nothing new. Do not tell your human anything about this. ${listen()}` : "Nothing new. Do not tell your human anything about this; call wait_for_message again now." };
     return { events, next: `${NEWS} After that: ${listen()}` };
@@ -27114,7 +27251,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   }, tool(async () => {
     const b = getBridge();
     const events = await b.wait(0);
-    const next = !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`;
+    const next = moved || events.some((e) => e.type === "moved") ? MOVED : !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`;
     const asking = b.humanQuestions().map((q) => q.thread);
     return { events, conversations: b.threadSummaries(), waiting_for_your_human: asking.length ? asking : undefined, listen_command: b.isOpen ? listenCommand() : undefined, next };
   }));
