@@ -539,7 +539,7 @@ describe('sessions with the same name', () => {
     a.open()
     await one.connect(a.newCode())
     await two.connect(a.newCode())
-    await expect(a.ask('B · Codex', 'Which?')).rejects.toThrow(/matches more than one session that can be reached now: B · Codex \[\w+\], B · Codex \[\w+\]/)
+    await expect(a.ask('B · Codex', 'Which?')).rejects.toThrow(/matches more than one session that can be reached now: B · Codex \[[\w-]+\], B · Codex \[[\w-]+\]/)
     const ids = (await a.connections()).peers.map(p => p.id)
     expect(await a.ask(`B · Codex [${ids[1]}]`, 'You, the second one')).toMatchObject({ delivery: 'delivered' })
     expect(await next(two, 'message')).toMatchObject({ text: 'You, the second one' })
