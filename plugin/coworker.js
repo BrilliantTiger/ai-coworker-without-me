@@ -16411,7 +16411,7 @@ class StdioServerTransport {
 
 // src/mcp.ts
 import { homedir as homedir2 } from "os";
-import { basename as basename2, join as join5 } from "path";
+import { basename as basename2, join as join6, resolve as resolve2 } from "path";
 
 // src/autostart.ts
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
@@ -18833,7 +18833,7 @@ import { randomUUID as randomUUID3 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.11";
+var version2 = "0.4.12";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26403,7 +26403,109 @@ function waitSeconds(requested, codex) {
 }
 
 // src/session.ts
-import { rmSync as rmSync4 } from "fs";
+import { rmSync as rmSync5 } from "fs";
+
+// src/update.ts
+import { closeSync, mkdirSync as mkdirSync4, openSync, rmSync as rmSync4, statSync as statSync2 } from "fs";
+import { join as join5 } from "path";
+var MARKETPLACE = "ai-coworker-without-me";
+var PLUGIN = `coworker@${MARKETPLACE}`;
+var LATEST_URL = "https://raw.githubusercontent.com/BrilliantTiger/ai-coworker-without-me/release/plugin/.claude-plugin/plugin.json";
+var STALE_LOCK_MS = 10 * 60000;
+var run2 = async (cmd) => {
+  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+  return { code, out };
+};
+function newer(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  if ([...pa, ...pb].some((n) => !Number.isInteger(n)))
+    return false;
+  for (let i = 0;i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y)
+      return x > y;
+  }
+  return false;
+}
+async function latestVersion(url = process.env.COWORKER_UPDATE_URL || LATEST_URL) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(1e4) });
+    if (!res.ok)
+      return;
+    const version = (await res.json()).version;
+    return typeof version === "string" && /^\d+(\.\d+)*$/.test(version) ? version : undefined;
+  } catch {
+    return;
+  }
+}
+async function installed(app, exec = run2) {
+  try {
+    if (app === "claude") {
+      const { code, out } = await exec([command("claude"), "plugin", "list", "--json"]);
+      if (code !== 0)
+        return;
+      const list = JSON.parse(out);
+      const found = list.find((p) => p.id === PLUGIN);
+      return found?.version ? { version: found.version, scope: found.scope } : undefined;
+    }
+    const { code, out } = await exec([command("codex"), "plugin", "list"]);
+    if (code !== 0)
+      return;
+    const line = out.split(`
+`).find((l) => l.trim().startsWith(`${PLUGIN} `));
+    const version = line?.trim().split(/\s{2,}/)[2];
+    return version && /^\d+(\.\d+)*$/.test(version) ? { version } : undefined;
+  } catch {
+    return;
+  }
+}
+async function selfUpdate(app, current, home, exec = run2) {
+  const latest = await latestVersion();
+  if (!latest || !newer(latest, current))
+    return;
+  const release = lock(home);
+  if (!release)
+    return;
+  try {
+    const before = await installed(app, exec);
+    if (!before || newer(latest, before.version)) {
+      if (app === "claude") {
+        await exec([command("claude"), "plugin", "marketplace", "update", MARKETPLACE]);
+        await exec([command("claude"), "plugin", "update", PLUGIN, ...before?.scope ? ["--scope", before.scope] : [], "--json"]);
+      } else {
+        await exec([command("codex"), "plugin", "marketplace", "upgrade", MARKETPLACE]);
+        await exec([command("codex"), "plugin", "add", PLUGIN]);
+      }
+    }
+    const after = await installed(app, exec);
+    return after && newer(after.version, current) ? { to: after.version } : undefined;
+  } finally {
+    release();
+  }
+}
+function command(name) {
+  return Bun.which(name) ?? name;
+}
+function lock(home) {
+  const path = join5(home, "update.lock");
+  try {
+    mkdirSync4(home, { recursive: true, mode: 448 });
+    closeSync(openSync(path, "wx"));
+    return () => rmSync4(path, { force: true });
+  } catch {
+    try {
+      if (Date.now() - statSync2(path).mtimeMs > STALE_LOCK_MS) {
+        rmSync4(path, { force: true });
+        closeSync(openSync(path, "wx"));
+        return () => rmSync4(path, { force: true });
+      }
+    } catch {}
+    return;
+  }
+}
 
 // src/viewer.ts
 class Viewer {
@@ -26727,6 +26829,7 @@ if (!document.hidden) connect()
 // src/session.ts
 var DEFAULT_CODE_MINUTES = 60;
 var MAX_CODE_MINUTES = 365 * 24 * 60;
+var UPDATE_EVERY_MS = Number(process.env.COWORKER_UPDATE_EVERY_MS) || 6 * 60 * 60000;
 var WAIT_FOREVER_MS = 2 ** 31 - 1;
 var KOREAN = /[\u3131-\u318E\uAC00-\uD7A3]/;
 var WINDOW_KO = {
@@ -26943,7 +27046,7 @@ ${text}` : "";
       const b = Bridge.restore(saved, bridgeOptions());
       adopt(b);
       b.persist();
-      rmSync4(path, { force: true });
+      rmSync5(path, { force: true });
       return b;
     }
     switchTo(id);
@@ -27065,7 +27168,13 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   function tool(run) {
     return async (args, extra) => {
       try {
-        return result(await run(args, extra));
+        const value = await run(args, extra);
+        const note = updateNote();
+        if (note && value && typeof value === "object" && !Array.isArray(value)) {
+          const next = value.next;
+          return result({ ...value, update: { running: version2, installed: installedUpdate }, next: typeof next === "string" ? `${next} ${note}` : note });
+        }
+        return result(value);
       } catch (e) {
         return { isError: true, content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }] };
       }
@@ -27314,9 +27423,34 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     await getBridge().close();
     return { closed: true };
   }));
+  let installedUpdate;
+  let updateTold;
+  function startAutoUpdate() {
+    if (!opts.autoUpdate)
+      return;
+    const app = clientLabel() === "Claude Code" ? "claude" : isCodex() ? "codex" : undefined;
+    if (!app)
+      return;
+    const check = async () => {
+      const done = await (opts.updater ?? selfUpdate)(app, version2, home).catch(() => {
+        return;
+      });
+      if (done && (!installedUpdate || newer(done.to, installedUpdate)))
+        installedUpdate = done.to;
+    };
+    setTimeout(() => void check(), Number(process.env.COWORKER_UPDATE_FIRST_MS) || 5000 + Math.random() * 25000).unref?.();
+    setInterval(() => void check(), UPDATE_EVERY_MS).unref?.();
+  }
+  const updateNote = () => {
+    if (!installedUpdate || updateTold === installedUpdate)
+      return;
+    updateTold = installedUpdate;
+    return isCodex() ? `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version2}). Restarting Codex uses it; after that, call open_bridge with resume set to this session_id (${identity}) to bring the bridge back.` : `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version2}). Typing /reload-plugins, or restarting Claude Code, uses it; the bridge and its conversations come back by themselves.`;
+  };
   server.server.oninitialized = () => {
     if (bridge)
       reopenWindows(bridge);
+    startAutoUpdate();
   };
   if (opts.restore) {
     try {
@@ -27470,13 +27604,13 @@ async function wake(home, input) {
 }
 
 // src/mcp.ts
-var home = process.env.COWORKER_HOME ?? join5(homedir2(), ".coworker");
-var command = process.argv[2];
-if (command === "serve")
+var home = process.env.COWORKER_HOME ?? join6(homedir2(), ".coworker");
+var command2 = process.argv[2];
+if (command2 === "serve")
   await serve({ home });
-else if (command === "autostart")
+else if (command2 === "autostart")
   process.exit(await autostart(process.argv[3], home));
-else if (command === "wake")
+else if (command2 === "wake")
   process.exit(await wake(home, await Bun.stdin.text()));
 else
   await stdio();
@@ -27495,7 +27629,8 @@ async function stdio() {
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
     folder: projectFolder,
     sessionId,
-    restore
+    restore,
+    autoUpdate: installedAsPlugin()
   });
   let exiting = false;
   const exit = () => {
@@ -27510,6 +27645,15 @@ async function stdio() {
   process.on("SIGINT", exit);
   process.on("SIGTERM", exit);
   await session.server.connect(new StdioServerTransport);
+}
+function installedAsPlugin() {
+  if (/^(off|false|0|no)$/i.test(process.env.COWORKER_AUTO_UPDATE ?? ""))
+    return false;
+  const script = process.argv[1] ?? "";
+  if (basename2(script) !== "coworker.js")
+    return false;
+  const root = process.env.CLAUDE_PLUGIN_ROOT;
+  return root ? resolve2(script).startsWith(resolve2(root)) : true;
 }
 function projectFolder() {
   const given = process.env.COWORKER_PROJECT_DIR;
