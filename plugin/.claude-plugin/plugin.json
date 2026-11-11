@@ -19,7 +19,8 @@
         "COWORKER_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
         "COWORKER_PORTS": "${user_config.ports}",
         "COWORKER_RELAY": "${user_config.relay}",
-        "COWORKER_RELAY_KEY": "${user_config.relay_key}"
+        "COWORKER_RELAY_KEY": "${user_config.relay_key}",
+        "COWORKER_AUTO_UPDATE": "${user_config.auto_update}"
       }
     }
   },
@@ -60,6 +61,12 @@
       "description": "The key set by whoever runs the relay. Leave empty if there is no relay.",
       "sensitive": true,
       "default": ""
+    },
+    "auto_update": {
+      "type": "string",
+      "title": "Auto update",
+      "description": "on: coworker updates itself when a new release comes out; then type /reload-plugins to use it. off: you update it yourself.",
+      "default": "on"
     }
   }
 }

@@ -248,7 +248,12 @@ AI가 전하는 오류별로 할 일은 README의 [오류별로 할 일](README.
 
 ## 새 판으로 올리기
 
-두 사람의 판이 다르면 연결 코드를 못 읽거나 기능이 맞지 않는다. [GitHub 릴리스](https://github.com/BrilliantTiger/ai-coworker-without-me/releases)에 새 판이 나오면 둘 다 올리고 세션을 새로 켠다. 켜 둔 세션은 예전 판으로 계속 돈다. Mac과 Windows 명령이 같다.
+0.4.12부터는 coworker가 스스로 올린다. 플러그인으로 깔았으면 켜지고 30초 안에 한 번, 그 뒤 6시간마다 [GitHub 릴리스](https://github.com/BrilliantTiger/ai-coworker-without-me/releases)에 새 판이 있는지 보고, 있으면 아래 명령을 대신 돌린다. 켜 둔 세션은 다시 불러올 때까지 예전 판으로 돈다. 그래서 올린 뒤 AI가 한 번 알려 준다. Claude Code는 `/reload-plugins`를 치거나 다시 켜면 되고, 브릿지와 대화는 저절로 돌아온다. Codex는 다시 켠 뒤 AI에게 「coworker 다시 이어줘」라고 한다.
+
+- 끄려면 Claude Code는 `/plugin`에서 coworker 설정의 `Auto update`를 `off`로 한다. Codex는 `COWORKER_AUTO_UPDATE=off`를 둔다.
+- 0.4.11 이하는 이 기능이 없다. 그때는 한 번만 아래처럼 손으로 올린다.
+
+두 사람의 판이 다르면 연결 코드를 못 읽거나 기능이 맞지 않는다. 손으로 올릴 때는 둘 다 올리고 세션을 새로 켠다. Mac과 Windows 명령이 같다.
 
 Claude Code:
 

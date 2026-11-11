@@ -8,11 +8,15 @@ import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { rmSync } from 'node:fs'
 import { listSaved, readSaved, savedPath, stillRunning, waitUntilStopped } from './resume'
+import { newer, selfUpdate } from './update'
 import { Viewer } from './viewer'
 
 // 연결 코드를 쓸 수 있는 시간(분). 0 을 주면 시간 제한 없이 브릿지를 닫을 때까지 쓴다. 어느 쪽이든 한 번만 쓴다.
 const DEFAULT_CODE_MINUTES = 60
 const MAX_CODE_MINUTES = 365 * 24 * 60
+
+// 새 판이 있는지 보는 간격. COWORKER_UPDATE_EVERY_MS 는 시험용이다.
+const UPDATE_EVERY_MS = Number(process.env.COWORKER_UPDATE_EVERY_MS) || 6 * 60 * 60_000
 
 // 질문 창은 사람이 답할 때까지 둔다. 요청에 시간 제한을 두지 않으려고 타이머가 받는 가장 큰 값을 준다.
 const WAIT_FOREVER_MS = 2 ** 31 - 1
@@ -54,6 +58,10 @@ export type SessionOptions = {
   sessionId?: string
   // 다시 켠 세션이면 되살릴 브릿지 상태. stdio 서버가 뜰 때 찾아서 넘긴다.
   restore?: SavedBridge
+  // 플러그인으로 설치해서 도는 서버면, 새 판이 나왔을 때 스스로 올린다.
+  autoUpdate?: boolean
+  // 시험에서 실제 claude·codex 명령 대신 쓸 업데이트 함수.
+  updater?: typeof selfUpdate
 }
 
 // 이 프로세스에서 지금 돌고 있는 브릿지. 앱은 Claude Code 가 다시 켜지면 새 MCP 세션을 받으므로,
@@ -441,7 +449,13 @@ export function createSession(opts: SessionOptions) {
   function tool<T>(run: (args: T, extra: Extra) => Promise<unknown> | unknown) {
     return async (args: T, extra: Extra) => {
       try {
-        return result(await run(args, extra))
+        const value = await run(args, extra)
+        const note = updateNote()
+        if (note && value && typeof value === 'object' && !Array.isArray(value)) {
+          const next = (value as { next?: unknown }).next
+          return result({ ...value, update: { running: version, installed: installedUpdate }, next: typeof next === 'string' ? `${next} ${note}` : note })
+        }
+        return result(value)
       } catch (e) {
         return { isError: true, content: [{ type: 'text' as const, text: e instanceof Error ? e.message : String(e) }] }
       }
@@ -807,9 +821,33 @@ export function createSession(opts: SessionOptions) {
     }),
   )
 
+  // 플러그인으로 설치한 coworker 는 뜬 뒤 잠깐 있다가, 그 뒤로는 몇 시간마다 새 판이 있는지 보고 스스로 올린다.
+  // 켜 둔 세션은 다시 불러올 때까지 예전 판으로 돈다. 그래서 올린 뒤 다음 도구 결과에 한 번, 사람에게 다시 불러오라고 전하게 한다.
+  let installedUpdate: string | undefined
+  let updateTold: string | undefined
+  function startAutoUpdate() {
+    if (!opts.autoUpdate) return
+    const app = clientLabel() === 'Claude Code' ? 'claude' : isCodex() ? 'codex' : undefined
+    if (!app) return
+    const check = async () => {
+      const done = await (opts.updater ?? selfUpdate)(app, version, home).catch(() => undefined)
+      if (done && (!installedUpdate || newer(done.to, installedUpdate))) installedUpdate = done.to
+    }
+    setTimeout(() => void check(), Number(process.env.COWORKER_UPDATE_FIRST_MS) || 5_000 + Math.random() * 25_000).unref?.()
+    setInterval(() => void check(), UPDATE_EVERY_MS).unref?.()
+  }
+  const updateNote = () => {
+    if (!installedUpdate || updateTold === installedUpdate) return undefined
+    updateTold = installedUpdate
+    return isCodex()
+      ? `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version}). Restarting Codex uses it; after that, call open_bridge with resume set to this session_id (${identity}) to bring the bridge back.`
+      : `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version}). Typing /reload-plugins, or restarting Claude Code, uses it; the bridge and its conversations come back by themselves.`
+  }
+
   // 클라이언트가 초기화를 마치면(창을 띄울 수 있는지 알게 되면), 다시 켠 세션이 사람에게 묻던 창을 다시 띄운다.
   server.server.oninitialized = () => {
     if (bridge) reopenWindows(bridge)
+    startAutoUpdate()
   }
 
   // 다시 켠 세션이면, 저장해 둔 브릿지를 바로 되살린다. 상대들은 새 코드 없이 다시 이어진다.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { autostart } from './autostart'
 import { detectChannel } from './channel'
 import { findSession, pruneSaved } from './resume'
@@ -42,6 +42,7 @@ async function stdio() {
     folder: projectFolder,
     sessionId,
     restore,
+    autoUpdate: installedAsPlugin(),
   })
   let exiting = false
   const exit = () => {
@@ -55,6 +56,17 @@ async function stdio() {
   process.on('SIGINT', exit)
   process.on('SIGTERM', exit)
   await session.server.connect(new StdioServerTransport())
+}
+
+// 플러그인으로 설치해서 도는 묶음(coworker.js)이면 새 판이 나왔을 때 스스로 올린다.
+// 저장소에서 직접 띄운 서버(src/mcp.ts)와 시험에서는 올리지 않는다. COWORKER_AUTO_UPDATE=off 면 끈다.
+function installedAsPlugin() {
+  if (/^(off|false|0|no)$/i.test(process.env.COWORKER_AUTO_UPDATE ?? '')) return false
+  const script = process.argv[1] ?? ''
+  if (basename(script) !== 'coworker.js') return false
+  // Claude Code 플러그인은 그 플러그인 폴더에서 뜬다. Codex 플러그인은 자기 플러그인 폴더의 ./coworker.js 로 뜬다.
+  const root = process.env.CLAUDE_PLUGIN_ROOT
+  return root ? resolve(script).startsWith(resolve(root)) : true
 }
 
 // 세션 이름에 붙일 프로젝트 폴더. 플러그인으로 설치하면 MCP가 플러그인 폴더에서 뜬다.

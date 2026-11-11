@@ -20,7 +20,7 @@ async function session(clientName: string, env: Record<string, string> = {}, cli
       args: [join(import.meta.dir, '..', 'src', 'mcp.ts')],
       // 시험을 채널로 켠 Claude Code 안에서 돌려도 채널로 바뀌지 않게 정해 둔다.
       // Claude Code 안에서 돌려도 그 세션 ID를 물려받지 않게 비운다. 다시 켜기 시험만 따로 준다.
-      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDE_CODE_SESSION_ID: '', ...env } as Record<string, string>,
+      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDE_CODE_SESSION_ID: '', COWORKER_AUTO_UPDATE: 'off', ...env } as Record<string, string>,
       stderr: 'inherit',
     }),
   )
