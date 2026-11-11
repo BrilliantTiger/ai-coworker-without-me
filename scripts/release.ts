@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { KIND_NOTE, KINDS, kindOf, nextVersion } from './version'
 
-// 릴리스: bun run release 0.2.0 [--notes-file 노트.md]
+// 릴리스: bun run release fix|minor|major [--notes-file 노트.md]   (또는 bun run release 0.5.0 처럼 판을 직접)
+// 판 번호는 major.minor.fix 다. 규칙은 scripts/version.ts 에 있다.
 // 세 매니페스트의 판 번호를 맞추고, 서버를 plugin/coworker.js 로 다시 묶고, 시험을 돌리고,
 // 커밋과 태그(v0.2.0)를 만들어 올린 뒤 release 브랜치를 그 커밋으로 옮기고 GitHub 릴리스를 만든다.
 // 플러그인을 깐 사람과 디렉터리는 release 브랜치를 따라간다. main 에 올린 것은 릴리스해야 나간다.
@@ -36,21 +38,22 @@ const newer = (a: string, b: string) => {
   return false
 }
 
-const version = process.argv[2] ?? ''
+const asked = process.argv[2] ?? ''
 const notesAt = process.argv.indexOf('--notes-file')
 const notesFile = notesAt > 0 ? process.argv[notesAt + 1] : undefined
-if (!SEMVER.test(version)) throw new Error('usage: bun run release <major.minor.patch>, like 0.2.0')
-const tag = `v${version}`
+if (!(asked in KINDS) && !SEMVER.test(asked)) throw new Error('usage: bun run release fix|minor|major (or an exact major.minor.fix, like 0.5.0)')
 
 if (run(['git', 'branch', '--show-current']) !== 'main') throw new Error('release from main')
 if (run(['git', 'status', '--porcelain'])) throw new Error('commit or stash your changes first')
 run(['git', 'fetch', '-q', 'origin', '--tags'])
 if (run(['git', 'rev-parse', 'HEAD']) !== run(['git', 'rev-parse', 'origin/main'])) throw new Error('main is not the same as origin/main; pull or push first')
-if (run(['git', 'tag', '-l', tag])) throw new Error(`${tag} already exists`)
 
 const current = MANIFESTS.map(versionOf)
 const latestTag = run(['git', 'tag', '-l', 'v*', '--sort=-v:refname']).split('\n')[0] || undefined
 const released = latestTag?.slice(1)
+const version = asked in KINDS ? nextVersion(released ?? versionOf('package.json') ?? '0.0.0', KINDS[asked]!) : asked
+const tag = `v${version}`
+if (run(['git', 'tag', '-l', tag])) throw new Error(`${tag} already exists`)
 // 아직 릴리스한 적이 없으면 지금 매니페스트의 판 그대로 첫 릴리스를 할 수 있다.
 if (released ? !newer(version, released) : current.some(v => v && newer(v, version)))
   throw new Error(`${version} must be newer than ${released ?? current.join(', ')}`)
@@ -70,9 +73,11 @@ if (changed) {
   run(['git', 'commit', '-q', '-m', `Release ${tag}`])
 }
 // 노트 파일이 없으면 지난 릴리스 뒤의 커밋 제목을 적는다.
-const notes = notesFile
+const body = notesFile
   ? readFileSync(notesFile, 'utf8').trim()
   : run(['git', 'log', '--format=- %s', ...(latestTag ? [`${latestTag}..HEAD`] : ['-n', '20'])])
+const kind = released ? kindOf(released, version) : undefined
+const notes = kind ? `${KIND_NOTE[kind]}\n\n${body}` : body
 run(['git', 'tag', '-a', tag, '-m', `Release ${tag}`])
 run(['git', 'push', '-q', 'origin', 'main', tag])
 run(['git', 'push', '-q', 'origin', 'HEAD:refs/heads/release'])
