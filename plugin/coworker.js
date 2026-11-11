@@ -16805,7 +16805,7 @@ class DeliveryError extends Error {
 }
 function isSavedBridge(v) {
   const s = v;
-  return !!s && s.v === 1 && typeof s.name === "string" && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && typeof s.savedAt === "string";
+  return !!s && s.v === 1 && typeof s.name === "string" && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && (s.viewer === undefined || !!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === "string") && typeof s.savedAt === "string";
 }
 var now = () => new Date().toISOString();
 var NO_PEERS = "no connected session yet; open the bridge and exchange a connection code first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result";
@@ -16847,6 +16847,7 @@ class Bridge {
   waiters = [];
   onEvent;
   watchers = new Set;
+  viewerAddress;
   waiting = 0;
   flushing = false;
   lastCode;
@@ -16889,6 +16890,7 @@ class Bridge {
     b.seen = new Set(saved.seen);
     b.closedAsks = new Map(saved.closedAsks);
     b.events = saved.events ?? [];
+    b.viewerAddress = saved.viewer;
     try {
       b.open(saved.port);
     } catch {
@@ -16914,6 +16916,7 @@ class Bridge {
       seen: [...this.seen].slice(-2000),
       closedAsks: [...this.closedAsks],
       events: this.events,
+      viewer: this.viewerAddress,
       pid: process.pid,
       savedAt: now()
     };
@@ -17608,6 +17611,15 @@ ${f.evidence}`).join(`
   watch(onChange) {
     this.watchers.add(onChange);
     return () => void this.watchers.delete(onChange);
+  }
+  get viewerAt() {
+    return this.viewerAddress;
+  }
+  set viewerAt(at) {
+    if (at?.port === this.viewerAddress?.port && at?.token === this.viewerAddress?.token)
+      return;
+    this.viewerAddress = at;
+    this.dirty();
   }
   changed() {
     this.dirty();
@@ -18698,7 +18710,7 @@ import { randomUUID as randomUUID3 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.7";
+var version2 = "0.4.8";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26271,17 +26283,32 @@ function waitSeconds(requested, codex) {
 class Viewer {
   bridge;
   server;
-  token = randomToken();
+  token;
   listener;
   constructor(bridge) {
     this.bridge = bridge;
+    this.token = bridge.viewerAt?.token ?? randomToken();
   }
   get url() {
     return this.server && `http://127.0.0.1:${this.server.port}/${this.token}`;
   }
   start() {
-    this.server ??= Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, fetch: (req) => this.handle(req) });
+    if (!this.server) {
+      this.server = this.serve(this.bridge.viewerAt?.port) ?? this.serve(0);
+      this.bridge.viewerAt = { port: this.server.port, token: this.token };
+    }
     return this.url;
+  }
+  serve(port) {
+    if (port === undefined)
+      return;
+    try {
+      return Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 0, fetch: (req) => this.handle(req) });
+    } catch (e) {
+      if (port === 0)
+        throw e;
+      return;
+    }
   }
   stop() {
     this.listener = undefined;
@@ -26406,9 +26433,9 @@ var PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Coworker \uB300\uD654</title>
 <style>
-:root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd; --in: #e8f0fe; --out: #eaf6ec; --note: #fdf5e2; --accent: #2f5bd3; }
+:root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd; --in: #e8f0fe; --out: #eaf6ec; --note: #fdf5e2; --accent: #2f5bd3; --warn: #b3261e; }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #161615; --card: #20201e; --text: #ecebe6; --muted: #9c9b95; --line: #34332f; --in: #1f2a40; --out: #1e3324; --note: #3a321e; --accent: #8aa8ff; }
+  :root { --bg: #161615; --card: #20201e; --text: #ecebe6; --muted: #9c9b95; --line: #34332f; --in: #1f2a40; --out: #1e3324; --note: #3a321e; --accent: #8aa8ff; --warn: #ff8a80; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
@@ -26416,6 +26443,7 @@ main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 20px; margin: 0 0 4px; }
 .me, .meta, .time, .empty, .refresh { color: var(--muted); font-size: 13px; }
 .refresh { margin: 4px 0 20px; }
+.refresh.offline { color: var(--warn); font-weight: 600; }
 .conv { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
 .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--in); }
@@ -26488,21 +26516,44 @@ function render(data) {
     list.append(card)
   }
 }
-// \uC138\uC158\uC774 \uBC14\uB010 \uAC83\uC744 \uADF8\uB54C\uADF8\uB54C \uBC00\uC5B4 \uC900\uB2E4. \uB04A\uAE30\uBA74 \uBE0C\uB77C\uC6B0\uC800\uAC00 \uC54C\uC544\uC11C \uB2E4\uC2DC \uBD99\uB294\uB2E4.
+// \uC138\uC158\uC774 \uBC14\uB010 \uAC83\uC744 \uADF8\uB54C\uADF8\uB54C \uBC00\uC5B4 \uC900\uB2E4. \uC138\uC158\uC744 \uB2E4\uC2DC \uCF1C\uBA74 \uAC19\uC740 \uC8FC\uC18C\uB85C \uB3CC\uC544\uC624\uBBC0\uB85C, \uB04A\uACA8\uB3C4 \uC2A4\uC2A4\uB85C \uB2E4\uC2DC \uBD99\uB294\uB2E4.
+// \uBE0C\uB77C\uC6B0\uC800\uB294 \uD55C \uC8FC\uC18C\uC5D0 \uC5F0\uACB0\uC744 6\uAC1C\uAE4C\uC9C0\uB9CC \uC5F4\uC5B4 \uB454\uB2E4. \uD654\uBA74\uB9C8\uB2E4 \uC5F0\uACB0 \uD558\uB098\uB97C \uC950\uACE0 \uC788\uC73C\uBA74 \uD0ED\uC744 \uC5EC\uB7FF \uC5F0 \uB4A4 \uC0C8 \uD0ED\uC774 \uB728\uC9C0 \uC54A\uC73C\uBBC0\uB85C,
+// \uBCF4\uC774\uC9C0 \uC54A\uB294 \uD0ED\uC740 \uC5F0\uACB0\uC744 \uB193\uC558\uB2E4\uAC00 \uB2E4\uC2DC \uBCF4\uC77C \uB54C \uBD99\uB294\uB2E4. \uBD99\uC744 \uB54C\uB9C8\uB2E4 \uB300\uD654 \uC804\uCCB4\uB97C \uB2E4\uC2DC \uBC1B\uB294\uB2E4.
 const refresh = document.getElementById('refresh')
 let changedAt = ''
-const events = new EventSource(location.pathname + '/events')
-events.onmessage = e => {
-  render(JSON.parse(e.data))
-  changedAt = time(new Date().toISOString())
-  refresh.textContent = '\uBC14\uB00C\uBA74 \uBC14\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4 \xB7 \uB9C8\uC9C0\uB9C9 \uBCC0\uACBD ' + changedAt
+let shown = ''
+let events
+let retry
+function status(text, offline) {
+  refresh.textContent = text
+  refresh.classList.toggle('offline', !!offline)
 }
-events.onopen = () => {
-  if (changedAt) refresh.textContent = '\uBC14\uB00C\uBA74 \uBC14\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4 \xB7 \uB9C8\uC9C0\uB9C9 \uBCC0\uACBD ' + changedAt
+function connect() {
+  clearTimeout(retry)
+  if (events) events.close()
+  const source = new EventSource(location.pathname + '/events')
+  events = source
+  source.onmessage = e => {
+    if (e.data !== shown) {
+      shown = e.data
+      render(JSON.parse(e.data))
+      changedAt = time(new Date().toISOString())
+    }
+    status('\uBC14\uB00C\uBA74 \uBC14\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4 \xB7 \uB9C8\uC9C0\uB9C9 \uBCC0\uACBD ' + changedAt)
+  }
+  source.onerror = () => {
+    status('\uC138\uC158\uC5D0 \uB2FF\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uB2E4\uC2DC \uCF1C\uC9C0\uBA74 \uC774 \uD654\uBA74\uC774 \uC2A4\uC2A4\uB85C \uC774\uC5B4\uC11C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4.', true)
+    // \uBE0C\uB77C\uC6B0\uC800\uAC00 \uB2E4\uC2DC \uBD99\uAE30\uB97C \uADF8\uB9CC\uB450\uC5C8\uC73C\uBA74(\uADF8 \uD3EC\uD2B8\uC5D0 \uB2E4\uB978 \uAC83\uC774 \uB5B4\uC744 \uB54C) \uC7A0\uC2DC \uB4A4 \uC9C1\uC811 \uB2E4\uC2DC \uBD99\uB294\uB2E4.
+    if (source.readyState === EventSource.CLOSED && events === source) retry = setTimeout(connect, 5000)
+  }
 }
-events.onerror = () => {
-  refresh.textContent = '\uC138\uC158\uC5D0 \uB2FF\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uB05D\uB0AC\uC73C\uBA74 \uC774 \uD654\uBA74\uC740 \uB354 \uBC14\uB00C\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.'
+function release() {
+  clearTimeout(retry)
+  if (events) events.close()
+  events = undefined
 }
+document.addEventListener('visibilitychange', () => (document.hidden ? release() : connect()))
+if (!document.hidden) connect()
 </script>
 </body>
 </html>
@@ -26516,7 +26567,7 @@ function createSession(opts) {
   const channel = opts.channel;
   let identity = opts.sessionId ?? randomUUID2();
   const restoredPeers = opts.restore?.peers.map((p) => p.name);
-  const RESTORED = restoredPeers ? `This session restarted, and its coworker bridge came back by itself with the same identity: it is open again and still connected to ${restoredPeers.join(", ") || "nobody yet"}. Nobody needs a new code. The next time you talk with your human, tell them in one line, then call inbox to see what arrived meanwhile and keep listening as before.
+  const RESTORED = restoredPeers ? `This session restarted, and its coworker bridge came back by itself with the same identity: it is open again and still connected to ${restoredPeers.join(", ") || "nobody yet"}. Nobody needs a new code. A conversation view your human has open in a browser picks up again by itself if its link stayed the same; list_connections shows the link, so if it differs from the one you gave before, give your human the new one. The next time you talk with your human, tell them in one line, then call inbox to see what arrived meanwhile and keep listening as before.
 
   ` : "";
   const RESTARTS = `If coworker restarts
@@ -26696,7 +26747,7 @@ ${text}` : "";
   let viewer;
   const viewerOf = () => viewer ??= new Viewer(getBridge());
   const viewerUrl = () => viewerOf().start();
-  const viewerNote = (url) => `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself: ${url}`;
+  const viewerNote = (url) => `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url}`;
   async function relayStatus(b) {
     if (!relay)
       return {};
@@ -26926,6 +26977,7 @@ ${text}` : "";
   if (opts.restore) {
     try {
       adopt(Bridge.restore(opts.restore, bridgeOptions()));
+      viewerOf().start();
     } catch {}
   }
   return {
@@ -26933,8 +26985,8 @@ ${text}` : "";
     shutdown() {
       if (bridge && live.get(identity)?.bridge === bridge)
         live.delete(identity);
-      bridge?.shutdown();
       viewer?.stop();
+      bridge?.shutdown();
     }
   };
 }
