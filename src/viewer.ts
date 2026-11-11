@@ -1,26 +1,43 @@
 import type { Server } from 'bun'
-import type { Bridge, BridgeEvent } from './bridge'
+import type { Bridge, BridgeEvent, ViewerAddress } from './bridge'
 import { randomToken } from './crypto'
 
 // 사람이 브라우저로 대화를 지켜보는 화면. 이 PC 안(127.0.0.1)에서만 열리고, 주소에 든 토큰을 알아야 볼 수 있다.
 // 상대가 보낸 글은 화면에 글자로만 넣는다. HTML 로 해석하지 않는다.
 // 채널 없이 켠 Claude Code 가 백그라운드 명령으로 기다리는 주소(/next)도 여기에 둔다.
+// 주소는 브릿지가 기억한다. 같은 세션을 다시 켜면 같은 포트와 토큰으로 열어, 사람이 열어 둔 화면이 끊기지 않고 이어서 보여 준다.
 export class Viewer {
   private server?: Server<undefined>
-  private readonly token = randomToken()
+  private readonly token: string
   // 지금 기다리고 있는 백그라운드 명령. 하나만 산다.
   private listener?: (text: string) => void
 
-  constructor(private readonly bridge: Bridge) {}
+  constructor(private readonly bridge: Bridge) {
+    this.token = bridge.viewerAt?.token ?? randomToken()
+  }
 
   get url() {
     return this.server && `http://127.0.0.1:${this.server.port}/${this.token}`
   }
 
   start(): string {
-    // 바뀔 때만 밀어 주는 연결은 오래 조용할 수 있다. Bun 은 10초 동안 조용한 연결을 끊으므로 끄지 않게 한다.
-    this.server ??= Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 0, fetch: req => this.handle(req) })
+    if (!this.server) {
+      // 전에 쓰던 포트가 비어 있으면 그 포트로, 아니면 빈 포트로 연다. 어느 쪽이든 토큰은 그대로 둔다.
+      this.server = this.serve(this.bridge.viewerAt?.port) ?? this.serve(0)!
+      this.bridge.viewerAt = { port: this.server.port!, token: this.token }
+    }
     return this.url!
+  }
+
+  private serve(port: number | undefined) {
+    if (port === undefined) return undefined
+    try {
+      // 바뀔 때만 밀어 주는 연결은 오래 조용할 수 있다. Bun 은 10초 동안 조용한 연결을 끊으므로 끄지 않게 한다.
+      return Bun.serve({ hostname: '127.0.0.1', port, idleTimeout: 0, fetch: req => this.handle(req) })
+    } catch (e) {
+      if (port === 0) throw e
+      return undefined
+    }
   }
 
   stop() {
@@ -155,9 +172,9 @@ const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Coworker 대화</title>
 <style>
-:root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd; --in: #e8f0fe; --out: #eaf6ec; --note: #fdf5e2; --accent: #2f5bd3; }
+:root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd; --in: #e8f0fe; --out: #eaf6ec; --note: #fdf5e2; --accent: #2f5bd3; --warn: #b3261e; }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #161615; --card: #20201e; --text: #ecebe6; --muted: #9c9b95; --line: #34332f; --in: #1f2a40; --out: #1e3324; --note: #3a321e; --accent: #8aa8ff; }
+  :root { --bg: #161615; --card: #20201e; --text: #ecebe6; --muted: #9c9b95; --line: #34332f; --in: #1f2a40; --out: #1e3324; --note: #3a321e; --accent: #8aa8ff; --warn: #ff8a80; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
@@ -165,6 +182,7 @@ main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 20px; margin: 0 0 4px; }
 .me, .meta, .time, .empty, .refresh { color: var(--muted); font-size: 13px; }
 .refresh { margin: 4px 0 20px; }
+.refresh.offline { color: var(--warn); font-weight: 600; }
 .conv { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
 .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--in); }
@@ -237,21 +255,44 @@ function render(data) {
     list.append(card)
   }
 }
-// 세션이 바뀐 것을 그때그때 밀어 준다. 끊기면 브라우저가 알아서 다시 붙는다.
+// 세션이 바뀐 것을 그때그때 밀어 준다. 세션을 다시 켜면 같은 주소로 돌아오므로, 끊겨도 스스로 다시 붙는다.
+// 브라우저는 한 주소에 연결을 6개까지만 열어 둔다. 화면마다 연결 하나를 쥐고 있으면 탭을 여럿 연 뒤 새 탭이 뜨지 않으므로,
+// 보이지 않는 탭은 연결을 놓았다가 다시 보일 때 붙는다. 붙을 때마다 대화 전체를 다시 받는다.
 const refresh = document.getElementById('refresh')
 let changedAt = ''
-const events = new EventSource(location.pathname + '/events')
-events.onmessage = e => {
-  render(JSON.parse(e.data))
-  changedAt = time(new Date().toISOString())
-  refresh.textContent = '바뀌면 바로 보여 줍니다 · 마지막 변경 ' + changedAt
+let shown = ''
+let events
+let retry
+function status(text, offline) {
+  refresh.textContent = text
+  refresh.classList.toggle('offline', !!offline)
 }
-events.onopen = () => {
-  if (changedAt) refresh.textContent = '바뀌면 바로 보여 줍니다 · 마지막 변경 ' + changedAt
+function connect() {
+  clearTimeout(retry)
+  if (events) events.close()
+  const source = new EventSource(location.pathname + '/events')
+  events = source
+  source.onmessage = e => {
+    if (e.data !== shown) {
+      shown = e.data
+      render(JSON.parse(e.data))
+      changedAt = time(new Date().toISOString())
+    }
+    status('바뀌면 바로 보여 줍니다 · 마지막 변경 ' + changedAt)
+  }
+  source.onerror = () => {
+    status('세션에 닿지 않습니다. 세션이 다시 켜지면 이 화면이 스스로 이어서 보여 줍니다.', true)
+    // 브라우저가 다시 붙기를 그만두었으면(그 포트에 다른 것이 떴을 때) 잠시 뒤 직접 다시 붙는다.
+    if (source.readyState === EventSource.CLOSED && events === source) retry = setTimeout(connect, 5000)
+  }
 }
-events.onerror = () => {
-  refresh.textContent = '세션에 닿지 않습니다. 세션이 끝났으면 이 화면은 더 바뀌지 않습니다.'
+function release() {
+  clearTimeout(retry)
+  if (events) events.close()
+  events = undefined
 }
+document.addEventListener('visibilitychange', () => (document.hidden ? release() : connect()))
+if (!document.hidden) connect()
 </script>
 </body>
 </html>

@@ -180,6 +180,9 @@ export type BridgeOptions = {
   saveTo?: string
 }
 
+// 사람이 브라우저로 여는 대화 보기 화면의 주소. 세션을 다시 켜도 이 포트와 토큰으로 다시 열어서, 열어 둔 화면이 스스로 다시 붙는다.
+export type ViewerAddress = { port: number; token: string }
+
 // 세션을 다시 켰을 때 되살릴 것. 이 세션의 비밀키와 아직 쓰지 않은 연결 코드가 들어 있어서, 이 PC의 사용자만 읽게 쓴다.
 export type SavedBridge = {
   v: 1
@@ -195,6 +198,7 @@ export type SavedBridge = {
   closedAsks: [string, string][]
   // 왔지만 AI가 아직 읽지 않은 소식. 다시 켠 뒤 inbox 나 기다리기로 받는다.
   events?: BridgeEvent[]
+  viewer?: ViewerAddress
   pid: number
   savedAt: string
 }
@@ -216,6 +220,7 @@ export function isSavedBridge(v: unknown): v is SavedBridge {
     Array.isArray(s.seen) &&
     Array.isArray(s.closedAsks) &&
     (s.events === undefined || Array.isArray(s.events)) &&
+    (s.viewer === undefined || (!!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === 'string')) &&
     typeof s.savedAt === 'string'
   )
 }
@@ -275,6 +280,8 @@ export class Bridge {
   onEvent?: () => void
   // 대화나 브릿지 상태가 바뀔 때마다 불린다. 보기 화면이 듣고 브라우저에 바로 밀어 준다.
   private watchers = new Set<() => void>()
+  // 이 세션의 대화 보기 화면이 열린 주소. 상태와 함께 저장해서, 다시 켜도 같은 주소로 연다.
+  private viewerAddress?: ViewerAddress
   private waiting = 0
   private flushing = false
   private lastCode?: string
@@ -324,6 +331,7 @@ export class Bridge {
     b.seen = new Set(saved.seen)
     b.closedAsks = new Map(saved.closedAsks)
     b.events = saved.events ?? []
+    b.viewerAddress = saved.viewer
     try {
       b.open(saved.port)
     } catch {
@@ -352,6 +360,7 @@ export class Bridge {
       seen: [...this.seen].slice(-2000),
       closedAsks: [...this.closedAsks],
       events: this.events,
+      viewer: this.viewerAddress,
       pid: process.pid,
       savedAt: now(),
     }
@@ -1080,6 +1089,17 @@ export class Bridge {
   watch(onChange: () => void) {
     this.watchers.add(onChange)
     return () => void this.watchers.delete(onChange)
+  }
+
+  // 대화 보기 화면이 연 주소. 보기 화면이 열릴 때 알려 주고, 다시 켤 때 그 주소로 다시 연다.
+  get viewerAt(): ViewerAddress | undefined {
+    return this.viewerAddress
+  }
+
+  set viewerAt(at: ViewerAddress | undefined) {
+    if (at?.port === this.viewerAddress?.port && at?.token === this.viewerAddress?.token) return
+    this.viewerAddress = at
+    this.dirty()
   }
 
   private changed() {

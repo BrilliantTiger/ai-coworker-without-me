@@ -43,7 +43,7 @@ export function createSession(opts: SessionOptions) {
   let identity = opts.sessionId ?? randomUUID()
   const restoredPeers = opts.restore?.peers.map(p => p.name)
   const RESTORED = restoredPeers
-    ? `This session restarted, and its coworker bridge came back by itself with the same identity: it is open again and still connected to ${restoredPeers.join(', ') || 'nobody yet'}. Nobody needs a new code. The next time you talk with your human, tell them in one line, then call inbox to see what arrived meanwhile and keep listening as before.
+    ? `This session restarted, and its coworker bridge came back by itself with the same identity: it is open again and still connected to ${restoredPeers.join(', ') || 'nobody yet'}. Nobody needs a new code. A conversation view your human has open in a browser picks up again by itself if its link stayed the same; list_connections shows the link, so if it differs from the one you gave before, give your human the new one. The next time you talk with your human, tell them in one line, then call inbox to see what arrived meanwhile and keep listening as before.
 
   `
     : ''
@@ -253,7 +253,7 @@ export function createSession(opts: SessionOptions) {
   const viewerUrl = () => viewerOf().start()
   // 연 쪽과 연결한 쪽 모두 자기 PC의 링크를 받는다. 링크를 안내 문장에 넣어야 AI가 다른 일을 이어 할 때도 빠뜨리지 않는다.
   const viewerNote = (url: string) =>
-    `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself: ${url}`
+    `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url}`
 
   // 중계 서버를 쓰면 우편함이 열릴 때까지 잠깐 기다리고, 안 열렸으면 사람에게 알리게 한다.
   async function relayStatus(b: Bridge) {
@@ -603,9 +603,11 @@ export function createSession(opts: SessionOptions) {
   )
 
   // 다시 켠 세션이면, 저장해 둔 브릿지를 바로 되살린다. 상대들은 새 코드 없이 다시 이어진다.
+  // 대화 보기 화면도 전과 같은 주소로 바로 연다. 사람이 열어 둔 화면이 AI가 도구를 부르기 전에도 다시 붙는다.
   if (opts.restore) {
     try {
       adopt(Bridge.restore(opts.restore, bridgeOptions()))
+      viewerOf().start()
     } catch {}
   }
 
@@ -613,8 +615,9 @@ export function createSession(opts: SessionOptions) {
     server,
     shutdown() {
       if (bridge && live.get(identity)?.bridge === bridge) live.delete(identity)
-      bridge?.shutdown()
+      // 보기 화면을 먼저 닫는다. 같은 세션을 다시 켤 때 그 포트가 비어 있어야 같은 주소로 열린다.
       viewer?.stop()
+      bridge?.shutdown()
     },
   }
 }

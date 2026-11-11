@@ -368,8 +368,11 @@ test('the same Claude Code session started again gets its bridge back by itself,
   const second = new Client({ name: 'claude-code', version: '1.0.0' })
   const again = await session('claude-code', env, second)
   expect(second.getInstructions()).toMatch(/came back by itself with the same identity: it is open again and still connected to /)
+  // 사람이 열어 둔 대화 보기 화면은 AI가 도구를 부르기 전에도 같은 주소에서 다시 대화를 보여 준다.
+  const view = (await (await fetch(`${opened.viewer}/data`)).json()) as { conversations: { id: string }[] }
+  expect(view.conversations).toEqual([expect.objectContaining({ id: asked.thread })])
   const conns = await again('list_connections')
-  expect(conns).toMatchObject({ session_id: 'session-one', peers: [expect.objectContaining({ name: joined.myName })] })
+  expect(conns).toMatchObject({ session_id: 'session-one', viewer: opened.viewer, peers: [expect.objectContaining({ name: joined.myName })] })
   const got = (await again('wait_for_message', { timeout_sec: 10 })).events
   expect(got).toEqual([expect.objectContaining({ kind: 'answer', text: '7690', thread: asked.thread })])
   // 상대는 이쪽이 돌아온 것을 안다.

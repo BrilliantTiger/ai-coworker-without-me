@@ -695,6 +695,53 @@ describe('coming back after a restart', () => {
     expect(await b2.wait(0)).toEqual([expect.objectContaining({ type: 'message', kind: 'question', text: 'Read me after the restart' })])
   })
 
+  test('the conversation view opens again at the same link, so a page left open picks up where it was', async () => {
+    const { a, b, saveTo } = await pairWithSavedJoiner()
+    const asked = await b.ask(undefined, 'Still shown after the restart?')
+    await next(a, 'message')
+    const viewer = new Viewer(b)
+    const url = viewer.start()
+    const [port, token] = [Number(new URL(url).port), url.split('/').pop()!]
+    // 프로세스가 끝날 때처럼 보기 화면을 닫고 브릿지를 멈춘다. 화면 주소도 상태와 함께 남는다.
+    viewer.stop()
+    b.shutdown()
+    expect(load(saveTo).viewer).toEqual({ port, token })
+    expect(isSavedBridge({ ...load(saveTo), viewer: { port: 'x' } })).toBe(false)
+
+    const b2 = Bridge.restore(load(saveTo), restoreOptions(saveTo, [b.port, b.port + 9]))
+    opened.push(b2)
+    const again = new Viewer(b2)
+    try {
+      expect(again.start()).toBe(url)
+      const data = (await (await fetch(`${url}/data`)).json()) as ReturnType<Viewer['data']>
+      expect(data.conversations).toEqual([expect.objectContaining({ id: asked.thread, messages: [expect.objectContaining({ text: 'Still shown after the restart?' })] })])
+    } finally {
+      again.stop()
+    }
+  })
+
+  test('if the view\'s old port is taken, it opens on another port with the same token and remembers the new one', async () => {
+    const { b, saveTo } = await pairWithSavedJoiner()
+    const viewer = new Viewer(b)
+    const url = viewer.start()
+    viewer.stop()
+    b.shutdown()
+    const blocker = Bun.serve({ port: Number(new URL(url).port), hostname: '127.0.0.1', fetch: () => new Response('') })
+    const b2 = Bridge.restore(load(saveTo), restoreOptions(saveTo, [b.port, b.port + 9]))
+    opened.push(b2)
+    const again = new Viewer(b2)
+    try {
+      const moved = again.start()
+      expect(moved).not.toBe(url)
+      expect(moved.split('/').pop()).toBe(url.split('/').pop())
+      expect(b2.viewerAt).toEqual({ port: Number(new URL(moved).port), token: url.split('/').pop()! })
+      expect((await fetch(`${moved}/data`)).status).toBe(200)
+    } finally {
+      again.stop()
+      blocker.stop(true)
+    }
+  })
+
   test('closing on purpose forgets the saved state; stopping with the process keeps it', async () => {
     const { b, saveTo } = await pairWithSavedJoiner()
     b.shutdown()
