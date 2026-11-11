@@ -26,6 +26,9 @@ export function parsePorts(text: string | undefined): [number, number] {
 // 주소마다 다른 프로그램이 같은 포트로 떠 있을 수 있다. 받는 쪽 키로 만든 경로로 보내서,
 // 엉뚱한 곳(예: 같은 포트를 쓰는 이 PC의 다른 브릿지)이 답하면 「여기 아님」으로 알 수 있게 한다.
 export const routeId = (key: string) => Buffer.from(key, 'base64').toString('base64url').slice(0, 16)
+// 연결된 세션마다 붙는 짧은 ID. 이름이 같은 세션이 여럿일 때 하나를 집어 부를 수 있다.
+export const peerId = (key: string) => routeId(key).slice(0, 6)
+const labelOf = (p: { key: string; name: string }) => `${p.name} [${peerId(p.key)}]`
 const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' || addr === 'localhost'
 // 주소 목록에서 http(s):// 로 시작하는 것은 중계 서버의 우편함이다. 나머지는 IP나 컴퓨터 이름이다.
 export const isRelayAddr = (addr: string) => /^https?:\/\//.test(addr)
@@ -78,6 +81,8 @@ export type ThreadMessage = {
   text: string
   context?: string
   agreement?: Agreement
+  // 사람이 질문 창에서 고르거나 직접 써서 정한 답.
+  human?: boolean
   at: string
 }
 
@@ -111,10 +116,17 @@ export type BridgeEvent =
       ask?: AskInfo | AskProgress
       agreement?: Agreement
       file?: string
+      // 상대 쪽 사람이 정한 답이다.
+      human?: boolean
       at: string
     }
   | { type: 'peer_closed'; peer: string; at: string }
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
+  // 이쪽 사람이 질문 창에 답했다. 고른 것과 쓴 말은 상대에게 이미 보냈다. closed: 답하지 않고 창을 닫았다. error: 보내지 못한 까닭.
+  | { type: 'decision'; thread: string; peer: string; choice?: string; text?: string; delivery?: 'delivered' | 'queued'; closed?: boolean; error?: string; at: string }
+
+// 이쪽 사람에게 띄운 질문 창. 사람이 답하거나 창을 닫을 때까지 남고, 세션을 다시 켜면 다시 띄운다.
+export type HumanQuestion = { thread: string; question: string; options: string[]; recommend?: number; at: string }
 
 type WireMessage = {
   id: string
@@ -125,6 +137,7 @@ type WireMessage = {
   context?: string
   ask?: AskInfo
   agreement?: Agreement
+  human?: boolean
   at: string
 }
 
@@ -199,6 +212,8 @@ export type SavedBridge = {
   // 왔지만 AI가 아직 읽지 않은 소식. 다시 켠 뒤 inbox 나 기다리기로 받는다.
   events?: BridgeEvent[]
   viewer?: ViewerAddress
+  // 이쪽 사람이 아직 답하지 않은 질문 창.
+  asking?: HumanQuestion[]
   pid: number
   savedAt: string
 }
@@ -221,8 +236,14 @@ export function isSavedBridge(v: unknown): v is SavedBridge {
     Array.isArray(s.closedAsks) &&
     (s.events === undefined || Array.isArray(s.events)) &&
     (s.viewer === undefined || (!!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === 'string')) &&
+    (s.asking === undefined || (Array.isArray(s.asking) && s.asking.every(isHumanQuestion))) &&
     typeof s.savedAt === 'string'
   )
+}
+
+function isHumanQuestion(v: unknown): v is HumanQuestion {
+  const q = v as HumanQuestion
+  return !!q && typeof q.thread === 'string' && typeof q.question === 'string' && Array.isArray(q.options) && q.options.every(o => typeof o === 'string')
 }
 
 // 중계 서버의 우편함 상태. off: 중계 서버를 쓰지 않는다.
@@ -282,6 +303,8 @@ export class Bridge {
   private watchers = new Set<() => void>()
   // 이 세션의 대화 보기 화면이 열린 주소. 상태와 함께 저장해서, 다시 켜도 같은 주소로 연다.
   private viewerAddress?: ViewerAddress
+  // 이쪽 사람에게 띄운 질문 창. 대화 id 마다 하나.
+  private asking = new Map<string, HumanQuestion>()
   private waiting = 0
   private flushing = false
   private lastCode?: string
@@ -332,6 +355,7 @@ export class Bridge {
     b.closedAsks = new Map(saved.closedAsks)
     b.events = saved.events ?? []
     b.viewerAddress = saved.viewer
+    for (const q of saved.asking ?? []) b.asking.set(q.thread, q)
     try {
       b.open(saved.port)
     } catch {
@@ -361,6 +385,7 @@ export class Bridge {
       closedAsks: [...this.closedAsks],
       events: this.events,
       viewer: this.viewerAddress,
+      asking: [...this.asking.values()],
       pid: process.pid,
       savedAt: now(),
     }
@@ -447,13 +472,13 @@ export class Bridge {
 
   // 한 세션에 묻는다. 대화 하나가 생긴다.
   async ask(to: string | undefined, question: string, context?: string) {
-    const peer = this.resolvePeer(to)
+    const peer = await this.resolvePeer(to)
     return this.sendQuestion(peer, question, context)
   }
 
   // to 가 여러 명이나 everyone 이면 받는 사람마다 대화를 하나씩 만들고 같은 ask 로 묶는다. 한 명이면 ask 와 같다.
   async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all') {
-    const peers = this.resolvePeers(to)
+    const peers = await this.resolvePeers(to)
     if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context)
     const ask: AskInfo = { id: randomUUID().slice(0, 8), to: peers.map(p => p.name), answers }
     const sent = await Promise.all(
@@ -496,16 +521,18 @@ export class Bridge {
     }
   }
 
-  async reply(threadId: string, text: string) {
+  // human: 사람이 정한 답이다. 합의문이 「사람이 정할 것」으로 남긴 것은 합의문을 쓴 뒤에도 사람이 정해 보낼 수 있다.
+  async reply(threadId: string, text: string, opts: { human?: boolean } = {}) {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
-    this.assertOpen(thread)
+    if (!(opts.human && thread.status === 'agreed')) this.assertOpen(thread)
     assertNoSecrets({ answer: text })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
-    const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, at: now() }
-    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, at: msg.at })
-    thread.status = 'waiting_for_peer'
+    const human = opts.human ? { human: true } : {}
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, ...human, at: now() }
+    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, ...human, at: msg.at })
+    if (thread.status !== 'agreed') thread.status = 'waiting_for_peer'
     this.changed()
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
@@ -515,13 +542,13 @@ export class Bridge {
   async hold(threadId: string, note: string) {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
-    this.assertOpen(thread)
+    if (thread.status !== 'agreed') this.assertOpen(thread)
     assertNoSecrets({ note })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'note', text: note, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: 'note', text: note, at: msg.at })
-    thread.status = 'checking_with_your_human'
+    if (thread.status !== 'agreed') thread.status = 'checking_with_your_human'
     this.changed()
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
@@ -609,6 +636,7 @@ export class Bridge {
         const pulling = this.isPulling(peer)
         return {
           name: peer.name,
+          id: peerId(peer.key),
           group: !peer.private,
           reachable: direct || pulling,
           via: direct
@@ -1062,20 +1090,22 @@ export class Bridge {
     }
     if (msg.kind === 'agreement' && !agreement) return
     const text = agreement ? renderAgreement(agreement) : msg.text
-    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, at: now() })
+    const human = msg.human === true ? { human: true } : {}
+    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, ...human, at: now() })
     // 이미 마감한 질문에 늦게 온 답은 남기기만 하고, 마감 상태는 그대로 둔다.
     if (thread.status === 'closed' || msg.kind === 'closed') thread.status = 'closed'
     else if (agreement) thread.status = 'agreed'
-    else if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
-    // 합의문을 쓴 뒤에 늦게 온 답도 남기기만 한다.
-    else if (thread.status !== 'agreed') thread.status = 'your_turn'
+    // 합의문을 쓴 뒤에 온 알림이나 답(사람이 정한 것 포함)도 남기기만 한다.
+    else if (thread.status === 'agreed') {
+    } else if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
+    else thread.status = 'your_turn'
     const file = agreement ? this.saveAgreement(thread) : undefined
     let ask: AskInfo | AskProgress | undefined = thread.ask
     if (thread.ask && thread.startedBy === 'me') {
       if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer.name, thread.id)
       ask = this.askProgress(thread.ask)
     }
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, at: now() })
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, at: now() })
   }
 
   private emit(event: BridgeEvent) {
@@ -1089,6 +1119,26 @@ export class Bridge {
   watch(onChange: () => void) {
     this.watchers.add(onChange)
     return () => void this.watchers.delete(onChange)
+  }
+
+  // 이쪽 사람에게 질문 창을 띄웠다. 사람이 답하거나 창을 닫을 때까지 남긴다(시간으로 지우지 않는다).
+  waitForHuman(question: HumanQuestion) {
+    this.asking.set(question.thread, question)
+    this.dirty()
+  }
+
+  humanQuestions() {
+    return [...this.asking.values()]
+  }
+
+  // 사람이 질문 창에 답했거나 창을 닫았다. 그 대화의 창은 끝났다.
+  humanDone(thread: string) {
+    if (this.asking.delete(thread)) this.dirty()
+  }
+
+  // 이 세션 안에서 생긴 일(사람이 질문 창에 답함)을 AI에게 알린다.
+  tell(event: Extract<BridgeEvent, { type: 'decision' }>) {
+    this.emit(event)
   }
 
   // 대화 보기 화면이 연 주소. 보기 화면이 열릴 때 알려 주고, 다시 켤 때 그 주소로 다시 연다.
@@ -1136,29 +1186,64 @@ export class Bridge {
     return entry && entry.expires > Date.now() ? entry : undefined
   }
 
-  private resolvePeers(to?: string | string[]): Peer[] {
+  private async resolvePeers(to?: string | string[]): Promise<Peer[]> {
     const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map(n => n.trim()).filter(Boolean)
     if (names.some(n => EVERYONE.includes(n.toLowerCase()))) {
       if (this.peers.size === 0) throw new Error(NO_PEERS)
-      return [...this.peers.values()]
+      return this.withoutLeftBehind([...this.peers.values()])
     }
-    if (names.length === 0) return [this.resolvePeer(undefined)]
-    return [...new Set(names.map(n => this.resolvePeer(n)))]
+    if (names.length === 0) return [await this.resolvePeer(undefined)]
+    return [...new Set(await Promise.all(names.map(n => this.resolvePeer(n))))]
   }
 
-  private resolvePeer(to?: string): Peer {
+  // 받는 사람을 이름(일부여도 된다)이나 [ID]로 찾는다.
+  // 상대가 세션을 새로 켜고 새 코드로 다시 붙으면, 옛 연결과 새 연결이 같은 이름으로 함께 남는다.
+  // 그때 이름은 지금 닿는 쪽을 가리킨다. 둘 다 닿지 않으면 나중에 붙은 쪽이다. 둘 다 닿으면 ID로 고르게 한다.
+  private async resolvePeer(to?: string): Promise<Peer> {
     const peers = [...this.peers.values()]
     if (peers.length === 0) throw new Error(NO_PEERS)
     if (!to) {
       if (peers.length === 1) return peers[0]!
-      throw new Error(`several sessions are connected; say which one, several, or "everyone": ${peers.map(p => p.name).join(', ')}`)
+      throw new Error(`several sessions are connected; say which one, several, or "everyone": ${peers.map(labelOf).join(', ')}`)
     }
-    const needle = to.trim().toLowerCase()
+    const wanted = to.trim()
+    const byId = peers.find(p => wanted === peerId(p.key) || wanted.endsWith(`[${peerId(p.key)}]`))
+    if (byId) return byId
+    const needle = wanted.toLowerCase()
     const exact = peers.filter(p => p.name.toLowerCase() === needle)
     const matches = exact.length ? exact : peers.filter(p => p.name.toLowerCase().includes(needle))
     if (matches.length === 1) return matches[0]!
-    if (matches.length === 0) throw new Error(`no connected session matches "${to}". Connected: ${peers.map(p => p.name).join(', ')}`)
-    throw new Error(`"${to}" matches more than one session: ${matches.map(p => p.name).join(', ')}`)
+    if (matches.length === 0) throw new Error(`no connected session matches "${to}". Connected: ${peers.map(labelOf).join(', ')}`)
+    if (new Set(matches.map(p => p.name)).size > 1) throw new Error(`"${to}" matches more than one session: ${matches.map(labelOf).join(', ')}`)
+    const live = await this.likelyLive(matches)
+    if (live.length === 1) return live[0]!
+    throw new Error(`"${to}" matches more than one session that can be reached now: ${live.map(labelOf).join(', ')}. Say which one by the id in brackets`)
+  }
+
+  // 이름이 같은 세션이 여럿이면 살아 있을 만한 것만 남긴다.
+  private async withoutLeftBehind(peers: Peer[]) {
+    const byName = new Map<string, Peer[]>()
+    for (const p of peers) byName.set(p.name, [...(byName.get(p.name) ?? []), p])
+    const keep = new Set<Peer>()
+    for (const same of byName.values()) for (const p of same.length === 1 ? same : await this.likelyLive(same)) keep.add(p)
+    return peers.filter(p => keep.has(p))
+  }
+
+  // 이름이 같은 세션 가운데 살아 있을 만한 것. 바로 닿는 것이 있으면 그것들(여럿이면 모두)이다.
+  // 바로 닿는 것이 없으면, 이쪽에 와서 가져가는 것 가운데 나중에 붙은 하나, 그것도 없으면 나중에 붙은 하나다.
+  // 막 꺼진 옛 세션도 1분 동안은 가져가던 흔적이 남아서, 가져가기만으로는 둘을 가리지 않는다.
+  private async likelyLive(same: Peer[]) {
+    const scores = await Promise.all(
+      same.map(async p => {
+        try {
+          if ((await this.deliver(p, { type: 'ping' })).type === 'pong') return 2
+        } catch {}
+        return this.isPulling(p) ? 1 : 0
+      }),
+    )
+    const best = Math.max(...scores)
+    const top = same.filter((_, i) => scores[i] === best)
+    return best === 2 ? top : [top.at(-1)!]
   }
 
   // 주소를 앞에서부터 하나씩 시도한다. 상대 키로 봉인된 답이 와야 닿은 것으로 본다.

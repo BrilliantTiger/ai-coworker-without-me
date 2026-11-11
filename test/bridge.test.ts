@@ -505,6 +505,47 @@ describe('ports', () => {
   })
 })
 
+describe('sessions with the same name', () => {
+  test('when a coworker comes back as a new session under the same name, the name means the one that answers', async () => {
+    const a = make('A · Claude Code')
+    const old = make('B · Codex')
+    a.open()
+    await old.connect(a.newCode())
+    await next(a, 'connected')
+    // B 가 세션을 새로 켜서(이어 켜지 않고) 새 코드로 다시 붙었다. 옛 연결은 이름만 남아 닿지 않는다.
+    old.shutdown()
+    const fresh = make('B · Codex')
+    await fresh.connect(a.newCode())
+    await next(a, 'connected')
+    const listed = (await a.connections()).peers
+    expect(listed.map(p => p.name)).toEqual(['B · Codex', 'B · Codex'])
+    expect(listed[1]!.reachable).toBe(true)
+    expect(new Set(listed.map(p => p.id)).size).toBe(2)
+
+    // 이름으로 물으면 지금 닿는 새 세션으로 간다.
+    expect(await a.ask('B · Codex', 'Are you the new one?')).toMatchObject({ delivery: 'delivered' })
+    expect(await next(fresh, 'message')).toMatchObject({ text: 'Are you the new one?' })
+    // 전체에게 물어도 닿지 않는 옛 연결에는 보내지 않는다.
+    const all = await a.askMany('everyone', 'Everyone there?')
+    expect('sent' in all ? all.sent : [all]).toEqual([expect.objectContaining({ delivery: 'delivered' })])
+    // ID로 집으면 옛 연결에도 보낼 수 있다(돌아오면 받는다).
+    expect(await a.ask(listed[0]!.id, 'Old one?')).toMatchObject({ delivery: 'queued' })
+  })
+
+  test('if two sessions with the same name both answer, the id in brackets picks one', async () => {
+    const a = make('A · Claude Code')
+    const one = make('B · Codex')
+    const two = make('B · Codex')
+    a.open()
+    await one.connect(a.newCode())
+    await two.connect(a.newCode())
+    await expect(a.ask('B · Codex', 'Which?')).rejects.toThrow(/matches more than one session that can be reached now: B · Codex \[\w+\], B · Codex \[\w+\]/)
+    const ids = (await a.connections()).peers.map(p => p.id)
+    expect(await a.ask(`B · Codex [${ids[1]}]`, 'You, the second one')).toMatchObject({ delivery: 'delivered' })
+    expect(await next(two, 'message')).toMatchObject({ text: 'You, the second one' })
+  })
+})
+
 describe('viewer', () => {
   test('shows each conversation with whom, which way and when, only on this PC and only with the link', async () => {
     const { a, b } = await pair()

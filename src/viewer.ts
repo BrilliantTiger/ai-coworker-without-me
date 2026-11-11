@@ -163,6 +163,7 @@ const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
   connected: 'connected',
   peer_closed: 'left',
   undelivered: 'undelivered',
+  decision: 'decision by your human',
 }
 
 const PAGE = `<!doctype html>
@@ -244,7 +245,7 @@ function render(data) {
     for (const m of c.messages) {
       const box = el('div', 'msg' + (m.from === 'me' ? ' mine' : '') + (m.kind === 'note' || m.kind === 'closed' ? ' note' : '') + (m.kind === 'agreement' ? ' agreement' : ''))
       const who = m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'
-      box.append(el('div', 'who', (KIND[m.kind] ?? m.kind) + ' · ' + who), el('div', 'time', time(m.at)), el('div', 'text', m.text))
+      box.append(el('div', 'who', (KIND[m.kind] ?? m.kind) + (m.human ? ' · 사람이 정함' : '') + ' · ' + who), el('div', 'time', time(m.at)), el('div', 'text', m.text))
       if (m.context) {
         const d = el('details')
         d.append(el('summary', '', '함께 보낸 배경'), el('div', 'text', m.context))

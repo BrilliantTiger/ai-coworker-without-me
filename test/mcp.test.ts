@@ -4,6 +4,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { ElicitRequestSchema, type ElicitRequest, type ElicitResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { waitSeconds } from '../src/limits'
 import { readSaved, savedPath, stillRunning } from '../src/resume'
@@ -76,14 +77,16 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   expect(view.conversations[0]).toMatchObject({ id: asked.thread, startedBy: 'peer', peerName: joined.myName, messages: [{ text: 'What is 2+2?' }, { text: '4' }] })
   expect((await codex('list_connections')).viewer).toStartWith('http://127.0.0.1:')
 
-  // 결정이 필요한 질문: 받은 쪽이 사람에게 묻는 중이라고 알리고, 사람의 결정을 답으로 보낸다.
+  // 결정이 필요한 질문: 받은 쪽이 사람에게 묻는 중이라고 알린다. 질문 창을 띄울 수 없는 앱이면 AI가 번호 보기로 묻고, 사람의 결정을 답으로 보낸다.
   const decide = await codex('send_question', { question: 'Release on Friday or Monday?' })
   const dq = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
   expect(dq).toMatchObject({ kind: 'question', thread: decide.thread })
-  expect(await claude('check_with_human', { thread: dq.thread })).toMatchObject({ status: 'checking_with_your_human' })
+  const held = await claude('check_with_human', { thread: dq.thread, question: 'Release on Friday or Monday?', options: ['Friday', 'Monday'], recommend: 2 })
+  expect(held).toMatchObject({ status: 'checking_with_your_human', window: false })
+  expect(held.next).toMatch(/numbered 1, 2, 3/)
   expect((await codex('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ kind: 'note', status: 'peer_checking_with_their_human' })
-  await claude('reply', { thread: dq.thread, text: 'My human decided: Monday.' })
-  expect((await codex('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ kind: 'answer', text: 'My human decided: Monday.' })
+  await claude('reply', { thread: dq.thread, text: 'My human decided: Monday.', decided_by_human: true })
+  expect((await codex('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ kind: 'answer', text: 'My human decided: Monday.', human: true })
   expect((await claude('read_conversation', { thread: asked.thread })).messages).toHaveLength(2)
   expect((await codex('list_connections')).peers[0]).toMatchObject({ name: opened.name, reachable: true })
 
@@ -424,3 +427,102 @@ test('the plugin server and a directly added server in the same Claude Code sess
   expect(await again('list_connections')).toMatchObject({ session_id: 'session-two', me: { open: true, port: opened.port } })
   expect(await direct('list_connections')).toMatchObject({ session_id: 'session-two.direct', me: { open: false } })
 }, 30_000)
+
+// 질문 창을 띄울 수 있는 클라이언트(Claude Code, Codex 처럼). answer 가 사람의 대답 노릇을 한다.
+function windowClient(answer: (params: ElicitRequest['params']) => Promise<ElicitResult> | ElicitResult) {
+  const client = new Client({ name: 'claude-code', version: '1.0.0' }, { capabilities: { elicitation: {} } })
+  const shown: ElicitRequest['params'][] = []
+  client.setRequestHandler(ElicitRequestSchema, async req => {
+    shown.push(req.params)
+    return answer(req.params)
+  })
+  return { client, shown }
+}
+
+async function questionFromCodex() {
+  const { client, shown } = windowClient(() => ({ action: 'accept', content: { choice: '2', other: '테스트가 끝나면 바로' } }))
+  const claude = await session('claude-code', {}, client)
+  const codex = await session('codex-mcp-client')
+  const opened = await claude('open_bridge', {})
+  await codex('connect', { code: opened.code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  const asked = await codex('send_question', { question: '배포를 언제 할까요?' })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  return { claude, codex, opened, asked, shown }
+}
+
+test('a decision opens a question window for the human, and their answer goes to the other side by itself', async () => {
+  const { claude, codex, opened, asked, shown } = await questionFromCodex()
+  const held = await claude('check_with_human', { thread: asked.thread, question: '보안 담당이 배포 날짜를 묻습니다. 언제 할까요?', options: ['금요일', '월요일'], recommend: 2 })
+  expect(held).toMatchObject({ status: 'checking_with_your_human', window: 'open' })
+
+  // 상대는 사람에게 묻는 중이라는 알림을 받고, 이어서 사람이 정한 답을 받는다.
+  const got: { kind?: string; text?: string; human?: boolean }[] = []
+  for (let i = 0; i < 10 && got.length < 2; i++) got.push(...(await codex('wait_for_message', { timeout_sec: 2 })).events)
+  expect(got).toEqual([
+    expect.objectContaining({ kind: 'note' }),
+    expect.objectContaining({ kind: 'answer', text: '사람이 정했습니다: 월요일\n덧붙인 말: 테스트가 끝나면 바로', human: true }),
+  ])
+
+  // 사람에게는 번호 붙은 보기와 직접 쓰는 칸이 뜨고, 추천한 것이 표시된다.
+  expect(shown).toHaveLength(1)
+  expect(shown[0]!.message).toStartWith('보안 담당이 배포 날짜를 묻습니다. 언제 할까요?')
+  const props = (shown[0] as { requestedSchema: { properties: Record<string, { title?: string; oneOf?: { const: string; title: string }[] }> } }).requestedSchema.properties
+  expect(props.choice!.oneOf).toEqual([
+    { const: '1', title: '1. 금요일' },
+    { const: '2', title: '2. 월요일 (추천)' },
+  ])
+  expect(props.other!.title).toBe('직접 입력')
+
+  // 이쪽 AI는 사람이 답했고 보냈다는 알림을 받는다. 대화 보기 화면에도 사람이 정한 답으로 남는다.
+  expect((await claude('wait_for_message', { timeout_sec: 5 })).events).toEqual([
+    expect.objectContaining({ type: 'decision', thread: asked.thread, choice: '월요일', text: '테스트가 끝나면 바로', delivery: 'delivered' }),
+  ])
+  const view = (await (await fetch(`${opened.viewer}/data`)).json()) as { conversations: { id: string; messages: { human?: boolean }[] }[] }
+  expect(view.conversations.find(c => c.id === asked.thread)!.messages.at(-1)).toMatchObject({ human: true })
+  expect((await claude('inbox')).waiting_for_your_human).toBeUndefined()
+})
+
+test('closing the question window without answering tells the AI to ask in text', async () => {
+  const { client } = windowClient(() => ({ action: 'cancel' }))
+  const claude = await session('claude-code', {}, client)
+  const codex = await session('codex-mcp-client')
+  await codex('connect', { code: (await claude('open_bridge', {})).code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  const asked = await codex('send_question', { question: 'Ship it?' })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  expect((await claude('check_with_human', { thread: asked.thread, question: 'Ship it?', options: ['Yes', 'No'] })).window).toBe('open')
+  const told = await claude('wait_for_message', { timeout_sec: 5 })
+  expect(told.events).toEqual([expect.objectContaining({ type: 'decision', thread: asked.thread, closed: true })])
+  expect(told.next).toMatch(/window was closed, ask them in text with numbered options/)
+  // 상대에게는 사람에게 묻는 중이라는 알림만 갔다.
+  const got = (await codex('wait_for_message', { timeout_sec: 2 })).events
+  expect(got.map((e: { kind?: string }) => e.kind)).toEqual(['note'])
+})
+
+test('a question window the human has not answered opens again when the same session starts again', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-window-'))
+  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'window-session', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
+  // 사람이 창을 띄워 둔 채로 답하지 않았다.
+  const first = windowClient(() => new Promise<ElicitResult>(() => {}))
+  const claude = await session('claude-code', env, first.client)
+  const codex = await session('codex-mcp-client')
+  await codex('connect', { code: (await claude('open_bridge', {})).code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  const asked = await codex('send_question', { question: '어느 서버에 올릴까요?' })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  await claude('check_with_human', { thread: asked.thread, question: '어느 서버에 올릴까요?', options: ['PREP', 'PROD'], recommend: 1 })
+  for (let i = 0; i < 100 && !first.shown.length; i++) await Bun.sleep(20)
+  expect((await claude('inbox')).waiting_for_your_human).toEqual([asked.thread])
+
+  // 세션을 닫았다가 같은 세션으로 다시 켠다. 창이 다시 뜨고, 이번에는 사람이 고른다.
+  await ended(first.client, own, 'window-session')
+  const second = windowClient(() => ({ action: 'accept', content: { choice: '1' } }))
+  await session('claude-code', env, second.client)
+  for (let i = 0; i < 100 && !second.shown.length; i++) await Bun.sleep(50)
+  expect(second.shown[0]!.message).toStartWith('어느 서버에 올릴까요?')
+  const got: { kind?: string; text?: string; human?: boolean }[] = []
+  for (let i = 0; i < 10 && !got.some(e => e.kind === 'answer'); i++) got.push(...(await codex('wait_for_message', { timeout_sec: 2 })).events)
+  expect(got.find(e => e.kind === 'answer')).toMatchObject({ text: '사람이 정했습니다: PREP', human: true })
+}, 30_000)
+
