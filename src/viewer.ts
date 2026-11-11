@@ -164,6 +164,7 @@ const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
   peer_closed: 'left',
   undelivered: 'undelivered',
   decision: 'decision by your human',
+  moved: 'moved to another session',
 }
 
 const PAGE = `<!doctype html>

@@ -122,6 +122,8 @@ export type BridgeEvent =
     }
   | { type: 'peer_closed'; peer: string; at: string }
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
+  // 이 브릿지를 같은 PC의 다른 세션이 이어받았다. 이 세션은 더 듣지 않는다.
+  | { type: 'moved'; at: string }
   // 이쪽 사람이 질문 창에 답했다. 고른 것과 쓴 말은 상대에게 이미 보냈다. closed: 답하지 않고 창을 닫았다. error: 보내지 못한 까닭.
   | { type: 'decision'; thread: string; peer: string; choice?: string; text?: string; delivery?: 'delivered' | 'queued'; closed?: boolean; error?: string; at: string }
 
@@ -163,6 +165,9 @@ type Payload =
   | { type: 'bye' }
   | { type: 'poll'; wait: number; ack?: string[] }
   | { type: 'batch'; items: { id: string; payload: Payload }[] }
+  // 같은 PC의 다른 세션이 이 브릿지를 이어받는다. 이 브릿지의 비밀키로 봉인해 보내므로, 저장한 상태를 읽을 수 있는 쪽만 보낼 수 있다.
+  | { type: 'handover' }
+  | { type: 'handover_ok' }
 
 // 상대가 가져간 뒤 「받았다」고 알려 와야 줄에서 지운다. 가져가던 연결이 끊겨도 다음에 다시 넘긴다.
 export type Outgoing = { id: string; peer: string; payload: Payload; thread?: string; since: number }
@@ -299,6 +304,8 @@ export class Bridge {
   private waiters: Array<() => void> = []
   // 새 일이 생길 때마다 불린다. Claude Code 를 Channels 로 켰으면 여기서 바로 세션에 밀어 넣는다.
   onEvent?: () => void
+  // 다른 세션이 이 브릿지를 이어받아 이 브릿지가 멈춘 뒤 불린다. 세션은 띄워 둔 창과 보기 화면을 닫는다.
+  onMoved?: () => void
   // 대화나 브릿지 상태가 바뀔 때마다 불린다. 보기 화면이 듣고 브라우저에 바로 밀어 준다.
   private watchers = new Set<() => void>()
   // 이 세션의 대화 보기 화면이 열린 주소. 상태와 함께 저장해서, 다시 켜도 같은 주소로 연다.
@@ -353,7 +360,8 @@ export class Bridge {
     for (const t of saved.tokens) b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private })
     b.seen = new Set(saved.seen)
     b.closedAsks = new Map(saved.closedAsks)
-    b.events = saved.events ?? []
+    // 「다른 세션이 이어받았다」는 알림은 넘겨준 세션의 것이다. 이어받은 쪽에는 넘기지 않는다.
+    b.events = (saved.events ?? []).filter(e => e.type !== 'moved')
     b.viewerAddress = saved.viewer
     for (const q of saved.asking ?? []) b.asking.set(q.thread, q)
     try {
@@ -366,6 +374,28 @@ export class Bridge {
       void b.pollLoop(peer.key)
     }
     return b
+  }
+
+  // 같은 PC의 다른 세션에서 돌고 있는 이 브릿지에게 이쪽으로 옮겨 오겠다고 알린다. 그쪽은 상태를 저장하고 멈춘다.
+  static async askToMove(saved: SavedBridge): Promise<boolean> {
+    const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) }
+    try {
+      const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(seal({ type: 'handover' }, keys.publicKey, keys)),
+        signal: AbortSignal.timeout(5000),
+      })
+      if (!res.ok) return false
+      return (open(await res.json(), keys) as Payload | null)?.type === 'handover_ok'
+    } catch {
+      return false
+    }
+  }
+
+  // 지금 상태를 바로 저장한다. 다른 이름표로 옮겨 저장할 때 쓴다.
+  persist() {
+    this.save()
   }
 
   snapshot(): SavedBridge {
@@ -754,6 +784,17 @@ export class Bridge {
     const from = (sealed as { from: string }).from
     const answer = (p: Payload) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) })
     const forbidden = { status: 403, body: 'forbidden' }
+
+    // 같은 PC의 다른 세션이 이어받는다. 상태를 저장하고 멈춘다. 답을 보낸 뒤에 멈춰야 답이 간다.
+    if (from === this.key && payload.type === 'handover' && this.server) {
+      this.emit({ type: 'moved', at: now() })
+      this.save()
+      setTimeout(() => {
+        this.shutdown()
+        this.onMoved?.()
+      }, 50)
+      return answer({ type: 'handover_ok' })
+    }
 
     const peer = this.peers.get(from)
     if (!peer) {

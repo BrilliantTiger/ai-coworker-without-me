@@ -49,6 +49,37 @@ export async function findSession(home: string, id: string | undefined): Promise
   return {}
 }
 
+// 이 PC에 저장된 브릿지. 새 세션이 앞 세션의 브릿지를 이어받을 때 고른다. 최근에 저장한 것부터.
+export function listSaved(home: string): { id: string; saved: SavedBridge }[] {
+  let names: string[]
+  try {
+    names = readdirSync(join(home, 'sessions'))
+  } catch {
+    return []
+  }
+  const found: { id: string; saved: SavedBridge }[] = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const saved = readSaved(join(home, 'sessions', name))
+    if (saved) found.push({ id: name.slice(0, -'.json'.length), saved })
+  }
+  return found.sort((a, b) => b.saved.savedAt.localeCompare(a.saved.savedAt))
+}
+
+// 브릿지가 멈춰 그 포트가 답하지 않을 때까지 기다린다. 대화 보기 화면의 포트도 빌 때까지 기다려, 이어받는 쪽이 같은 링크로 연다.
+export async function waitUntilStopped(saved: SavedBridge) {
+  for (let i = 0; i < 50 && (await stillRunning(saved)); i++) await Bun.sleep(100)
+  if (!saved.viewer) return
+  for (let i = 0; i < 30; i++) {
+    try {
+      await fetch(`http://127.0.0.1:${saved.viewer.port}/`, { signal: AbortSignal.timeout(300) })
+    } catch {
+      return
+    }
+    await Bun.sleep(100)
+  }
+}
+
 // 저장하다 멈춘 프로세스가 남긴 임시 파일만 지운다. 상태 파일은 건드리지 않는다.
 export function pruneSaved(home: string) {
   const dir = join(home, 'sessions')

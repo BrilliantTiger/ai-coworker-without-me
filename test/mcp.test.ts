@@ -526,3 +526,57 @@ test('a question window the human has not answered opens again when the same ses
   expect(got.find(e => e.kind === 'answer')).toMatchObject({ text: '사람이 정했습니다: PREP', human: true })
 }, 30_000)
 
+
+test('a new session takes over the bridge of an earlier session that is still running, with all its conversations, and the other side needs no new code', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-takeover-'))
+  const oldEnv = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'qa-old', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
+  const oldClaude = await session('claude-code', oldEnv)
+  const codex = await session('codex-mcp-client')
+  const opened = await oldClaude('open_bridge', { name: 'ccb 질의응답' })
+  const joined = await codex('connect', { code: opened.code })
+  await oldClaude('wait_for_message', { timeout_sec: 5 })
+  const first = await codex('send_question', { question: '7판을 설치해도 될까요?' })
+  const q = (await oldClaude('wait_for_message', { timeout_sec: 5 })).events[0]
+  await oldClaude('reply', { thread: q.thread, text: '네, 설치하셔도 됩니다.' })
+  await codex('wait_for_message', { timeout_sec: 5 })
+  const asked = await oldClaude('send_question', { question: '설치 결과를 알려 주세요.' })
+
+  // context 가 차서 사람이 새 세션을 켰다. 앞 세션은 아직 켜져 있다. 새 세션은 이 PC에 남은 브릿지를 보고 이름으로 이어받는다.
+  const newClaude = await session('claude-code', { ...oldEnv, CLAUDE_CODE_SESSION_ID: 'qa-new' })
+  expect((await newClaude('list_connections')).earlier_bridges).toEqual([
+    expect.objectContaining({ session_id: 'qa-old', name: 'ccb 질의응답', connected: [joined.myName], conversations: 2, running_in_another_session: true }),
+  ])
+  const back = await newClaude('open_bridge', { resume: '질의응답' })
+  expect(back).toMatchObject({ resumed: true, session_id: 'qa-new', connected: [joined.myName], viewer: opened.viewer })
+  expect(back.conversations.map((c: { id: string }) => c.id).sort()).toEqual([first.thread, asked.thread].sort())
+  expect(back.next).toMatch(/read the 2 conversation\(s\) still open with read_conversation/)
+
+  // 앞 세션은 브릿지가 옮겨 갔다는 것을 알고 그만 듣는다. 거기서 새로 열면 다른 이름표로 새로 시작한다.
+  const told = await oldClaude('wait_for_message', { timeout_sec: 5 })
+  expect(told.events).toEqual([expect.objectContaining({ type: 'moved' })])
+  expect(told.next).toMatch(/moved to another session on this PC/)
+  expect((await oldClaude('open_bridge', {})).session_id).not.toBe('qa-old')
+
+  // 상대는 새 코드 없이 다시 이어진 것을 안다. 이어서 답하면 새 세션이 받는다.
+  const seen: { type: string; again?: boolean; kind?: string }[] = []
+  for (let i = 0; i < 10 && !seen.some(e => e.type === 'connected'); i++) seen.push(...(await codex('wait_for_message', { timeout_sec: 2 })).events)
+  expect(seen.find(e => e.type === 'connected')).toMatchObject({ again: true })
+  await codex('reply', { thread: asked.thread, text: '설치 끝났습니다.' })
+  expect((await newClaude('wait_for_message', { timeout_sec: 5 })).events).toEqual([
+    expect.objectContaining({ kind: 'answer', text: '설치 끝났습니다.', thread: asked.thread }),
+  ])
+  expect((await newClaude('read_conversation', { thread: first.thread })).messages.map((m: { text: string }) => m.text)).toEqual([
+    '7판을 설치해도 될까요?',
+    '네, 설치하셔도 됩니다.',
+  ])
+
+  // 사람은 같은 대화 보기 링크에서 앞 세션 때부터의 대화를 다 본다.
+  const view = (await (await fetch(`${opened.viewer}/data`)).json()) as { conversations: { id: string; messages: unknown[] }[] }
+  expect(view.conversations.map(c => c.id).sort()).toEqual([first.thread, asked.thread].sort())
+  expect(view.conversations.find(c => c.id === asked.thread)!.messages).toHaveLength(2)
+
+  // 이어받은 브릿지는 새 세션의 이름표로 저장된다. 새 세션을 다시 켜도 저절로 돌아온다.
+  for (let i = 0; i < 50 && readSaved(savedPath(own, 'qa-old')); i++) await Bun.sleep(20)
+  expect(readSaved(savedPath(own, 'qa-old'))).toBeUndefined()
+  expect(readSaved(savedPath(own, 'qa-new'))?.peers.map(p => p.name)).toEqual([joined.myName])
+}, 30_000)

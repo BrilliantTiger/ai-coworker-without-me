@@ -6,7 +6,8 @@ import { Bridge, parsePorts, type BridgeEvent, type HumanQuestion, type SavedBri
 import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
-import { readSaved, savedPath, stillRunning } from './resume'
+import { rmSync } from 'node:fs'
+import { listSaved, readSaved, savedPath, stillRunning, waitUntilStopped } from './resume'
 import { Viewer } from './viewer'
 
 // 연결 코드를 쓸 수 있는 시간(분). 0 을 주면 시간 제한 없이 브릿지를 닫을 때까지 쓴다. 어느 쪽이든 한 번만 쓴다.
@@ -73,6 +74,7 @@ export function createSession(opts: SessionOptions) {
   const RESTARTS = `If coworker restarts
   - When the same Claude Code session starts again (for example claude --resume), its bridge comes back by itself with the same identity and connections. The other side keeps it and nobody needs a new code.
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
+  - When your human moves this work to a new session (for example because the context filled up), the new session takes over the same bridge, with its connections and all its conversations, and nobody needs a new code. In the new session, list_connections lists the bridges earlier sessions left on this PC; call open_bridge with resume set to the session_id (or the name) of the one your human means. If it is still running in the other session, it moves here and that session stops listening. Then read the conversations that are still open with read_conversation before you go on.
   - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.`
   const LISTENING = channel
     ? `Stay open until your human says stop
@@ -193,7 +195,16 @@ export function createSession(opts: SessionOptions) {
     viewer?.stop()
     viewer = undefined
     bridge = b
+    moved = false
     if (channel) b.onEvent = () => void (pushing = pushing.then(pushEvents))
+    b.onMoved = () => {
+      if (bridge !== b) return
+      moved = true
+      closeWindows(false)
+      viewer?.stop()
+      viewer = undefined
+      if (live.get(identity)?.bridge === b) live.delete(identity)
+    }
     live.set(identity, {
       bridge: b,
       release: () => {
@@ -215,8 +226,33 @@ export function createSession(opts: SessionOptions) {
     identity = id
   }
 
+  // 다른 세션이 이 세션의 브릿지를 이어받아 갔다. 이 세션은 그 브릿지를 다시 열지 않는다(같은 키가 두 곳에서 돌면 안 된다).
+  // 여기서 새 브릿지를 열거나 연결하면 새 이름표로 새로 시작한다.
+  let moved = false
+  const MOVED =
+    'This bridge moved to another session on this PC, which carries on with its connections and conversations. Tell your human in one line, and stop listening here: do not run the listen command or call wait_for_message again.'
+  function freshIfMoved() {
+    if (!moved) return
+    switchTo(randomUUID())
+    moved = false
+  }
+
+  // 이어받을 브릿지를 session_id 나 이름(일부여도 된다)으로 찾는다.
+  function findEarlier(wanted: string): string {
+    const all = listSaved(home)
+    if (live.has(wanted) || all.some(e => e.id === wanted)) return wanted
+    const needle = wanted.toLowerCase()
+    const matches = all.filter(e => e.id !== identity && e.saved.name.toLowerCase().includes(needle))
+    if (matches.length > 1)
+      throw new Error(`"${wanted}" matches more than one earlier bridge: ${matches.map(e => `${e.saved.name} (session_id ${e.id})`).join(', ')}. Use the session_id`)
+    return matches[0]?.id ?? wanted
+  }
+
   // AI가 resume 으로 부르면: 이 프로세스에서 돌고 있으면 넘겨받고, 아니면 저장해 둔 상태로 되살린다.
-  async function resumeBridge(id: string) {
+  // 같은 PC의 다른 세션에서 아직 돌고 있으면, 그 세션에게 넘겨 달라고 한다. 그 세션은 상태를 저장하고 멈춘다.
+  // Claude Code 처럼 이 세션에 자기 세션 ID가 있으면, 이어받은 브릿지를 이 세션의 이름표로 옮겨 저장한다. 이 세션을 다시 켜도 저절로 돌아온다.
+  async function resumeBridge(wanted: string) {
+    const id = findEarlier(wanted)
     if (bridge?.isOpen) {
       if (id !== identity) throw new Error(`this session already has an open bridge (session_id ${identity}); keep using it, or close it first`)
       return bridge
@@ -228,15 +264,46 @@ export function createSession(opts: SessionOptions) {
       adopt(held.bridge)
       return held.bridge
     }
-    const saved = readSaved(savedPath(home, id))
+    const path = savedPath(home, id)
+    let saved = readSaved(path)
     if (!saved)
       throw new Error(
         `no saved bridge for session_id ${id}: it was closed with close_bridge, or belongs to another PC. Open a new bridge and exchange a new code`,
       )
-    if (await stillRunning(saved)) throw new Error('that bridge is still running in another session on this PC; use that session')
+    if (await stillRunning(saved)) {
+      if (!(await Bridge.askToMove(saved)))
+        throw new Error('that bridge is running in another session on this PC and could not be moved here; close that session, then try again')
+      await waitUntilStopped(saved)
+      saved = readSaved(path) ?? saved
+    }
+    const own = opts.sessionId
+    const ownSaved = own && own !== id ? readSaved(savedPath(home, own)) : undefined
+    if (own && own !== id && (!ownSaved || ownSaved.publicKey === saved.publicKey || !(await stillRunning(ownSaved)))) {
+      switchTo(own)
+      const b = Bridge.restore(saved, bridgeOptions())
+      adopt(b)
+      b.persist()
+      rmSync(path, { force: true })
+      return b
+    }
     switchTo(id)
     adopt(Bridge.restore(saved, bridgeOptions()))
     return bridge!
+  }
+
+  // 이 PC에 앞 세션들이 남긴 브릿지. 새 세션이 이어받을 것을 고를 수 있게 보여 준다.
+  async function earlierBridges() {
+    const all = listSaved(home).filter(e => e.id !== identity && e.saved.publicKey !== (bridge?.isOpen ? bridge.key : undefined)).slice(0, 10)
+    return Promise.all(
+      all.map(async e => ({
+        session_id: e.id,
+        name: e.saved.name,
+        connected: e.saved.peers.map(p => p.name),
+        conversations: e.saved.threads.length,
+        saved_at: e.saved.savedAt,
+        running_in_another_session: await stillRunning(e.saved),
+      })),
+    )
   }
 
   // Channels: 새 일이 생기면 순서대로 세션에 밀어 넣는다. Claude 는 <channel source="coworker" ...> 로 받는다.
@@ -270,6 +337,8 @@ export function createSession(opts: SessionOptions) {
         return { type: event.type, to: event.to, ...(event.thread ? { thread: event.thread } : {}) }
       case 'decision':
         return { type: event.type, thread: event.thread, ...(event.closed ? { closed: 'true' } : {}) }
+      case 'moved':
+        return { type: event.type }
     }
   }
 
@@ -409,7 +478,7 @@ export function createSession(opts: SessionOptions) {
           .max(200)
           .optional()
           .describe(
-            'Only after coworker restarted: the session_id from your earlier open_bridge or connect result. Brings that bridge back with the same identity and connections, without a new code. Leave it out to open a bridge normally.',
+            'To continue a bridge from an earlier session on this PC: after coworker restarted, or when your human moved this work to a new session. Give its session_id (from an earlier result, or from list_connections, which lists the bridges on this PC) or its name. It comes back with the same identity, connections and conversations, without a new code; if it is still running in that other session, it moves here and stops there. Leave it out to open a bridge normally.',
           ),
       },
     },
@@ -419,19 +488,23 @@ export function createSession(opts: SessionOptions) {
         reopenWindows(b)
         const { relay: relayInfo, warn = '' } = await relayStatus(b)
         const connected = [...b.peers.values()].map(p => p.name)
+        const conversations = b.threadSummaries()
+        const open = conversations.filter(c => c.status !== 'agreed' && c.status !== 'closed')
         return {
           resumed: true,
           session_id: identity,
           name: b.name,
           port: b.port,
           connected,
+          conversations,
           relay: relayInfo,
           viewer: viewerUrl(),
           listen_command: listenCommand(),
-          next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(', ')}` : ''}; nobody needs a new code.${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`,
+          next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(', ')}` : ''}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map(c => c.id).join(', ')}), so you know where each one stands.` : ''}${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`,
         }
       }
       await resolveFolder()
+      freshIfMoved()
       const b = getBridge()
       if (name) b.name = name
       b.open(port)
@@ -467,6 +540,7 @@ export function createSession(opts: SessionOptions) {
     },
     tool(async ({ code, name }: { code: string; name?: string }) => {
       await resolveFolder()
+      freshIfMoved()
       const b = getBridge()
       if (name) b.name = name
       if (!b.isOpen) b.open()
@@ -492,15 +566,21 @@ export function createSession(opts: SessionOptions) {
     {
       title: 'List connections',
       annotations: { readOnlyHint: true, openWorldHint: true },
-      description: 'Show this session\'s bridge and the connected sessions, with whether each one can be reached right now, and the viewer link for the human.',
+      description:
+        "Show this session's bridge and the connected sessions, with whether each one can be reached right now, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
       inputSchema: {},
     },
-    tool(async () => ({
-      ...(await getBridge().connections()),
-      session_id: identity,
-      viewer: viewer?.url,
-      listen_command: getBridge().isOpen ? listenCommand() : undefined,
-    })),
+    tool(async () => {
+      const earlier = await earlierBridges()
+      return {
+        ...(await getBridge().connections()),
+        session_id: identity,
+        moved: moved || undefined,
+        viewer: viewer?.url,
+        listen_command: getBridge().isOpen ? listenCommand() : undefined,
+        earlier_bridges: earlier.length ? earlier : undefined,
+      }
+    }),
   )
 
   server.registerTool(
@@ -660,6 +740,7 @@ export function createSession(opts: SessionOptions) {
     },
     tool(async ({ timeout_sec }: { timeout_sec?: number }, { signal, _meta, sendNotification }) => {
       const b = getBridge()
+      if (moved) return { events: await b.wait(0), next: MOVED }
       if (!b.isOpen) throw new Error(NOT_OPEN)
       if (channel) return { events: [], next: listen() }
       // Claude Code 는 응답도 진행 알림도 없이 30분이 지난 호출을 끊는다(stdio 서버의 기본값).
@@ -671,6 +752,7 @@ export function createSession(opts: SessionOptions) {
           ? setInterval(() => void sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++beats, message: 'listening' } }).catch(() => {}), KEEPALIVE_MS)
           : undefined
       const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal).finally(() => clearInterval(alive))
+      if (events.some(e => e.type === 'moved')) return { events, next: MOVED }
       if (!events.length)
         return { events, next: background() ? `Nothing new. Do not tell your human anything about this. ${listen()}` : 'Nothing new. Do not tell your human anything about this; call wait_for_message again now.' }
       return { events, next: `${NEWS} After that: ${listen()}` }
@@ -689,7 +771,7 @@ export function createSession(opts: SessionOptions) {
       const b = getBridge()
       const events = await b.wait(0)
       // 백그라운드 명령이 끝나면 AI가 여기서 읽는다. 읽은 다음 어떻게 다시 기다릴지도 함께 알려 준다.
-      const next = !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`
+      const next = moved || events.some(e => e.type === 'moved') ? MOVED : !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`
       const asking = b.humanQuestions().map(q => q.thread)
       return { events, conversations: b.threadSummaries(), waiting_for_your_human: asking.length ? asking : undefined, listen_command: b.isOpen ? listenCommand() : undefined, next }
     }),
