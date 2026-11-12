@@ -16651,7 +16651,8 @@ var fromB64 = (text) => new Uint8Array(Buffer.from(text, "base64"));
 var randomToken = () => Buffer.from(import_tweetnacl.default.randomBytes(16)).toString("base64url");
 function seal(payload, to, me) {
   const nonce = import_tweetnacl.default.randomBytes(import_tweetnacl.default.box.nonceLength);
-  const message = new TextEncoder().encode(JSON.stringify(payload));
+  const stamped = payload && typeof payload === "object" && !Array.isArray(payload) ? { ...payload, t: Date.now() } : payload;
+  const message = new TextEncoder().encode(JSON.stringify(stamped));
   return {
     from: toB64(me.publicKey),
     nonce: toB64(nonce),
@@ -16675,6 +16676,31 @@ function open2(sealed, me) {
 function isSealed(value) {
   const v = value;
   return !!v && typeof v.from === "string" && typeof v.nonce === "string" && typeof v.box === "string";
+}
+var REPLAY_MAX_AGE_MS = 2 * 60 * 60000;
+
+class ReplayGuard {
+  maxAgeMs;
+  nonces = new Map;
+  lastSweep = 0;
+  constructor(maxAgeMs = REPLAY_MAX_AGE_MS) {
+    this.maxAgeMs = maxAgeMs;
+  }
+  check(sealed, opened, now = Date.now()) {
+    const t = opened?.t;
+    if (typeof t === "number" && Math.abs(now - t) > this.maxAgeMs)
+      return "stale";
+    if (now - this.lastSweep > 60000) {
+      for (const [n, at] of this.nonces)
+        if (now - at > this.maxAgeMs * 2)
+          this.nonces.delete(n);
+      this.lastSweep = now;
+    }
+    if (this.nonces.has(sealed.nonce))
+      return "again";
+    this.nonces.set(sealed.nonce, now);
+    return "ok";
+  }
 }
 
 // src/net.ts
@@ -16795,6 +16821,13 @@ var peerId = (key) => routeId(key).slice(0, 6);
 var labelOf = (p) => `${p.name} [${peerId(p.key)}]`;
 var isLoopback = (addr) => addr.startsWith("127.") || addr === "::1" || addr === "localhost";
 var isRelayAddr = (addr) => /^https?:\/\//.test(addr);
+var LINK_ERRORS = {
+  no_route: "no route to it: it is asleep, turned off, or on another network",
+  refused: "its computer answered, but no bridge is listening on that port: coworker there is restarting or stopped",
+  timeout: "no answer in time",
+  not_recognized: "its bridge answered but does not know this session; this side keeps offering the code it joined with",
+  bad_answer: "an answer came back that could not be read"
+};
 var KINDS = ["question", "answer", "note", "closed", "agreement"];
 var EVERYONE = ["everyone", "all"];
 
@@ -16807,7 +16840,7 @@ class DeliveryError extends Error {
 }
 function isSavedBridge(v) {
   const s = v;
-  return !!s && s.v === 1 && typeof s.name === "string" && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && (s.viewer === undefined || !!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === "string") && (s.asking === undefined || Array.isArray(s.asking) && s.asking.every(isHumanQuestion)) && typeof s.savedAt === "string";
+  return !!s && s.v === 1 && typeof s.name === "string" && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && (s.used === undefined || Array.isArray(s.used)) && (s.ended === undefined || Array.isArray(s.ended)) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && (s.viewer === undefined || !!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === "string") && (s.asking === undefined || Array.isArray(s.asking) && s.asking.every(isHumanQuestion)) && typeof s.savedAt === "string";
 }
 function isHumanQuestion(v) {
   const q = v;
@@ -16820,9 +16853,12 @@ var firstLine = (text) => text.trim().split(`
 `)[0].slice(0, 80);
 var counted = (t) => t.messages.filter((m) => m.kind === "question" || m.kind === "answer").length;
 var memberOf = (p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port });
+var MAX_NAME = 200;
+var MAX_ADDRS = 32;
+var isHelloFields = (p) => typeof p.name === "string" && Array.isArray(p.addrs) && p.addrs.length <= MAX_ADDRS && p.addrs.every((a) => typeof a === "string" && a.length > 0 && a.length <= 300) && Number.isInteger(p.port) && p.port > 0 && p.port < 65536;
 var isMember = (m) => {
   const v = m;
-  return !!v && typeof v.key === "string" && typeof v.name === "string" && Array.isArray(v.addrs) && v.addrs.every((a) => typeof a === "string") && Number.isInteger(v.port);
+  return !!v && typeof v.key === "string" && isHelloFields(v);
 };
 var isAskInfo = (a) => {
   const v = a;
@@ -16833,6 +16869,18 @@ var whereIs = (p) => {
   const addr = p.lastAddr ?? p.addrs[0];
   return addr ? placeOf(addr, p.port) : undefined;
 };
+var linkErrorOf = (e) => {
+  const err = e;
+  if (err?.name === "TimeoutError")
+    return "timeout";
+  if (err?.code === "ECONNREFUSED" || err?.code === "ConnectionRefused")
+    return "refused";
+  return "no_route";
+};
+var isoOf = (ms) => ms ? new Date(ms).toISOString() : undefined;
+var MAX_USED = 500;
+var MAX_ENDED = 20;
+var savedPeer = (p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token });
 
 class Bridge {
   keys;
@@ -16845,9 +16893,13 @@ class Bridge {
   server;
   timer;
   tokens = new Map;
+  used = new Map;
+  ended = [];
+  retryWakers = new Map;
   invites = new Map;
   closedAsks = new Map;
   seen = new Set;
+  replay = new ReplayGuard;
   outbox = [];
   events = [];
   waiters = [];
@@ -16878,6 +16930,7 @@ class Bridge {
       ports: DEFAULT_PORTS,
       addrs: localAddresses,
       retryMs: 3000,
+      maxRetryMs: 30000,
       tokenTtlMs: 60 * 60000,
       connectTimeoutMs: 2000,
       pollWaitMs: 20000,
@@ -16889,12 +16942,24 @@ class Bridge {
   static restore(saved, options) {
     const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } });
     for (const p of saved.peers)
-      b.peers.set(p.key, { key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined });
+      b.peers.set(p.key, {
+        key: p.key,
+        name: p.name,
+        addrs: p.addrs,
+        port: p.port,
+        private: p.private || undefined,
+        lastSeen: typeof p.lastSeen === "number" ? p.lastSeen : undefined,
+        token: typeof p.token === "string" ? p.token : undefined
+      });
     for (const t of saved.threads)
       b.threads.set(t.id, t);
     b.outbox = saved.outbox.filter((o) => b.peers.has(o.peer));
     for (const t of saved.tokens)
       b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private });
+    for (const u of saved.used ?? [])
+      if (typeof u?.token === "string" && typeof u.key === "string")
+        b.used.set(u.token, { key: u.key, private: !!u.private });
+    b.ended = (saved.ended ?? []).filter((e) => typeof e?.name === "string" && typeof e.id === "string");
     b.seen = new Set(saved.seen);
     b.closedAsks = new Map(saved.closedAsks);
     b.events = (saved.events ?? []).filter((e) => e.type !== "moved");
@@ -16938,10 +17003,12 @@ class Bridge {
       publicKey: toB64(this.keys.publicKey),
       secretKey: toB64(this.keys.secretKey),
       port: this.port,
-      peers: [...this.peers.values()].map((p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined })),
+      peers: [...this.peers.values()].map(savedPeer),
       threads: [...this.threads.values()],
       outbox: this.outbox,
       tokens: [...this.tokens].filter(([, t]) => t.expires > Date.now()).map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private })),
+      used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private })),
+      ended: this.ended,
       seen: [...this.seen].slice(-2000),
       closedAsks: [...this.closedAsks],
       events: this.events,
@@ -17007,7 +17074,16 @@ class Bridge {
       throw new Error("that is this session's own code; give it to your coworker instead");
     if (!this.server)
       this.open();
-    const peer = { key: code.key, name: code.name, addrs: code.addrs, port: code.port };
+    const known = this.peers.get(code.key);
+    if (known) {
+      known.addrs = [...new Set([...known.addrs, ...code.addrs])].slice(0, MAX_ADDRS);
+      known.token ??= code.token;
+      this.wakeRetry(known.key);
+      await this.deliver(known, { type: "hello", token: known.token, name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {});
+      this.dirty();
+      return known;
+    }
+    const peer = { key: code.key, name: code.name, addrs: code.addrs, port: code.port, token: code.token };
     let reply;
     try {
       reply = await this.deliver(peer, { type: "hello", token: code.token, name: this.name, addrs: this.addrs(), port: this.port });
@@ -17185,16 +17261,22 @@ ${f.evidence}`).join(`
         direct = (await this.deliver(peer, { type: "ping" })).type === "pong";
       } catch {}
       const pulling = this.isPulling(peer);
+      const reachable = direct || pulling;
+      const error = !reachable && peer.lastError;
       return {
         name: peer.name,
         id: peerId(peer.key),
         group: !peer.private,
-        reachable: direct || pulling,
+        reachable,
+        state: reachable ? "connected" : "reconnecting",
         via: direct ? placeOf(peer.lastAddr, peer.port) : pulling ? "the other side cannot be reached directly, so it comes here to pick up messages" : undefined,
-        queued: this.outbox.filter((o) => o.peer === peer.key).length
+        queued: this.outbox.filter((o) => o.peer === peer.key).length,
+        last_seen: isoOf(peer.lastSeen),
+        last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], at: isoOf(error.at) } : undefined,
+        next_try: reachable ? undefined : isoOf(peer.retryAt) ?? "now"
       };
     }));
-    return { me: this.describe(), peers, connecting: this.connecting() };
+    return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined };
   }
   threadSummaries() {
     return [...this.threads.values()].map((t) => {
@@ -17261,6 +17343,9 @@ ${f.evidence}`).join(`
     this.removeState();
     this.peers.clear();
     this.tokens.clear();
+    this.used.clear();
+    this.ended = [];
+    this.retryWakers.clear();
     this.invites.clear();
     this.outbox = [];
     this.changed();
@@ -17292,6 +17377,9 @@ ${f.evidence}`).join(`
     const payload = open2(sealed, this.keys);
     if (!payload)
       return { status: 403, body: "forbidden" };
+    const fresh = this.replay.check(sealed, payload);
+    if (fresh !== "ok")
+      return { status: 409, body: fresh === "stale" ? "stale: the two PCs clocks differ by more than two hours" : "already received" };
     const from = sealed.from;
     const answer = (p) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) });
     const forbidden = { status: 403, body: "forbidden" };
@@ -17306,23 +17394,25 @@ ${f.evidence}`).join(`
     }
     const peer = this.peers.get(from);
     if (!peer) {
-      if (payload.type !== "hello" || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port))
+      if (payload.type !== "hello" || !isHelloFields(payload))
         return forbidden;
       const invite = this.invites.get(from);
       const invited = !!invite;
-      const token = invited ? undefined : this.takeToken(payload.token);
+      const token = invited ? undefined : this.takeToken(payload.token, from);
       if (!invited && !token)
         return forbidden;
       const remote = relayed || !!seenAt && !isLoopback(seenAt);
       const given = remote ? payload.addrs.filter((a) => !isLoopback(a)) : payload.addrs;
       const addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])];
-      const added = { key: from, name: payload.name, addrs, port: payload.port, private: token?.private };
+      const added = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private };
       const members = token && !token.private ? this.groupPeers().filter((p) => p.key !== from) : [];
       for (const m of members)
         this.sendOrQueue(m, { type: "introduce", member: memberOf(added) }).catch(() => {});
-      this.addPeer(added, { emit: true, via: invited ? invite.by : undefined });
+      this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again: token && "again" in token });
       return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined });
     }
+    peer.lastSeen = Date.now();
+    this.wakeRetry(peer.key);
     if (payload.type === "hello")
       return answer(this.welcomeBack(peer, payload, seenAt, relayed));
     if (payload.type === "poll") {
@@ -17394,7 +17484,7 @@ ${f.evidence}`).join(`
     }).catch(() => {});
   }
   welcomeBack(peer, hello, seenAt, relayed) {
-    if (Array.isArray(hello.addrs) && hello.addrs.every((a) => typeof a === "string") && Number.isInteger(hello.port)) {
+    if (isHelloFields(hello)) {
       const remote = relayed || !!seenAt && !isLoopback(seenAt);
       const given = remote ? hello.addrs.filter((a) => !isLoopback(a)) : hello.addrs;
       peer.addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])];
@@ -17420,6 +17510,8 @@ ${f.evidence}`).join(`
         this.dropPeer(peer);
         return { type: "ok" };
       case "hello":
+        if (!isHelloFields(payload))
+          return null;
         peer.addrs = payload.addrs;
         peer.port = payload.port;
         return { type: "hello_ack", name: this.name };
@@ -17439,8 +17531,12 @@ ${f.evidence}`).join(`
       return false;
     this.peers.set(peer.key, peer);
     this.invites.delete(peer.key);
+    this.ended = this.ended.filter((e) => e.id !== peerId(peer.key));
+    this.save();
     if (options.emit)
-      this.emit({ type: "connected", peer: peer.name, via: options.via, at: now() });
+      this.emit({ type: "connected", peer: peer.name, via: options.via, again: options.again || undefined, at: now() });
+    else
+      this.changed();
     this.pollLoop(peer.key);
     return true;
   }
@@ -17467,7 +17563,7 @@ ${f.evidence}`).join(`
         }
       } catch {
         invite.nextTry = Date.now() + invite.backoff;
-        invite.backoff = Math.min(invite.backoff * 2, 30000);
+        invite.backoff = Math.min(invite.backoff * 2, this.opts.maxRetryMs);
       } finally {
         invite.trying = false;
       }
@@ -17504,7 +17600,30 @@ ${f.evidence}`).join(`
     if (!this.peers.delete(peer.key))
       return;
     this.outbox = this.outbox.filter((o) => o.peer !== peer.key);
+    this.wakeRetry(peer.key);
+    const id = peerId(peer.key);
+    this.ended = [...this.ended.filter((e) => e.id !== id), { name: peer.name, id, at: now() }].slice(-MAX_ENDED);
     this.emit({ type: "peer_closed", peer: peer.name, at: now() });
+  }
+  pause(peer, ms) {
+    const signal = this.abort.signal;
+    peer.retryAt = Date.now() + ms;
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        if (this.retryWakers.get(peer.key) === done)
+          this.retryWakers.delete(peer.key);
+        peer.retryAt = undefined;
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal.addEventListener("abort", done);
+      this.retryWakers.set(peer.key, done);
+    });
+  }
+  wakeRetry(key) {
+    this.retryWakers.get(key)?.();
   }
   isPulling(peer) {
     return !!peer.lastPollAt && Date.now() - peer.lastPollAt < POLL_FRESH_MS;
@@ -17545,7 +17664,6 @@ ${f.evidence}`).join(`
       return;
     this.polling.add(key);
     let backoff = this.opts.retryMs;
-    let refusals = 0;
     let ack = [];
     let lost = false;
     try {
@@ -17563,11 +17681,12 @@ ${f.evidence}`).join(`
           if (!reply)
             throw new DeliveryError("unreachable", "no answer");
           backoff = this.opts.retryMs;
-          refusals = 0;
           ack = [];
           if (lost) {
             lost = false;
             this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {});
+            this.flush();
+            this.changed();
           }
           if (reply.type === "batch")
             for (const item of reply.items) {
@@ -17577,14 +17696,14 @@ ${f.evidence}`).join(`
         } catch (e) {
           if (this.abort.signal.aborted)
             break;
-          if (e instanceof DeliveryError && e.reason === "rejected" && ++refusals >= 3) {
-            this.dropPeer(peer);
-            break;
-          }
+          if (e instanceof DeliveryError && e.reason === "rejected" && peer.token)
+            await this.deliver(peer, { type: "hello", token: peer.token, name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {});
           peer.lastAddr = undefined;
+          if (!lost)
+            this.changed();
           lost = true;
-          await Bun.sleep(backoff);
-          backoff = Math.min(backoff * 2, 30000);
+          await this.pause(peer, backoff);
+          backoff = Math.min(backoff * 2, this.opts.maxRetryMs);
         }
       }
     } finally {
@@ -17707,13 +17826,21 @@ ${f.evidence}`).join(`
       renameSync(tmp, path);
     } catch {}
   }
-  takeToken(token) {
+  takeToken(token, from) {
     if (typeof token !== "string")
       return;
+    const used = this.used.get(token);
+    if (used)
+      return used.key === from ? { expires: Infinity, private: used.private, again: true } : undefined;
     const entry = this.tokens.get(token);
     this.tokens.delete(token);
     this.dirty();
-    return entry && entry.expires > Date.now() ? entry : undefined;
+    if (!entry || entry.expires <= Date.now())
+      return;
+    this.used.set(token, { key: from, private: entry.private });
+    if (this.used.size > MAX_USED)
+      this.used.delete(this.used.keys().next().value);
+    return entry;
   }
   async resolvePeers(to) {
     const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map((n) => n.trim()).filter(Boolean);
@@ -17795,6 +17922,11 @@ ${f.evidence}`).join(`
   async deliverTo(peer, addr, body, timeoutMs) {
     const relayed = isRelayAddr(addr);
     const url = relayed ? addr : `http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`;
+    const failed = (kind) => {
+      if (!this.abort.signal.aborted)
+        peer.lastError = { kind, at: Date.now() };
+      return null;
+    };
     let res;
     try {
       res = await fetch(url, {
@@ -17803,15 +17935,23 @@ ${f.evidence}`).join(`
         body,
         signal: AbortSignal.any([AbortSignal.timeout(relayed ? Math.max(timeoutMs, this.opts.relayTimeoutMs) : timeoutMs), this.abort.signal])
       });
-    } catch {
-      return null;
+    } catch (e) {
+      return failed(linkErrorOf(e));
     }
     if (res.status === 403)
-      return "refused";
+      return failed("not_recognized"), "refused";
     if (!res.ok)
-      return null;
+      return failed("bad_answer");
     const sealed = await res.json().catch(() => null);
-    return sealed?.from === peer.key ? open2(sealed, this.keys) : null;
+    if (sealed?.from !== peer.key)
+      return failed("bad_answer");
+    const reply = open2(sealed, this.keys);
+    if (!reply || this.replay.check(sealed, reply) !== "ok")
+      return failed("bad_answer");
+    peer.lastSeen = Date.now();
+    peer.lastError = undefined;
+    this.wakeRetry(peer.key);
+    return reply;
   }
   async sendOrQueue(peer, payload, thread) {
     const skipDirect = peer.directFailed && this.isPulling(peer);
@@ -17820,9 +17960,7 @@ ${f.evidence}`).join(`
         await this.deliver(peer, payload);
         peer.directFailed = false;
         return "delivered";
-      } catch (e) {
-        if (e instanceof DeliveryError && e.reason === "rejected")
-          throw new Error(`${peer.name} refused the message; its bridge may have been closed and reopened. Exchange a new connection code`);
+      } catch {
         peer.directFailed = true;
       }
     }
@@ -17847,18 +17985,19 @@ ${f.evidence}`).join(`
           this.emit({ type: "undelivered", to: peer?.name ?? "disconnected session", thread: item.thread, reason, at: now() });
         };
         if (!peer) {
-          drop("the session disconnected");
+          drop("the other side's human closed the connection");
+          continue;
+        }
+        if (peer.retryAt && peer.retryAt > Date.now()) {
+          blocked.add(item.peer);
           continue;
         }
         try {
           await this.deliver(peer, item.payload);
           this.outbox = this.outbox.filter((o) => o !== item);
           this.dirty();
-        } catch (e) {
-          if (e instanceof DeliveryError && e.reason === "rejected")
-            drop("the session refused it");
-          else
-            blocked.add(item.peer);
+        } catch {
+          blocked.add(item.peer);
         }
       }
     } finally {
@@ -18833,7 +18972,7 @@ import { randomUUID as randomUUID3 } from "crypto";
 import { basename } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.4.12";
+var version2 = "0.5.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26861,7 +27000,12 @@ function createSession(opts) {
   - When the same Claude Code session starts again (for example claude --resume), its bridge comes back by itself with the same identity and connections. The other side keeps it and nobody needs a new code.
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
   - When your human moves this work to a new session (for example because the context filled up), the new session takes over the same bridge, with its connections and all its conversations, and nobody needs a new code. In the new session, list_connections lists the bridges earlier sessions left on this PC; call open_bridge with resume set to the session_id (or the name) of the one your human means. If it is still running in the other session, it moves here and that session stops listening. Then read the conversations that are still open with read_conversation before you go on.
-  - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.`;
+  - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.
+
+  A connection ends only when a human ends it
+  - Only close_bridge (on either side, when a human says so) ends a connection. Anything else is temporary: a computer asleep or turned off, a move to another network or VPN, a restart, a timeout, an error. Both sides keep reconnecting by themselves, with no limit on tries or time, and send what waited, in order, once they are back. Nobody needs a new code.
+  - list_connections shows each connection's state: "connected", or "reconnecting" with last_seen, last_error (what failed) and next_try. A connection the other side's human closed is listed under ended.
+  - To wait a long time, keep the computer awake (on a Mac, run caffeinate -i in a terminal and leave it open). A computer that sleeps does not lose the connection, but nothing gets through until it wakes.`;
   const LISTENING = channel ? `Stay open until your human says stop
   - In this session, what the other side sends comes in by itself as a <channel> notice from coworker: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
   - Keep the bridge open until your human tells you to stop. Only then call close_bridge.
@@ -27232,7 +27376,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       group: [...b.peers.values()].filter((p) => !p.private).map((p) => p.name),
       viewer: viewerUrl(),
       listen_command: listenCommand(),
-      next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
+      next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
     };
   }));
   server.registerTool("connect", {
@@ -27252,10 +27396,13 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     if (!b.isOpen)
       b.open();
     const { relay: relayInfo, warn = "" } = await relayStatus(b);
+    const before = new Set(b.peers.keys());
     const peer = await b.connect(code);
+    const again = before.has(peer.key);
     const joining = b.connecting().map((c) => c.name);
     return {
       connected: peer.name,
+      already_connected: again || undefined,
       joining,
       session_id: identity,
       myName: b.name,
@@ -27263,13 +27410,13 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       relay: relayInfo,
       viewer: viewerUrl(),
       listen_command: listenCommand(),
-      next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(", ")})` : ""}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
+      next: `${again ? `Tell your human this session was already connected to ${peer.name}; it keeps reconnecting by itself until a human closes it, so no new code is needed, and list_connections shows whether it can be reached now.` : `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(", ")})` : ""}.`}${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
     };
   }));
   server.registerTool("list_connections", {
     title: "List connections",
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
+    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
     inputSchema: {}
   }, tool(async () => {
     const earlier = await earlierBridges();
