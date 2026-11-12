@@ -83,7 +83,12 @@ export function createSession(opts: SessionOptions) {
   - When the same Claude Code session starts again (for example claude --resume), its bridge comes back by itself with the same identity and connections. The other side keeps it and nobody needs a new code.
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
   - When your human moves this work to a new session (for example because the context filled up), the new session takes over the same bridge, with its connections and all its conversations, and nobody needs a new code. In the new session, list_connections lists the bridges earlier sessions left on this PC; call open_bridge with resume set to the session_id (or the name) of the one your human means. If it is still running in the other session, it moves here and that session stops listening. Then read the conversations that are still open with read_conversation before you go on.
-  - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.`
+  - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.
+
+  A connection ends only when a human ends it
+  - Only close_bridge (on either side, when a human says so) ends a connection. Anything else is temporary: a computer asleep or turned off, a move to another network or VPN, a restart, a timeout, an error. Both sides keep reconnecting by themselves, with no limit on tries or time, and send what waited, in order, once they are back. Nobody needs a new code.
+  - list_connections shows each connection's state: "connected", or "reconnecting" with last_seen, last_error (what failed) and next_try. A connection the other side's human closed is listed under ended.
+  - To wait a long time, keep the computer awake (on a Mac, run caffeinate -i in a terminal and leave it open). A computer that sleeps does not lose the connection, but nothing gets through until it wakes.`
   const LISTENING = channel
     ? `Stay open until your human says stop
   - In this session, what the other side sends comes in by itself as a <channel> notice from coworker: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
@@ -536,7 +541,7 @@ export function createSession(opts: SessionOptions) {
         group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
         viewer: viewerUrl(),
         listen_command: listenCommand(),
-        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
+        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
       }
     }),
   )
@@ -559,10 +564,13 @@ export function createSession(opts: SessionOptions) {
       if (name) b.name = name
       if (!b.isOpen) b.open()
       const { relay: relayInfo, warn = '' } = await relayStatus(b)
+      const before = new Set(b.peers.keys())
       const peer = await b.connect(code)
+      const again = before.has(peer.key)
       const joining = b.connecting().map(c => c.name)
       return {
         connected: peer.name,
+        already_connected: again || undefined,
         joining,
         session_id: identity,
         myName: b.name,
@@ -570,7 +578,7 @@ export function createSession(opts: SessionOptions) {
         relay: relayInfo,
         viewer: viewerUrl(),
         listen_command: listenCommand(),
-        next: `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
+        next: `${again ? `Tell your human this session was already connected to ${peer.name}; it keeps reconnecting by itself until a human closes it, so no new code is needed, and list_connections shows whether it can be reached now.` : `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.`}${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
       }
     }),
   )
@@ -581,7 +589,7 @@ export function createSession(opts: SessionOptions) {
       title: 'List connections',
       annotations: { readOnlyHint: true, openWorldHint: true },
       description:
-        "Show this session's bridge and the connected sessions, with whether each one can be reached right now, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
+        "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
       inputSchema: {},
     },
     tool(async () => {

@@ -398,6 +398,93 @@ describe('bridge', () => {
     expect(await next(a, 'peer_closed')).toMatchObject({ peer: 'B · Codex' })
     expect(a.peers.size).toBe(0)
     await expect(a.ask(undefined, 'still there?')).rejects.toThrow('no connected session')
+    // 사람이 닫아 끝난 연결만 「끝남」으로 남는다.
+    expect((await a.connections()).ended).toEqual([expect.objectContaining({ name: 'B · Codex' })])
+  })
+
+  test('while the other side is away it shows as reconnecting, with why and when, and comes back by itself', async () => {
+    const { a, b } = await pair()
+    await next(b, 'connected').catch(() => {})
+    const port = a.port
+    // A의 프로세스가 알리지 않고 사라졌다.
+    ;(a as any).server.stop(true)
+    ;(a as any).abort.abort()
+    b.peers.get(a.key)!.lastPollAt = undefined
+    expect((await b.ask(undefined, 'still there?')).delivery).toBe('queued')
+    const away = (await b.connections()).peers[0]!
+    expect(away).toMatchObject({ reachable: false, state: 'reconnecting', queued: 1, last_error: { kind: 'refused' } })
+    expect(away.last_seen).toBeDefined()
+    expect(away.next_try).toBeDefined()
+    expect(b.peers.has(a.key)).toBe(true)
+
+    ;(a as any).abort = new AbortController()
+    expect((a as any).listen(port)).toBe(true)
+    expect(await next(a, 'message')).toMatchObject({ text: 'still there?' })
+    const back = (await b.connections()).peers[0]!
+    expect(back).toMatchObject({ reachable: true, state: 'connected', queued: 0 })
+    expect(back.last_error).toBeUndefined()
+  }, 15_000)
+
+  test('a session the other side forgot is not dropped: it gets back in with the code it joined with', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    // A가 B를 잊었다(예전 판이 지웠거나 상태를 잃었다). B가 보내면 A는 모른다고 한다.
+    a.peers.delete(b.key)
+    expect((await b.ask(undefined, 'remember me?')).delivery).toBe('queued')
+    // B는 처음 쓴 코드를 다시 들고 들어가고, A는 같은 세션이라 받아 준다. 기다리던 질문도 간다.
+    expect(await next(a, 'connected')).toMatchObject({ peer: 'B · Codex', again: true })
+    expect(await next(a, 'message')).toMatchObject({ text: 'remember me?' })
+    expect(b.peers.has(a.key)).toBe(true)
+    expect((await b.wait(0)).some(e => e.type === 'peer_closed')).toBe(false)
+  }, 15_000)
+
+  test('putting in the code of a session already connected reconnects instead of failing', async () => {
+    const { a, b, code } = await pair()
+    expect((await b.connect(code)).key).toBe(a.key)
+    expect(b.peers.size).toBe(1)
+    // 상대가 닿지 않아도 실패하지 않는다. 연결은 남고 스스로 다시 붙는다.
+    ;(a as any).server.stop(true)
+    ;(a as any).abort.abort()
+    expect((await b.connect(code)).key).toBe(a.key)
+    expect(b.peers.has(a.key)).toBe(true)
+  })
+
+  test('when the other side comes back at another address, messages follow it there', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coworker-move-'))
+    const saveTo = join(dir, 'a.json')
+    const a = make('A · Claude Code', { saveTo })
+    const b = make('B · Codex')
+    a.open()
+    await b.connect(a.newCode())
+    await next(a, 'connected')
+    const ports: [number, number] = [a.port, a.port + 9]
+    // A가 꺼진 사이 다른 네트워크로 옮겼다. B가 아는 A의 주소와 포트는 더는 맞지 않는다.
+    a.shutdown()
+    const aAsSeenByB = b.peers.get(a.key)!
+    aAsSeenByB.addrs = ['192.0.2.1']
+    aAsSeenByB.lastAddr = undefined
+    expect((await b.ask(undefined, 'new place?')).delivery).toBe('queued')
+    const blocker = Bun.serve({ port: a.port, hostname: '0.0.0.0', fetch: () => new Response('') })
+    try {
+      const a2 = Bridge.restore(JSON.parse(readFileSync(saveTo, 'utf8')), { ports, addrs: () => ['127.0.0.1'], retryMs: 50, connectTimeoutMs: 500, saveTo })
+      opened.push(a2)
+      expect(a2.port).not.toBe(a.port)
+      // A가 돌아와 인사하면 B는 새 주소와 포트를 받아 두고, 기다리던 질문을 그리로 보낸다.
+      expect(await next(a2, 'message')).toMatchObject({ text: 'new place?' })
+      expect(aAsSeenByB).toMatchObject({ port: a2.port })
+      expect(aAsSeenByB.addrs).toContain('127.0.0.1')
+    } finally {
+      blocker.stop(true)
+    }
+  }, 15_000)
+
+  test('a code used by one session still cannot be used by another, even after the first one comes back with it', async () => {
+    const { a, b, code } = await pair()
+    a.peers.delete(b.key)
+    await b.connect(code)
+    for (let i = 0; i < 40 && !a.peers.has(b.key); i++) await Bun.sleep(50)
+    expect(a.peers.has(b.key)).toBe(true)
+    await expect(make('C').connect(code)).rejects.toThrow('refused this code')
   })
 
   test('takes the next free port, and refuses a busy port when one is asked for', () => {
