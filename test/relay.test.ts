@@ -124,3 +124,18 @@ test('the relay image carries every file relay.ts needs', async () => {
     expect(ignore.split('\n')).toContain(`!src/${file}`)
   }
 })
+
+test('a sender is not left waiting forever when the owner answers with a bad status', async () => {
+  const server = startRelay({ port: 0, hostname: '127.0.0.1', holdMs: 300 })
+  servers.push(server)
+  const base = `http://127.0.0.1:${server.port}/v1`
+  const box = boxOf('owner-secret')
+  const auth = { authorization: 'Bearer owner-secret' }
+  expect((await fetch(`${base}/inbox/${box}`, { method: 'POST', headers: auth, body: '{}' })).status).toBe(200)
+  const sent = fetch(`${base}/box/${box}`, { method: 'POST', body: '{"x":1}' })
+  await Bun.sleep(50)
+  const { items } = (await (await fetch(`${base}/inbox/${box}`, { method: 'POST', headers: auth, body: '{}' })).json()) as { items: { id: string }[] }
+  expect(items).toHaveLength(1)
+  await fetch(`${base}/reply/${box}`, { method: 'POST', headers: auth, body: JSON.stringify({ id: items[0]!.id, status: 1000, body: 'x' }) })
+  expect((await sent).status).toBe(504)
+})

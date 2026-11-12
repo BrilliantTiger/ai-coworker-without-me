@@ -78,7 +78,8 @@ export function startRelay(options: RelayOptions = {}): Server<undefined> {
       if (action === 'box') {
         const box = boxes.get(id)
         if (!box || Date.now() - box.lastSeen > aliveMs) return text(404, 'no such session')
-        if (box.queue.length >= MAX_QUEUE) return text(503, 'that session has too many waiting requests')
+        // 꺼내 가서 답을 기다리는 것까지 센다. 그러지 않으면 우편함 번호를 아는 쪽이 계속 밀어 넣어 메모리를 채울 수 있다.
+        if (box.queue.length + box.waiting.size >= MAX_QUEUE) return text(503, 'that session has too many waiting requests')
         const body = await req.text()
         if (body.length > MAX_BODY) return text(413, 'too large')
         return await new Promise<Response>(resolve => {
@@ -113,7 +114,10 @@ export function startRelay(options: RelayOptions = {}): Server<undefined> {
       // 주인: 처리한 요청의 답을 돌려준다.
       if (action === 'reply') {
         const r = input?.id ? box.waiting.get(input.id) : undefined
-        if (r && Number.isInteger(input!.status) && typeof input!.body === 'string') r.reply(input!.status!, input!.body)
+        // Response 는 200~599 밖의 상태 번호를 받지 않는다. 그런 답을 그대로 넘기면 보낸 쪽이 답을 끝내 받지 못한다.
+        const status = input?.status
+        if (r && Number.isInteger(status) && status! >= 200 && status! <= 599 && typeof input!.body === 'string' && input!.body.length <= MAX_BODY)
+          r.reply(status!, input!.body)
         return text(200, 'ok')
       }
 

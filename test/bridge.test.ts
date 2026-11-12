@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Bridge, isSavedBridge, parsePorts, routeId, type BridgeEvent, type SavedBridge } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
-import { newKeyPair, open, seal, fromB64 } from '../src/crypto'
+import { newKeyPair, open, ReplayGuard, seal, fromB64 } from '../src/crypto'
 import { Viewer } from '../src/viewer'
 
 const opened: Bridge[] = []
@@ -75,12 +75,28 @@ describe('crypto', () => {
     const bob = newKeyPair()
     const eve = newKeyPair()
     const sealed = seal({ hi: 1 }, bob.publicKey, alice)
-    expect(open(sealed, bob)).toEqual({ hi: 1 })
+    expect(open(sealed, bob)).toEqual({ hi: 1, t: expect.any(Number) })
     expect(open(sealed, eve)).toBeNull()
     const box = fromB64(sealed.box)
     box[0]! ^= 1
     expect(open({ ...sealed, box: Buffer.from(box).toString('base64') }, bob)).toBeNull()
     expect(open({ nope: true }, bob)).toBeNull()
+  })
+
+  test('the same envelope is taken once, and a very old one not at all', () => {
+    const guard = new ReplayGuard(60_000)
+    const alice = newKeyPair()
+    const bob = newKeyPair()
+    const sealed = seal({ type: 'bye' }, bob.publicKey, alice)
+    const opened = open(sealed, bob)
+    expect(guard.check(sealed, opened)).toBe('ok')
+    expect(guard.check(sealed, opened)).toBe('again')
+    const later = seal({ type: 'bye' }, bob.publicKey, alice)
+    expect(guard.check(later, open(later, bob), Date.now() + 61_000)).toBe('stale')
+    // 예전 판은 시각을 넣지 않는다. 그래도 같은 봉투는 한 번만 받는다.
+    const old = { ...seal(null, bob.publicKey, alice) }
+    expect(guard.check(old, { type: 'bye' })).toBe('ok')
+    expect(guard.check(old, { type: 'bye' })).toBe('again')
   })
 })
 
@@ -174,6 +190,32 @@ describe('bridge', () => {
     expect((await fetch(url)).status).toBe(404)
     expect((await fetch(`http://127.0.0.1:${a.port}/v1/someoneelse`, { method: 'POST', body: JSON.stringify(msg) })).status).toBe(404)
     expect(await a.wait(0)).toEqual([])
+  })
+
+  test('an envelope sent again by someone on the network is not taken twice', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const url = `http://127.0.0.1:${a.port}/v1/${routeId(a.key)}`
+    // 상대가 보낸 「연결 끊음」을 엿본 사람이, 다시 이어진 뒤에 그 봉투를 그대로 보내 본다.
+    const ping = JSON.stringify(seal({ type: 'ping' }, fromB64(a.key), (b as unknown as { keys: ReturnType<typeof newKeyPair> }).keys))
+    expect((await fetch(url, { method: 'POST', body: ping })).status).toBe(200)
+    const again = await fetch(url, { method: 'POST', body: ping })
+    expect(again.status).toBe(409)
+    expect(await again.text()).toBe('already received')
+    expect((await a.connections()).peers).toHaveLength(1)
+  })
+
+  test('a peer cannot hand over a name or address list of any size', async () => {
+    const a = make('A')
+    a.open()
+    const stranger = newKeyPair()
+    const url = `http://127.0.0.1:${a.port}/v1/${routeId(a.key)}`
+    const hello = (extra: object) => JSON.stringify(seal({ type: 'hello', token: decodeCode(a.newCode()).token, name: 'X', addrs: ['10.0.0.1'], port: 7700, ...extra }, fromB64(a.key), stranger))
+    expect((await fetch(url, { method: 'POST', body: hello({ addrs: Array(33).fill('10.0.0.1') }) })).status).toBe(403)
+    expect((await fetch(url, { method: 'POST', body: hello({ addrs: [42] }) })).status).toBe(403)
+    expect((await fetch(url, { method: 'POST', body: hello({ port: 70000 }) })).status).toBe(403)
+    expect((await fetch(url, { method: 'POST', body: hello({ name: 'N'.repeat(5000) }) })).status).toBe(200)
+    expect((await a.connections()).peers[0]!.name).toHaveLength(200)
   })
 
   test('your own code is refused', async () => {

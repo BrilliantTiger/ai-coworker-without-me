@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import type { Server } from 'bun'
 import { isAgreement, renderAgreement, type Agreement } from './agreement'
 import { decodeCode, encodeCode } from './code'
-import { fromB64, newKeyPair, open, randomToken, seal, toB64, type KeyPair } from './crypto'
+import { fromB64, newKeyPair, open, randomToken, ReplayGuard, seal, toB64, type KeyPair, type Sealed } from './crypto'
 import { hostForUrl, localAddresses } from './net'
 import { boxOf } from './box'
 import { assertNoSecrets } from './secrets'
@@ -262,16 +262,20 @@ const POLL_FRESH_MS = 60_000
 const firstLine = (text: string) => text.trim().split('\n')[0]!.slice(0, 80)
 const counted = (t: Thread) => t.messages.filter(m => m.kind === 'question' || m.kind === 'answer').length
 const memberOf = (p: Peer): Member => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port })
+// 상대가 알려 준 이름과 주소. 이름은 화면과 AI에게 그대로 가므로 길이를 자르고, 주소는 몇 개까지만 받는다.
+const MAX_NAME = 200
+const MAX_ADDRS = 32
+const isHelloFields = (p: { name?: unknown; addrs?: unknown; port?: unknown }) =>
+  typeof p.name === 'string' &&
+  Array.isArray(p.addrs) &&
+  p.addrs.length <= MAX_ADDRS &&
+  p.addrs.every(a => typeof a === 'string' && a.length > 0 && a.length <= 300) &&
+  Number.isInteger(p.port) &&
+  (p.port as number) > 0 &&
+  (p.port as number) < 65536
 const isMember = (m: unknown): m is Member => {
   const v = m as Member
-  return (
-    !!v &&
-    typeof v.key === 'string' &&
-    typeof v.name === 'string' &&
-    Array.isArray(v.addrs) &&
-    v.addrs.every(a => typeof a === 'string') &&
-    Number.isInteger(v.port)
-  )
+  return !!v && typeof v.key === 'string' && isHelloFields(v)
 }
 const isAskInfo = (a: unknown): a is AskInfo => {
   const v = a as AskInfo
@@ -299,6 +303,8 @@ export class Bridge {
   private invites = new Map<string, Invite>()
   private closedAsks = new Map<string, string>()
   private seen = new Set<string>()
+  // 예전 봉투를 다시 보내 오는 것을 거른다. 받는 요청과 받은 답 모두.
+  private replay = new ReplayGuard()
   private outbox: Outgoing[] = []
   private events: BridgeEvent[] = []
   private waiters: Array<() => void> = []
@@ -783,6 +789,9 @@ export class Bridge {
   private async respond(sealed: unknown, seenAt: string | undefined, relayed = false): Promise<{ status: number; body: string }> {
     const payload = open(sealed, this.keys) as Payload | null
     if (!payload) return { status: 403, body: 'forbidden' }
+    // 다시 온 봉투는 거절하되 403 은 쓰지 않는다. 보낸 쪽이 같은 봉투를 다른 주소로 다시 보낸 것일 수도 있어서, 연결을 끊지 않고 다시 보내게 한다.
+    const fresh = this.replay.check(sealed as Sealed, payload)
+    if (fresh !== 'ok') return { status: 409, body: fresh === 'stale' ? 'stale: the two PCs clocks differ by more than two hours' : 'already received' }
     const from = (sealed as { from: string }).from
     const answer = (p: Payload) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) })
     const forbidden = { status: 403, body: 'forbidden' }
@@ -800,7 +809,7 @@ export class Bridge {
 
     const peer = this.peers.get(from)
     if (!peer) {
-      if (payload.type !== 'hello' || !Array.isArray(payload.addrs) || !Number.isInteger(payload.port)) return forbidden
+      if (payload.type !== 'hello' || !isHelloFields(payload)) return forbidden
       const invite = this.invites.get(from)
       const invited = !!invite
       const token = invited ? undefined : this.takeToken(payload.token)
@@ -809,7 +818,7 @@ export class Bridge {
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
-      const added: Peer = { key: from, name: payload.name, addrs, port: payload.port, private: token?.private }
+      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private }
       // 그룹 코드로 들어왔으면, 이쪽 그룹의 다른 세션과 서로 소개한다. 소개받아 온 세션은 더 퍼뜨리지 않는다.
       const members = token && !token.private ? this.groupPeers().filter(p => p.key !== from) : []
       for (const m of members) void this.sendOrQueue(m, { type: 'introduce', member: memberOf(added) }).catch(() => {})
@@ -891,7 +900,7 @@ export class Bridge {
   // 이미 이어진 상대가 다시 인사했다. 다시 켜졌거나 잠에서 깨어 주소나 포트가 바뀌었을 수 있으니 새로 받는다.
   // 상대가 다시 켜져 돌아온 것이면(back) 사람에게 알릴 수 있게 소식을 남긴다. 밀려 있던 것은 바로 다시 보낸다.
   private welcomeBack(peer: Peer, hello: Extract<Payload, { type: 'hello' }>, seenAt: string | undefined, relayed: boolean): Payload {
-    if (Array.isArray(hello.addrs) && hello.addrs.every(a => typeof a === 'string') && Number.isInteger(hello.port)) {
+    if (isHelloFields(hello)) {
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? hello.addrs.filter(a => !isLoopback(a)) : hello.addrs
       peer.addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
@@ -917,6 +926,7 @@ export class Bridge {
         this.dropPeer(peer)
         return { type: 'ok' }
       case 'hello':
+        if (!isHelloFields(payload)) return null
         peer.addrs = payload.addrs
         peer.port = payload.port
         return { type: 'hello_ack', name: this.name }
@@ -1321,8 +1331,10 @@ export class Bridge {
     }
     if (res.status === 403) return 'refused'
     if (!res.ok) return null
-    const sealed = (await res.json().catch(() => null)) as { from?: string } | null
-    return sealed?.from === peer.key ? (open(sealed, this.keys) as Payload | null) : null
+    const sealed = (await res.json().catch(() => null)) as Sealed | null
+    if (sealed?.from !== peer.key) return null
+    const reply = open(sealed, this.keys) as Payload | null
+    return reply && this.replay.check(sealed, reply) === 'ok' ? reply : null
   }
 
   private async sendOrQueue(peer: Peer, payload: Payload, thread?: string): Promise<'delivered' | 'queued'> {
