@@ -16884,6 +16884,14 @@ var LINK_ERRORS = {
 };
 var KINDS = ["question", "answer", "note", "closed", "agreement"];
 var EVERYONE = ["everyone", "all"];
+var DEFERS_TO_HUMAN = [
+  /(\uC0AC\uB78C|\uB2F4\uB2F9\uC790?|\uCC45\uC784\uC790|\uD300\uC7A5|\uC0C1\uC0AC|\uAD00\uB9AC\uC790|\uBCF4\uC548\s*\uB2F4\uB2F9|\uC717\uC120|\uACB0\uC7AC\uAD8C\uC790|\uC0AC\uC6A9\uC790|\uC8FC\uC778)(\uC5D0\uAC8C|\uAED8|\uD55C\uD14C|\uCABD\uC5D0|\uBD84\uAED8)\s*(\uC62C\uB838|\uC62C\uB9AC|\uB118\uACBC|\uB118\uAE30|\uC804\uB2EC|\uC5EC\uCB64|\uBB3C\uC5B4|\uBB3B|\uD655\uC778\s*\uC694\uCCAD|\uBCF4\uACE0)/,
+  /(\uD655\uC778|\uACB0\uC815|\uAC80\uD1A0|\uC2B9\uC778|\uB17C\uC758)\s*(\uD6C4|\uB418\uBA74|\uB418\uB294\s*\uB300\uB85C|\uD558\uACE0\s*\uB098\uC11C|\uBC1B\uB294\s*\uB300\uB85C|\uBC1B\uC73C\uBA74)[^.\n]{0,20}(\uC54C\uB824|\uC54C\uB9AC|\uD68C\uC2E0|\uB2F5|\uC5F0\uB77D|\uACF5\uC720)/,
+  /(\uC815\uD574\uC9C0\uBA74|\uC815\uD574\uC9C0\uB294\s*\uB300\uB85C|\uACB0\uC815\uB418\uBA74|\uB2F5\uC774\s*\uC624\uBA74|\uD68C\uC2E0\uC774\s*\uC624\uBA74|\uB2F5\uC744\s*\uBC1B\uC73C\uBA74)[^.\n]{0,20}(\uC54C\uB824|\uC54C\uB9AC|\uD68C\uC2E0|\uB2F5|\uC5F0\uB77D|\uACF5\uC720)/,
+  /\b(ask(ed|ing)?|check(ed|ing)? with|run (it|this) by|escalat\w*|pass(ed|ing)? (it|this) to|forward(ed|ing)? (it|this) to)\b[^.\n]{0,30}\b(my|our|the) (human|owner|user|manager|lead|team|boss|security)/i,
+  /\b(get back to you|let you know)\b[^.\n]{0,30}\b(once|when|after|as soon as)\b/i
+];
+var defersToHuman = (text) => DEFERS_TO_HUMAN.some((r) => r.test(text));
 
 class DeliveryError extends Error {
   reason;
@@ -16979,6 +16987,8 @@ class Bridge {
   watchers = new Set;
   viewerAddress;
   asking = new Map;
+  lastWaitPing = 0;
+  onSlow;
   waiting = 0;
   flushing = false;
   lastCode;
@@ -17008,6 +17018,8 @@ class Bridge {
       connectTimeoutMs: 2000,
       pollWaitMs: 20000,
       relayTimeoutMs: 15000,
+      nudgeMs: 30 * 60000,
+      tickMs: TICK_MS,
       ...options,
       relay: options.relay?.trim().replace(/\/+$/, "") || undefined
     };
@@ -17252,7 +17264,7 @@ class Bridge {
     const human = opts.human ? { human: true } : {};
     const msg = { id: randomUUID(), thread: thread.id, kind: "answer", text, ...human, at: now() };
     thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text, ...human, at: msg.at });
-    if (thread.status !== "agreed")
+    if (thread.status !== "agreed" && !(thread.status === "peer_checking_with_their_human" && thread.humanSince))
       thread.status = "waiting_for_peer";
     this.changed();
     const delivery = await this.sendOrQueue(peer, { type: "msg", msg }, thread.id);
@@ -17350,8 +17362,15 @@ ${f.evidence}`).join(`
     const peers = await Promise.all([...this.peers.values()].map(async (peer) => {
       let direct = false;
       try {
-        direct = (await this.deliver(peer, { type: "ping" })).type === "pong";
+        const pong = await this.deliver(peer, { type: "ping" });
+        direct = pong.type === "pong";
+        if (pong.type === "pong")
+          this.takeWaiting(peer, pong.waiting);
       } catch {}
+      const deciding = [...this.threads.values()].filter((t) => t.peer === peer.key).flatMap((t) => {
+        const h = this.theirHuman(t);
+        return h ? [{ thread: t.id, subject: t.subject, ...h }] : [];
+      });
       const pulling = this.isPulling(peer);
       const reachable = direct || pulling;
       const error = !reachable && peer.lastError;
@@ -17365,7 +17384,8 @@ ${f.evidence}`).join(`
         queued: this.outbox.filter((o) => o.peer === peer.key).length,
         last_seen: isoOf(peer.lastSeen),
         last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
-        next_try: reachable ? undefined : isoOf(peer.retryAt) ?? "now"
+        next_try: reachable ? undefined : isoOf(peer.retryAt) ?? "now",
+        their_human_deciding: deciding.length ? deciding : undefined
       };
     }));
     return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined, log: this.log.path };
@@ -17380,7 +17400,8 @@ ${f.evidence}`).join(`
         status: t.status,
         ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
         messages: counted(t),
-        last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) }
+        last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
+        their_human: this.theirHuman(t)
       };
     });
   }
@@ -17615,7 +17636,7 @@ ${f.evidence}`).join(`
   process(peer, payload) {
     switch (payload.type) {
       case "ping":
-        return { type: "pong" };
+        return { type: "pong", waiting: this.waitingFor(peer) };
       case "msg":
         this.receive(peer, payload.msg);
         return { type: "ok" };
@@ -17879,9 +17900,15 @@ ${f.evidence}`).join(`
     else if (agreement)
       thread.status = "agreed";
     else if (thread.status === "agreed") {} else if (msg.kind === "note")
-      thread.status = "peer_checking_with_their_human";
-    else
+      this.peerAsksHuman(thread, false);
+    else if (msg.kind === "answer" && !msg.human && defersToHuman(text))
+      this.peerAsksHuman(thread, true);
+    else {
       thread.status = "your_turn";
+      this.peerAnswered(thread);
+    }
+    if (agreement || thread.status === "closed")
+      this.peerAnswered(thread);
     const file = agreement ? this.saveAgreement(thread) : undefined;
     let ask = thread.ask;
     if (thread.ask && thread.startedBy === "me") {
@@ -17890,6 +17917,97 @@ ${f.evidence}`).join(`
       ask = this.askProgress(thread.ask);
     }
     this.emit({ type: "message", thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, at: now() });
+  }
+  peerAsksHuman(thread, inText) {
+    if (thread.status !== "peer_checking_with_their_human" || !thread.humanSince) {
+      thread.humanSince = now();
+      thread.nudges = 0;
+      thread.peerWait = undefined;
+    }
+    thread.status = "peer_checking_with_their_human";
+    thread.saidInText = inText || undefined;
+  }
+  peerAnswered(thread) {
+    thread.humanSince = undefined;
+    thread.saidInText = undefined;
+    thread.nudges = undefined;
+    thread.peerWait = undefined;
+  }
+  waitingFor(peer) {
+    const out = [];
+    for (const q of this.asking.values()) {
+      if (this.threads.get(q.thread)?.peer !== peer.key)
+        continue;
+      out.push({
+        thread: q.thread,
+        since: q.at,
+        window: q.text ? "text" : q.closedAt ? "closed_without_answer" : "shown",
+        reminders: q.reminders ?? 0,
+        last_reminder: q.lastReminder,
+        closed_at: q.closedAt
+      });
+    }
+    return out.length ? out : undefined;
+  }
+  takeWaiting(peer, waiting) {
+    if (!Array.isArray(waiting))
+      return;
+    for (const w of waiting) {
+      if (!w || typeof w.thread !== "string" || typeof w.since !== "string")
+        continue;
+      const t = this.threads.get(w.thread);
+      if (!t || t.peer !== peer.key || t.status !== "peer_checking_with_their_human")
+        continue;
+      const window = ["shown", "closed_without_answer", "text"].includes(w.window) ? w.window : "shown";
+      const str = (v) => typeof v === "string" ? v.slice(0, 40) : undefined;
+      t.peerWait = { thread: t.id, since: str(w.since), window, reminders: Number.isInteger(w.reminders) ? w.reminders : 0, last_reminder: str(w.last_reminder), closed_at: str(w.closed_at) };
+    }
+  }
+  theirHuman(t) {
+    if (t.status !== "peer_checking_with_their_human" || !t.humanSince)
+      return;
+    const w = t.peerWait;
+    return {
+      since: t.humanSince,
+      minutes: Math.floor((Date.now() - Date.parse(t.humanSince)) / 60000),
+      window: w ? w.window === "shown" ? "a question window is on their human's screen" : w.window === "closed_without_answer" ? `their human saw the question window and closed it without answering at ${w.closed_at}; it opens again with the next reminder` : "their app cannot open a question window, so their AI asked their human in text" : t.saidInText ? "they only wrote that they passed it to their human (an older coworker version); whether a question window is open is unknown" : "unknown (the other side runs an older coworker version)",
+      reminders: w ? w.reminders : undefined,
+      last_reminder: w?.last_reminder
+    };
+  }
+  checkWaits() {
+    const t0 = Date.now();
+    const asking = [...this.threads.values()].filter((t) => t.status === "peer_checking_with_their_human" && t.humanSince);
+    if (!asking.length)
+      return;
+    if (t0 - this.lastWaitPing >= Math.min(60000, this.opts.nudgeMs)) {
+      this.lastWaitPing = t0;
+      for (const key of new Set(asking.map((t) => t.peer))) {
+        const peer = this.peers.get(key);
+        if (peer)
+          this.deliver(peer, { type: "ping" }).then((r) => r.type === "pong" && this.takeWaiting(peer, r.waiting)).catch(() => {});
+      }
+    }
+    for (const t of asking) {
+      const waited = t0 - Date.parse(t.humanSince);
+      const due = Math.floor(waited / this.opts.nudgeMs);
+      if (due <= (t.nudges ?? 0))
+        continue;
+      t.nudges = due;
+      const slow = {
+        type: "peer_human_slow",
+        thread: t.id,
+        peer: t.peerName,
+        subject: t.subject,
+        since: t.humanSince,
+        minutes: Math.floor(waited / 60000),
+        their_window: t.peerWait,
+        said_in_text: t.saidInText,
+        at: now()
+      };
+      this.emit(slow);
+      this.onSlow?.(slow);
+    }
   }
   emit(event) {
     this.events.push(event);
@@ -17912,6 +18030,22 @@ ${f.evidence}`).join(`
   humanDone(thread) {
     if (this.asking.delete(thread))
       this.dirty();
+  }
+  remindedHuman(thread) {
+    const q = this.asking.get(thread);
+    if (!q)
+      return;
+    q.reminders = (q.reminders ?? 0) + 1;
+    q.lastReminder = now();
+    this.dirty();
+    return q;
+  }
+  humanClosedWindow(thread, closed) {
+    const q = this.asking.get(thread);
+    if (!q)
+      return;
+    q.closedAt = closed ? now() : undefined;
+    this.dirty();
   }
   tell(event) {
     this.emit(event);
@@ -18064,6 +18198,7 @@ ${f.evidence}`).join(`
     let addrs = this.opts.addrs().join();
     let n = 0;
     this.ticker = setInterval(() => {
+      this.checkWaits();
       const t = Date.now();
       if (t - last > PAUSE_MS)
         this.log.write("this_pc_paused", { for_s: Math.round((t - last) / 1000), what: "this computer was asleep or stopped; nothing could get through meanwhile" });
@@ -18074,7 +18209,7 @@ ${f.evidence}`).join(`
           this.log.write("this_pc_moved", { from: addrs.split(","), to: now.split(",") });
         addrs = now;
       }
-    }, TICK_MS);
+    }, this.opts.tickMs);
     this.ticker.unref?.();
   }
   async logs(options = {}) {
@@ -19248,13 +19383,13 @@ data:
 }
 
 // src/serve.ts
-import { spawn } from "child_process";
+import { spawn as spawn2 } from "child_process";
 import { randomUUID as randomUUID3 } from "crypto";
 import { platform as platform4 } from "os";
 import { basename, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.7.0";
+var version2 = "0.8.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26823,6 +26958,46 @@ function waitSeconds(requested, codex) {
   return requested || Infinity;
 }
 
+// src/notify.ts
+import { spawn } from "child_process";
+import { appendFileSync as appendFileSync2 } from "fs";
+function osNotify(title, body) {
+  const log = process.env.COWORKER_NOTIFY_LOG;
+  if (log) {
+    try {
+      appendFileSync2(log, `${JSON.stringify({ title, body })}
+`);
+    } catch {}
+    return;
+  }
+  if (process.env.COWORKER_NOTIFY === "off")
+    return;
+  const short = (s, n) => s.length > n ? `${s.slice(0, n - 1)}\u2026` : s;
+  title = short(title, 80);
+  body = short(body, 240);
+  try {
+    if (process.platform === "darwin")
+      run2("osascript", ["-e", "on run argv", "-e", 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"', "-e", "end run", title, body]);
+    else if (process.platform === "win32")
+      run2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST], { CW_TITLE: title, CW_BODY: body });
+    else
+      run2("notify-send", ["-u", "critical", title, body]);
+  } catch {}
+}
+var WINDOWS_TOAST = [
+  "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]",
+  "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)",
+  "$t=$x.GetElementsByTagName('text')",
+  "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:CW_TITLE))",
+  "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:CW_BODY))",
+  "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))"
+].join(";");
+function run2(command, args, env) {
+  const child = spawn(command, args, { stdio: "ignore", detached: true, windowsHide: true, env: env ? { ...process.env, ...env } : process.env });
+  child.on("error", () => {});
+  child.unref();
+}
+
 // src/session.ts
 import { rmSync as rmSync5 } from "fs";
 
@@ -26835,7 +27010,7 @@ var LATEST_URL = "https://raw.githubusercontent.com/BrilliantTiger/ai-coworker-w
 var STALE_LOCK_MS = 10 * 60000;
 var UPDATE_EVERY_MS = Number(process.env.COWORKER_UPDATE_EVERY_MS) || 6 * 60 * 60000;
 var firstCheckMs = () => Number(process.env.COWORKER_UPDATE_FIRST_MS) || 5000 + Math.random() * 25000;
-var run2 = async (cmd) => {
+var run3 = async (cmd) => {
   const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
   return { code, out };
@@ -26864,7 +27039,7 @@ async function latestVersion(url = process.env.COWORKER_UPDATE_URL || LATEST_URL
     return;
   }
 }
-async function installed(app, exec = run2) {
+async function installed(app, exec = run3) {
   try {
     if (app === "claude") {
       const { code, out } = await exec([command("claude"), "plugin", "list", "--json"]);
@@ -26885,7 +27060,7 @@ async function installed(app, exec = run2) {
     return;
   }
 }
-async function selfUpdate(app, current, home, exec = run2) {
+async function selfUpdate(app, current, home, exec = run3) {
   const latest = await latestVersion();
   if (!latest || !newer(latest, current))
     return;
@@ -27133,6 +27308,7 @@ class Viewer {
   }
 }
 var LISTENING_ITSELF = "coworker: this session is listening by itself now. Nothing to do.";
+var AFTER_RESTART = "coworker: not an error.";
 function newsLine(events, open, when = "listening") {
   if (events.length) {
     const counts = new Map;
@@ -27142,7 +27318,7 @@ function newsLine(events, open, when = "listening") {
     }
     const list = [...counts].map(([what, n]) => `${n} ${what}`).join(", ");
     if (when === "after-restart")
-      return `coworker: new for this session (${list}). It arrived after this session restarted, while nothing was listening. Call the coworker inbox tool to read and handle it, then start listening in the background again with the listen_command it gives.`;
+      return `${AFTER_RESTART} New for this session (${list}) arrived after it restarted, while nothing was listening, so coworker woke it. Claude Code shows this as a failed hook only because waking needs exit code 2. Call the coworker inbox tool to read and handle it, then start listening in the background again with the listen_command it gives.`;
     return `coworker: new for this session (${list}). Call the coworker inbox tool to read it and handle it, then run this listen command in the background again.`;
   }
   if (!open)
@@ -27154,7 +27330,8 @@ var WHAT = {
   undelivered: "undelivered",
   decision: "decision by your human",
   moved: "moved to another session",
-  clock: "clocks differ"
+  clock: "clocks differ",
+  peer_human_slow: "their human is slow to decide"
 };
 var PAGE = `<!doctype html>
 <html lang="ko">
@@ -27227,7 +27404,7 @@ function render(data) {
     const card = el('section', 'conv')
     const head = el('div', 'head')
     const mine = c.startedBy === 'me'
-    head.append(el('span', 'badge' + (mine ? ' out' : ''), mine ? '\uBCF4\uB0B8 \uC9C8\uBB38' : '\uBC1B\uC740 \uC9C8\uBB38'), el('span', 'subject', c.subject), el('span', 'status', STATUS[c.status] ?? c.status))
+    head.append(el('span', 'badge' + (mine ? ' out' : ''), mine ? '\uBCF4\uB0B8 \uC9C8\uBB38' : '\uBC1B\uC740 \uC9C8\uBB38'), el('span', 'subject', c.subject), el('span', 'status', (STATUS[c.status] ?? c.status) + (c.status === 'peer_checking_with_their_human' && c.humanSince ? ' \xB7 ' + Math.max(0, Math.floor((Date.now() - Date.parse(c.humanSince)) / 60000)) + '\uBD84\uC9F8' : '')))
     const where = c.peerName + (c.peerAddr ? ' (' + c.peerAddr + ')' : '')
     const first = c.messages[0]
     const group = c.ask ? ' \xB7 \uD568\uAED8 \uBC1B\uC740 \uC0AC\uB78C: ' + c.ask.to.join(', ') + ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
@@ -27298,19 +27475,22 @@ var WINDOW_KO = {
   choose: "\uACE0\uB974\uAE30",
   recommended: " (\uCD94\uCC9C)",
   other: "\uC9C1\uC811 \uC785\uB825",
-  otherHint: "\uBCF4\uAE30\uC5D0 \uC5C6\uC73C\uBA74 \uC5EC\uAE30\uC5D0 \uC4F0\uC138\uC694. \uACE0\uB978 \uAC83\uC5D0 \uB367\uBD99\uC77C \uB9D0\uB3C4 \uC5EC\uAE30\uC5D0 \uC501\uB2C8\uB2E4. \uB2F5\uD558\uC9C0 \uC54A\uACE0 \uB2EB\uC73C\uBA74 AI\uAC00 \uB2E4\uC2DC \uBB3B\uC2B5\uB2C8\uB2E4.",
+  otherHint: "\uBCF4\uAE30\uC5D0 \uC5C6\uC73C\uBA74 \uC5EC\uAE30\uC5D0 \uC4F0\uC138\uC694. \uACE0\uB978 \uAC83\uC5D0 \uB367\uBD99\uC77C \uB9D0\uB3C4 \uC5EC\uAE30\uC5D0 \uC501\uB2C8\uB2E4. \uB2F5\uD558\uC9C0 \uC54A\uACE0 \uB2EB\uC73C\uBA74 AI\uAC00 \uB300\uD654\uB85C \uB2E4\uC2DC \uBB3B\uACE0, \uB2E4\uC74C \uC54C\uB9BC \uB54C \uC774 \uCC3D\uC774 \uB2E4\uC2DC \uB739\uB2C8\uB2E4.",
   about: (peer, subject) => `\uB300\uD654 \uC0C1\uB300: ${peer} \xB7 \uC8FC\uC81C: ${subject}`
 };
 var WINDOW_EN = {
   choose: "Choose",
   recommended: " (recommended)",
   other: "Or write your own answer",
-  otherHint: "Write here if no option fits, or to add to your choice. Close it without answering and the AI will ask again.",
+  otherHint: "Write here if no option fits, or to add to your choice. Close it without answering and the AI asks again in the conversation, and this window opens again with the next reminder.",
   about: (peer, subject) => `Conversation with ${peer}: ${subject}`
 };
 var decisionText = (picked, written, ko) => ko ? `\uC0AC\uB78C\uC774 \uC815\uD588\uC2B5\uB2C8\uB2E4: ${picked ?? written}${picked && written ? `
 \uB367\uBD99\uC778 \uB9D0: ${written}` : ""}` : `My human decided: ${picked ?? written}${picked && written ? `
 Added: ${written}` : ""}`;
+var REMIND_MS = Number(process.env.COWORKER_REMIND_MS) || 10 * 60000;
+var NUDGE_MS = Number(process.env.COWORKER_NUDGE_MS) || 30 * 60000;
+var TICK_MS2 = Number(process.env.COWORKER_TICK_MS) || undefined;
 var live = new Map;
 function createSession(opts) {
   const channel = opts.channel;
@@ -27363,6 +27543,8 @@ function createSession(opts) {
   Answer what is settled, ask your human what needs deciding
   - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
   - If the question needs a decision nobody has made yet (choosing between options, priorities, scope, schedule, anything your human would want a say in), do not decide it yourself. Call check_with_human with the question for your human, 2 to 6 options in their language, and the one you recommend. It tells the other side you are asking and opens a question window on your human's screen, where they pick a number or write their own answer. Their decision then goes to the other side by itself, marked as your human's decision, and you get a decision event; tell your human in one line what was sent. Do not leave a decision as plain text only.
+  - Never answer the other side with only "I passed it to my human" or "I will let you know after checking"; reply refuses such an answer. Use check_with_human: it shows a desktop notification with sound, reminds your human every few minutes until they answer, opens a closed window again, and lets the other side see that you are asking, since when, and whether the window was seen.
+  - When the other side is checking with its human, list_connections and inbox show it under their_human (since when, for how many minutes, and the state of their question window). If it takes long, you get a peer_human_slow event (after 30 minutes, then every 30 minutes) and your human gets a desktop notification: tell your human, so they can reach the other person by phone or messenger.
   - If no window could be opened, or your human closed it without answering, ask in your reply: the question, then the options numbered 1, 2, 3 \u2026 with your recommendation marked, and that they can answer with a number or in their own words (in Claude Code, use the AskUserQuestion tool if you have it). When they answer, send it with reply and decided_by_human set to true.
   - If you cannot find the answer, say what you checked and what you could not confirm.
 
@@ -27421,7 +27603,8 @@ ${text}` : "";
       folder = await opts.folder(server);
     } catch {}
   };
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity) });
+  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS2 });
+  const notify = opts.notify ?? osNotify;
   function getBridge() {
     if (!bridge) {
       const name = `${folder ? `${folder} \xB7 ` : ""}${clientLabel()} @ ${shortHostname()}`;
@@ -27436,6 +27619,7 @@ ${text}` : "";
     moved = false;
     if (channel)
       b.onEvent = () => void (pushing = pushing.then(pushEvents));
+    b.onSlow = (e) => KOREAN.test(e.subject) ? notify(`coworker \xB7 ${e.peer}`, `\uC0C1\uB300 \uCABD \uC0AC\uB78C\uC758 \uACB0\uC815\uC744 ${e.minutes}\uBD84\uC9F8 \uAE30\uB2E4\uB9BD\uB2C8\uB2E4: ${e.subject}. \uC804\uD654\uB098 \uBA54\uC2E0\uC800\uB85C \uC7AC\uCD09\uD574 \uBCF4\uC138\uC694.`) : notify(`coworker \xB7 ${e.peer}`, `Waiting ${e.minutes} min for their human to decide: ${e.subject}. Consider a call or a message.`);
     b.onMoved = () => {
       if (bridge !== b)
         return;
@@ -27535,7 +27719,7 @@ ${text}` : "";
   }
   let pushing = Promise.resolve();
   const NOT_OPEN = "the bridge is not open; call open_bridge or connect first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result";
-  const NEWS = "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options.";
+  const NEWS = "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options (the window also opens again by itself with the next reminder). A peer_human_slow event means the other side has been waiting that many minutes for their human's decision: tell your human who, on what, for how long, and what is known about the other side's question window, and suggest they reach the other person another way (a call or a messenger); do not send the other side more messages about it.";
   const PUSHED = `${NEWS} Then end your turn; the next message comes in by itself.`;
   async function pushEvents() {
     for (const event of await bridge.wait(0)) {
@@ -27559,6 +27743,8 @@ ${text}` : "";
         return { type: event.type, to: event.to, ...event.thread ? { thread: event.thread } : {} };
       case "decision":
         return { type: event.type, thread: event.thread, ...event.closed ? { closed: "true" } : {} };
+      case "peer_human_slow":
+        return { type: event.type, thread: event.thread, peer: event.peer, minutes: String(event.minutes) };
       case "moved":
         return { type: event.type };
     }
@@ -27567,7 +27753,7 @@ ${text}` : "";
   const ASK_IN_TEXT = "This app cannot open a question window. Ask your human now: the question, then the options numbered 1, 2, 3 \u2026 with your recommendation marked, and that they can answer with a number or in their own words (in Claude Code, use the AskUserQuestion tool if you have it). Then stop and wait. When they answer, send it with reply and decided_by_human set to true.";
   const windows = new Map;
   const now = () => new Date().toISOString();
-  function openWindow(b, asked, relatedRequestId) {
+  function openWindow(b, asked, relatedRequestId, minutes) {
     if (windows.has(asked.thread))
       return;
     const stop = new AbortController;
@@ -27590,12 +27776,17 @@ ${text}` : "";
     const message = `${asked.question}${t ? `
 
 ${say.about(t.peerName, t.subject)}` : ""}`;
+    b.humanClosedWindow(asked.thread, false);
+    alert(asked, ko, minutes);
     server.server.elicitInput({ mode: "form", message, requestedSchema }, { relatedRequestId, signal: stop.signal, timeout: WAIT_FOREVER_MS }).then(async (res) => {
-      b.humanDone(asked.thread);
       const picked = res.action === "accept" ? asked.options[Number(res.content?.choice) - 1] : undefined;
       const written = res.action === "accept" && typeof res.content?.other === "string" ? res.content.other.trim() || undefined : undefined;
-      if (!picked && !written)
-        return b.tell({ type: "decision", thread: asked.thread, peer, closed: true, at: now() });
+      if (!picked && !written) {
+        b.humanClosedWindow(asked.thread, true);
+        return b.tell({ type: "decision", thread: asked.thread, peer, closed: true, opens_again_at: new Date(Date.now() + REMIND_MS).toISOString(), at: now() });
+      }
+      b.humanDone(asked.thread);
+      stopReminders(asked.thread);
       try {
         const sent = await b.reply(asked.thread, decisionText(picked, written, ko), { human: true });
         b.tell({ type: "decision", thread: asked.thread, peer, choice: picked, text: written, delivery: sent.delivery, at: now() });
@@ -27608,11 +27799,50 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     });
   }
   function reopenWindows(b) {
-    if (!canAsk())
-      return;
-    for (const asked of b.humanQuestions())
-      if (b.threads.has(asked.thread))
+    for (const asked of b.humanQuestions()) {
+      if (!b.threads.has(asked.thread))
+        continue;
+      if (canAsk() && !asked.text)
         openWindow(b, asked);
+      startReminders(b, asked.thread);
+    }
+  }
+  function alert(asked, ko, minutes) {
+    const peer = bridge?.threads.get(asked.thread)?.peerName ?? "coworker";
+    const title = ko ? `coworker \xB7 ${peer} \uCABD\uC774 \uACB0\uC815\uC744 \uAE30\uB2E4\uB9BD\uB2C8\uB2E4` : `coworker \xB7 ${peer} is waiting for your decision`;
+    const where = asked.text ? ko ? "AI \uB300\uD654\uCC3D\uC5D0\uC11C \uB2F5\uD574 \uC8FC\uC138\uC694." : "Answer in the AI conversation." : ko ? "\uC9C8\uBB38 \uCC3D\uC5D0\uC11C \uB2F5\uD574 \uC8FC\uC138\uC694." : "Answer in the question window.";
+    const waited = minutes !== undefined ? ko ? `${minutes}\uBD84\uC9F8 \uAE30\uB2E4\uB9BD\uB2C8\uB2E4. ` : `Waiting ${minutes} min. ` : "";
+    notify(title, `${waited}${asked.question} \u2014 ${where}`);
+  }
+  const reminders = new Map;
+  function startReminders(b, thread) {
+    if (reminders.has(thread))
+      return;
+    const timer = setInterval(() => {
+      if (bridge !== b)
+        return stopReminders(thread);
+      const asked = b.remindedHuman(thread);
+      if (!asked || !b.threads.has(thread))
+        return stopReminders(thread);
+      const ko = KOREAN.test(asked.question + asked.options.join(""));
+      const minutes = Math.round((Date.now() - Date.parse(asked.at)) / 60000);
+      if (canAsk() && !asked.text && !windows.has(thread))
+        openWindow(b, asked, undefined, minutes);
+      else
+        alert(asked, ko, minutes);
+    }, REMIND_MS);
+    timer.unref?.();
+    reminders.set(thread, timer);
+  }
+  function stopReminders(thread) {
+    clearInterval(reminders.get(thread));
+    reminders.delete(thread);
+  }
+  function humanAnswered(b, thread) {
+    b.humanDone(thread);
+    stopReminders(thread);
+    windows.get(thread)?.abort();
+    windows.delete(thread);
   }
   function closeWindows(forget) {
     for (const [thread, stop] of windows) {
@@ -27621,6 +27851,11 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
         bridge?.humanDone(thread);
     }
     windows.clear();
+    for (const thread of [...reminders.keys()]) {
+      stopReminders(thread);
+      if (forget)
+        bridge?.humanDone(thread);
+    }
   }
   let viewer;
   const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel });
@@ -27792,12 +28027,17 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     inputSchema: {
       thread: string2().min(1).describe("Conversation id from wait_for_message or inbox."),
       text: string2().min(1).max(20000),
-      decided_by_human: boolean2().optional().describe("true when this answer is your human's decision that they gave you in the conversation (a question window sends its answer by itself).")
+      decided_by_human: boolean2().optional().describe("true when this answer is your human's decision that they gave you in the conversation (a question window sends its answer by itself). It also ends an open question for your human on this conversation.")
     }
-  }, tool(async ({ thread, text, decided_by_human }) => ({
-    ...await getBridge().reply(thread, text, { human: decided_by_human }),
-    next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${listen()}`
-  })));
+  }, tool(async ({ thread, text, decided_by_human }) => {
+    const b = getBridge();
+    if (!decided_by_human && defersToHuman(text) && !b.humanQuestions().some((q) => q.thread === thread))
+      throw new Error("Not sent: this answer says you passed the decision to your human, but no question is open for them. Call check_with_human on this conversation instead, with the question, 2 to 6 options and your recommendation (put a one-line notice for the other side in note). It opens a question window with a desktop notification, reminds your human until they answer, and lets the other side see that you are waiting and for how long. If your answer does not leave anything to your human, reword it without saying you will ask them.");
+    const sent = await b.reply(thread, text, { human: decided_by_human });
+    if (decided_by_human || b.humanQuestions().some((q) => q.thread === thread))
+      humanAnswered(b, thread);
+    return { ...sent, next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${listen()}` };
+  }));
   server.registerTool("check_with_human", {
     title: "Check with human",
     annotations: { readOnlyHint: false, openWorldHint: true },
@@ -27816,15 +28056,18 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       return { thread, window: "open", next: `A question window for this conversation is already open on your human's screen; wait for their answer. ${listen()}` };
     const b = getBridge();
     const held = await b.hold(thread, note ?? "This needs a decision, so I am asking my human. I will answer as soon as they decide.");
-    if (!canAsk())
-      return { ...held, window: false, next: ASK_IN_TEXT };
-    const asked = { thread, question, options, recommend, at: new Date().toISOString() };
+    const asked = { thread, question, options, recommend, at: new Date().toISOString(), text: !canAsk() || undefined };
     b.waitForHuman(asked);
+    startReminders(b, thread);
+    if (!canAsk()) {
+      alert(asked, KOREAN.test(question + options.join("")));
+      return { ...held, window: false, next: ASK_IN_TEXT };
+    }
     openWindow(b, asked, extra.requestId);
     return {
       ...held,
       window: "open",
-      next: `A question window is now open on your human's screen. Tell your human in one line that a decision is waiting for them there, and do not ask the same question in text. When they answer, their decision goes to the other side by itself and you get a decision event. ${listen()}`
+      next: `A question window is now open on your human's screen, with a desktop notification and sound. Until they answer, they are reminded every ${Math.round(REMIND_MS / 60000)} minutes and a closed window opens again; the other side sees how long it has waited. Tell your human in one line that a decision is waiting for them there, and do not ask the same question in text. When they answer, their decision goes to the other side by itself and you get a decision event. ${listen()}`
     };
   }));
   const items = (what) => array(string2().min(1).max(2000)).max(50).optional().describe(what);
@@ -28109,13 +28352,13 @@ function restartApp(script) {
   if (platform4() === "win32") {
     const ps = (s) => s.replace(/'/g, "''");
     const command = `Start-Process -FilePath '${ps(bun)}' -ArgumentList '"${ps(script)}"', 'serve' -WindowStyle Minimized`;
-    spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+    spawn2("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
       detached: true,
       stdio: "ignore",
       windowsHide: true
     }).unref();
   } else
-    spawn(bun, [script, "serve"], { detached: true, stdio: "ignore" }).unref();
+    spawn2(bun, [script, "serve"], { detached: true, stdio: "ignore" }).unref();
   setTimeout(() => process.exit(0), 500);
 }
 
@@ -28138,7 +28381,7 @@ async function wake(home, input) {
         const res = await fetch(`http://127.0.0.1:${saved.viewer.port}/${saved.viewer.token}/wake`);
         if (res.ok) {
           const text = (await res.text()).trim();
-          if (text.startsWith("coworker: new for this session")) {
+          if (text.startsWith(AFTER_RESTART)) {
             process.stderr.write(`${text}
 `);
             return 2;
