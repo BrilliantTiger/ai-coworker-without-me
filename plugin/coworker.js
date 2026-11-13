@@ -16573,13 +16573,13 @@ function detectChannel(env = process.env) {
 }
 
 // src/resume.ts
-import { readdirSync, readFileSync, rmSync as rmSync3, statSync } from "fs";
+import { readdirSync, readFileSync as readFileSync2, rmSync as rmSync3, statSync as statSync2 } from "fs";
 import { join as join3 } from "path";
 
 // src/bridge.ts
 import { randomUUID } from "crypto";
-import { mkdirSync as mkdirSync2, renameSync, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
-import { dirname, join as join2 } from "path";
+import { mkdirSync as mkdirSync3, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { dirname as dirname2, join as join2 } from "path";
 
 // src/agreement.ts
 var isText = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
@@ -16806,6 +16806,55 @@ function assertNoSecrets(fields) {
   throw new Error(`nothing was sent: this looks like it contains a secret (${what}). Remove it or replace it with a placeholder such as <redacted>. If the other side really needs it, tell your human; humans share secrets their own way, never through coworker.`);
 }
 
+// src/linklog.ts
+import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync, renameSync, statSync } from "fs";
+import { dirname } from "path";
+var MAX_BYTES = 1 << 20;
+var MAX_LOG_LINES = 300;
+
+class LinkLog {
+  path;
+  constructor(path) {
+    this.path = path;
+  }
+  write(event, fields = {}) {
+    if (!this.path)
+      return;
+    try {
+      mkdirSync2(dirname(this.path), { recursive: true, mode: 448 });
+      if (existsSync2(this.path) && statSync(this.path).size > MAX_BYTES)
+        renameSync(this.path, `${this.path}.1`);
+      appendFileSync(this.path, `${JSON.stringify({ at: new Date().toISOString(), event, ...fields })}
+`, { mode: 384 });
+    } catch {}
+  }
+  read(options = {}) {
+    if (!this.path)
+      return [];
+    const lines = Math.min(Math.max(options.lines ?? 100, 1), MAX_LOG_LINES);
+    const entries = [];
+    for (const file of [`${this.path}.1`, this.path]) {
+      let text = "";
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+      for (const line of text.split(`
+`)) {
+        if (!line)
+          continue;
+        try {
+          const e = JSON.parse(line);
+          if (!options.id || !e.id || e.id === options.id)
+            entries.push(e);
+        } catch {}
+      }
+    }
+    return entries.slice(-lines);
+  }
+}
+
 // src/bridge.ts
 var DEFAULT_PORTS = [7700, 7799];
 function parsePorts(text) {
@@ -16827,6 +16876,7 @@ var isRelayAddr = (addr) => /^https?:\/\//.test(addr);
 var LINK_ERRORS = {
   no_route: "no route to it: it is asleep, turned off, or on another network",
   refused: "its computer answered, but no bridge is listening on that port: coworker there is restarting or stopped",
+  cut: "the connection was cut while it was open: coworker there stopped, or the network dropped",
   timeout: "no answer in time",
   not_recognized: "its bridge answered but does not know this session; this side keeps offering the code it joined with",
   bad_answer: "an answer came back that could not be read",
@@ -16873,18 +16923,28 @@ var whereIs = (p) => {
   const addr = p.lastAddr ?? p.addrs[0];
   return addr ? placeOf(addr, p.port) : undefined;
 };
+var detailOf = (e) => {
+  const err = e;
+  const name = err?.name === "TimeoutError" || err?.name === "AbortError" ? err.name : undefined;
+  return String(name ?? err?.code ?? err?.name ?? err?.message ?? e).slice(0, 120);
+};
+var isToken = (t) => typeof t === "string" && t.length > 0 && t.length <= 200;
 var linkErrorOf = (e) => {
   const err = e;
   if (err?.name === "TimeoutError")
     return "timeout";
   if (err?.code === "ECONNREFUSED" || err?.code === "ConnectionRefused")
     return "refused";
+  if (err?.code === "ECONNRESET" || err?.code === "EPIPE" || err?.code === "ECONNABORTED" || err?.code === "ConnectionClosed")
+    return "cut";
   return "no_route";
 };
 var isoOf = (ms) => ms ? new Date(ms).toISOString() : undefined;
 var MAX_USED = 500;
 var MAX_ENDED = 20;
-var savedPeer = (p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token });
+var savedPeer = (p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given });
+var TICK_MS = 5000;
+var PAUSE_MS = 30000;
 
 class Bridge {
   keys;
@@ -16900,6 +16960,12 @@ class Bridge {
   used = new Map;
   ended = [];
   retryWakers = new Map;
+  log;
+  ticker;
+  stopReason;
+  rejoinTried = new Map;
+  down = new Map;
+  addedAt = new Map;
   invites = new Map;
   closedAsks = new Map;
   seen = new Set;
@@ -16921,6 +16987,7 @@ class Bridge {
   abort = new AbortController;
   relaySecret;
   relayBox;
+  keptRelaySecret;
   relayState = "off";
   relayWaiters = [];
   saveTimer;
@@ -16944,6 +17011,7 @@ class Bridge {
       ...options,
       relay: options.relay?.trim().replace(/\/+$/, "") || undefined
     };
+    this.log = new LinkLog(this.opts.home ? join2(this.opts.home, "logs", `${this.route}.log`) : undefined);
   }
   static restore(saved, options) {
     const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } });
@@ -16955,7 +17023,8 @@ class Bridge {
         port: p.port,
         private: p.private || undefined,
         lastSeen: typeof p.lastSeen === "number" ? p.lastSeen : undefined,
-        token: typeof p.token === "string" ? p.token : undefined
+        token: isToken(p.token) ? p.token : undefined,
+        given: isToken(p.given) ? p.given : undefined
       });
     for (const t of saved.threads)
       b.threads.set(t.id, t);
@@ -16970,6 +17039,8 @@ class Bridge {
     b.closedAsks = new Map(saved.closedAsks);
     b.events = (saved.events ?? []).filter((e) => e.type !== "moved");
     b.viewerAddress = saved.viewer;
+    if (isToken(saved.relaySecret))
+      b.keptRelaySecret = saved.relaySecret;
     for (const q of saved.asking ?? [])
       b.asking.set(q.thread, q);
     try {
@@ -16977,8 +17048,9 @@ class Bridge {
     } catch {
       b.open();
     }
+    b.log.write("restored", { name: b.name, peers: b.peers.size, queued: b.outbox.length });
     for (const peer of b.peers.values()) {
-      b.deliver(peer, { type: "hello", name: b.name, addrs: b.addrs(), port: b.port, back: true }).catch(() => {});
+      b.sayHello(peer, { back: true }).catch(() => {});
       b.pollLoop(peer.key);
     }
     return b;
@@ -17015,6 +17087,7 @@ class Bridge {
       tokens: [...this.tokens].filter(([, t]) => t.expires > Date.now()).map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private })),
       used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private })),
       ended: this.ended,
+      relaySecret: this.keptRelaySecret,
       seen: [...this.seen].slice(-2000),
       closedAsks: [...this.closedAsks],
       events: this.events,
@@ -17049,7 +17122,8 @@ class Bridge {
     }
     this.abort = new AbortController;
     if (this.opts.relay) {
-      this.relaySecret = randomToken();
+      this.relaySecret = this.keptRelaySecret ?? randomToken();
+      this.keptRelaySecret = this.relaySecret;
       this.relayBox = boxOf(this.relaySecret);
       this.relayState = "connecting";
       this.relayLoop();
@@ -17059,6 +17133,8 @@ class Bridge {
       this.tryInvites();
     }, this.opts.retryMs);
     this.timer.unref?.();
+    this.log.write("open", { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay });
+    this.watchThisPc();
     this.writeState();
     this.changed();
     this.save();
@@ -17085,26 +17161,34 @@ class Bridge {
       known.addrs = [...new Set([...known.addrs, ...code.addrs])].slice(0, MAX_ADDRS);
       known.token ??= code.token;
       this.wakeRetry(known.key);
-      await this.deliver(known, { type: "hello", token: known.token, name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {});
+      this.log.write("code_again", { id: peerId(known.key), peer: known.name });
+      await this.sayHello(known, { token: known.token }).catch(() => {});
       this.dirty();
       return known;
     }
     const peer = { key: code.key, name: code.name, addrs: code.addrs, port: code.port, token: code.token };
     let reply;
     try {
-      reply = await this.deliver(peer, { type: "hello", token: code.token, name: this.name, addrs: this.addrs(), port: this.port });
+      reply = await this.sayHello(peer, { token: code.token });
     } catch (e) {
+      this.forgetGiven(peer);
+      this.log.write("connect_failed", { id: peerId(peer.key), peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail, addrs: peer.addrs, port: peer.port });
       if (e instanceof DeliveryError && e.reason === "rejected")
         throw new Error("the other session refused this code; it was already used, expired, or that bridge was reopened. Ask for a new code");
       if (this.clockOff.has(code.key))
         throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`);
       throw new Error(`cannot reach ${code.name} at ${code.addrs.join(", ")} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`);
     }
-    if (reply.type !== "hello_ack")
+    if (reply.type !== "hello_ack") {
+      this.forgetGiven(peer);
       throw new Error("unexpected answer from the other session");
+    }
     peer.name = reply.name;
     peer.private = !!reply.private;
-    this.addPeer(peer);
+    peer.token ??= code.token;
+    if (peer.given)
+      this.used.set(peer.given, { key: peer.key, private: peer.private });
+    this.addPeer(peer, { how: "code" });
     if (!peer.private)
       for (const m of Array.isArray(reply.members) ? reply.members : [])
         this.invite(m, peer.name);
@@ -17280,11 +17364,11 @@ ${f.evidence}`).join(`
         via: direct ? placeOf(peer.lastAddr, peer.port) : pulling ? "the other side cannot be reached directly, so it comes here to pick up messages" : undefined,
         queued: this.outbox.filter((o) => o.peer === peer.key).length,
         last_seen: isoOf(peer.lastSeen),
-        last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], at: isoOf(error.at) } : undefined,
+        last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
         next_try: reachable ? undefined : isoOf(peer.retryAt) ?? "now"
       };
     }));
-    return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined };
+    return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined, log: this.log.path };
   }
   threadSummaries() {
     return [...this.threads.values()].map((t) => {
@@ -17328,6 +17412,10 @@ ${f.evidence}`).join(`
     this.shutdown();
   }
   shutdown() {
+    if (this.server)
+      this.log.write("closed", { by: this.forget ? "this side's human (close_bridge)" : this.stopReason ?? "the process stopped; it comes back on restart" });
+    this.stopReason = undefined;
+    clearInterval(this.ticker);
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
     if (this.opts.saveTo) {
@@ -17336,6 +17424,8 @@ ${f.evidence}`).join(`
       else
         this.save();
     }
+    if (this.forget)
+      this.keptRelaySecret = undefined;
     this.forget = false;
     this.abort.abort();
     for (const wakers of this.pollWaiters.values())
@@ -17395,6 +17485,7 @@ ${f.evidence}`).join(`
     const forbidden = { status: 403, body: "forbidden" };
     if (from === this.key && payload.type === "handover" && this.server) {
       this.emit({ type: "moved", at: now() });
+      this.stopReason = "another session on this PC took over this bridge";
       this.save();
       setTimeout(() => {
         this.shutdown();
@@ -17408,18 +17499,23 @@ ${f.evidence}`).join(`
         return forbidden;
       const invite = this.invites.get(from);
       const invited = !!invite;
+      const why = invited ? undefined : this.whyRefused(payload.token, from);
       const token = invited ? undefined : this.takeToken(payload.token, from);
-      if (!invited && !token)
+      if (!invited && !token) {
+        this.log.write("refused_stranger", { id: peerId(from), peer: payload.name.slice(0, MAX_NAME), from: seenAt ?? (relayed ? "relay" : undefined), reason: why });
         return forbidden;
+      }
       const remote = relayed || !!seenAt && !isLoopback(seenAt);
       const given = remote ? payload.addrs.filter((a) => !isLoopback(a)) : payload.addrs;
       const addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])];
-      const added = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private };
+      const added = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined };
       const members = token && !token.private ? this.groupPeers().filter((p) => p.key !== from) : [];
       for (const m of members)
         this.sendOrQueue(m, { type: "introduce", member: memberOf(added) }).catch(() => {});
-      this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again: token && "again" in token });
-      return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined });
+      const rejoin = this.rejoinFor(added);
+      const again = !!token && "again" in token;
+      this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again, how: invited ? "introduced" : again ? "came back with its token" : "code" });
+      return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin });
     }
     peer.lastSeen = Date.now();
     this.wakeRetry(peer.key);
@@ -17444,6 +17540,8 @@ ${f.evidence}`).join(`
     const signal = this.abort.signal;
     const headers = { authorization: `Bearer ${this.relaySecret}`, "content-type": "application/json", ...this.opts.relayKey ? { "x-relay-key": this.opts.relayKey } : {} };
     const setState = (state) => {
+      if (JSON.stringify(state) !== JSON.stringify(this.relayState))
+        this.log.write("relay", { state });
       this.relayState = state;
       for (const wake of this.relayWaiters.splice(0))
         wake();
@@ -17497,17 +17595,22 @@ ${f.evidence}`).join(`
     if (isHelloFields(hello)) {
       const remote = relayed || !!seenAt && !isLoopback(seenAt);
       const given = remote ? hello.addrs.filter((a) => !isLoopback(a)) : hello.addrs;
-      peer.addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])];
+      const addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])].slice(0, MAX_ADDRS);
+      const moved = addrs.join() !== peer.addrs.join() || hello.port !== peer.port;
+      this.log.write("hello_in", { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? "relay" : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? hello.port : undefined });
+      peer.addrs = addrs;
       peer.port = hello.port;
       peer.lastAddr = undefined;
       peer.directFailed = false;
     }
+    if (isToken(hello.rejoin))
+      peer.token = hello.rejoin;
     if (hello.back)
       this.emit({ type: "connected", peer: peer.name, again: true, at: now() });
     else
       this.changed();
     this.flush();
-    return { type: "hello_ack", name: this.name };
+    return { type: "hello_ack", name: this.name, rejoin: this.rejoinFor(peer) };
   }
   process(peer, payload) {
     switch (payload.type) {
@@ -17529,6 +17632,8 @@ ${f.evidence}`).join(`
         if (!peer.private)
           this.invite(payload.member, peer.name);
         return { type: "ok" };
+      case "log_request":
+        return { type: "log", entries: this.log.read({ id: peerId(peer.key), lines: typeof payload.lines === "number" ? payload.lines : 100 }) };
       default:
         return null;
     }
@@ -17540,6 +17645,8 @@ ${f.evidence}`).join(`
     if (this.peers.has(peer.key))
       return false;
     this.peers.set(peer.key, peer);
+    this.addedAt.set(peer.key, Date.now());
+    this.log.write("connected", { id: peerId(peer.key), peer: peer.name, how: options.how, via: options.via, addrs: peer.addrs, port: peer.port });
     this.invites.delete(peer.key);
     this.ended = this.ended.filter((e) => e.id !== peerId(peer.key));
     this.save();
@@ -17566,12 +17673,14 @@ ${f.evidence}`).join(`
       invite.trying = true;
       const peer = { key: invite.key, name: invite.name, addrs: invite.addrs, port: invite.port };
       try {
-        const reply = await this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port });
+        const reply = await this.sayHello(peer);
         if (reply.type === "hello_ack" && this.invites.has(invite.key)) {
           peer.name = reply.name;
-          this.addPeer(peer, { emit: true, via: invite.by });
-        }
+          this.addPeer(peer, { emit: true, via: invite.by, how: "introduced" });
+        } else
+          this.forgetGiven(peer);
       } catch {
+        this.forgetGiven(peer);
         invite.nextTry = Date.now() + invite.backoff;
         invite.backoff = Math.min(invite.backoff * 2, this.opts.maxRetryMs);
       } finally {
@@ -17609,6 +17718,10 @@ ${f.evidence}`).join(`
   dropPeer(peer) {
     if (!this.peers.delete(peer.key))
       return;
+    this.log.write("ended", { id: peerId(peer.key), peer: peer.name, by: "the other side's human (close_bridge)" });
+    for (const [token, u] of this.used)
+      if (u.key === peer.key)
+        this.used.delete(token);
     this.outbox = this.outbox.filter((o) => o.peer !== peer.key);
     this.wakeRetry(peer.key);
     const id = peerId(peer.key);
@@ -17694,7 +17807,7 @@ ${f.evidence}`).join(`
           ack = [];
           if (lost) {
             lost = false;
-            this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {});
+            this.sayHello(peer).catch(() => {});
             this.flush();
             this.changed();
           }
@@ -17706,8 +17819,9 @@ ${f.evidence}`).join(`
         } catch (e) {
           if (this.abort.signal.aborted)
             break;
-          if (e instanceof DeliveryError && e.reason === "rejected" && peer.token)
-            await this.deliver(peer, { type: "hello", token: peer.token, name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {});
+          this.noteDown(peer);
+          if (e instanceof DeliveryError && e.reason === "rejected")
+            await this.rejoin(peer);
           peer.lastAddr = undefined;
           if (!lost)
             this.changed();
@@ -17830,10 +17944,10 @@ ${f.evidence}`).join(`
     if (!path || !this.server)
       return;
     try {
-      mkdirSync2(dirname(path), { recursive: true, mode: 448 });
+      mkdirSync3(dirname2(path), { recursive: true, mode: 448 });
       const tmp = `${path}.${process.pid}.tmp`;
       writeFileSync2(tmp, JSON.stringify(this.snapshot()), { mode: 384 });
-      renameSync(tmp, path);
+      renameSync2(tmp, path);
     } catch {}
   }
   takeToken(token, from) {
@@ -17848,9 +17962,139 @@ ${f.evidence}`).join(`
     if (!entry || entry.expires <= Date.now())
       return;
     this.used.set(token, { key: from, private: entry.private });
-    if (this.used.size > MAX_USED)
-      this.used.delete(this.used.keys().next().value);
+    this.trimUsed();
     return entry;
+  }
+  trimUsed() {
+    for (const [token, u] of this.used) {
+      if (this.used.size <= MAX_USED)
+        return;
+      if (!this.peers.has(u.key))
+        this.used.delete(token);
+    }
+  }
+  whyRefused(token, from) {
+    if (!isToken(token))
+      return "it brought no code: this side does not know it (it may have lost its saved state, or joined before 0.7.0)";
+    const used = this.used.get(token);
+    if (used)
+      return used.key === from ? undefined : "that code was already used by another session";
+    const entry = this.tokens.get(token);
+    if (entry)
+      return entry.expires <= Date.now() ? "the code has expired" : undefined;
+    return "unknown code: it was never issued here, or this side was closed by its human and forgot it";
+  }
+  rejoinFor(peer) {
+    if (peer.given && this.used.get(peer.given)?.key === peer.key)
+      return peer.given;
+    const token = randomToken();
+    this.used.set(token, { key: peer.key, private: !!peer.private });
+    peer.given = token;
+    this.trimUsed();
+    this.dirty();
+    return token;
+  }
+  forgetGiven(peer) {
+    if (peer.given && !this.peers.has(peer.key))
+      this.used.delete(peer.given);
+    peer.given = undefined;
+  }
+  noteDown(peer) {
+    const err = peer.lastError;
+    if (err?.kind === "not_recognized" && Date.now() - (this.addedAt.get(peer.key) ?? 0) < 5000)
+      return;
+    const what = `${err?.kind}|${err?.detail}`;
+    const down = this.down.get(peer.key);
+    if (!down || down.what !== what)
+      this.log.write(down ? "still_down" : "link_down", {
+        id: peerId(peer.key),
+        peer: peer.name,
+        kind: err?.kind,
+        detail: err?.detail,
+        addr: err?.addr,
+        tried: [...new Set([...peer.lastAddr ? [peer.lastAddr] : [], ...peer.addrs])],
+        port: peer.port,
+        tries: down?.tries,
+        last_seen: isoOf(peer.lastSeen)
+      });
+    this.down.set(peer.key, { since: down?.since ?? Date.now(), tries: (down?.tries ?? 0) + 1, what });
+  }
+  noteUp(peer, addr) {
+    const down = this.down.get(peer.key);
+    if (!down)
+      return;
+    this.down.delete(peer.key);
+    this.log.write("link_up", { id: peerId(peer.key), peer: peer.name, down_for_s: Math.round((Date.now() - down.since) / 1000), tries: down.tries, addr: isRelayAddr(addr) ? "relay" : addr });
+  }
+  async rejoin(peer) {
+    const last = this.rejoinTried.get(peer.key) ?? 0;
+    if (Date.now() - last < this.opts.retryMs)
+      return;
+    this.rejoinTried.set(peer.key, Date.now());
+    const id = peerId(peer.key);
+    if (!peer.token) {
+      if (!last)
+        this.log.write("cannot_rejoin", { id, peer: peer.name, why: "the other side forgot this session, and this side holds no token for it (connected before 0.7.0). The other side can put in this side's code again, or use a new code" });
+      return;
+    }
+    try {
+      const reply = await this.sayHello(peer, { token: peer.token });
+      if (reply.type === "hello_ack") {
+        if (Date.now() - (this.addedAt.get(peer.key) ?? 0) >= 5000)
+          this.log.write("rejoined", { id, peer: peer.name });
+        this.flush();
+      }
+    } catch {
+      if (!last)
+        this.log.write("rejoin_failed", { id, peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail });
+    }
+  }
+  async sayHello(peer, extra = {}) {
+    const reply = await this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), ...extra });
+    if (reply.type === "hello_ack" && isToken(reply.rejoin)) {
+      peer.token = reply.rejoin;
+      if (this.peers.has(peer.key))
+        this.dirty();
+    }
+    return reply;
+  }
+  watchThisPc() {
+    clearInterval(this.ticker);
+    let last = Date.now();
+    let addrs = this.opts.addrs().join();
+    let n = 0;
+    this.ticker = setInterval(() => {
+      const t = Date.now();
+      if (t - last > PAUSE_MS)
+        this.log.write("this_pc_paused", { for_s: Math.round((t - last) / 1000), what: "this computer was asleep or stopped; nothing could get through meanwhile" });
+      last = t;
+      if (++n % 6 === 0) {
+        const now = this.opts.addrs().join();
+        if (now !== addrs)
+          this.log.write("this_pc_moved", { from: addrs.split(","), to: now.split(",") });
+        addrs = now;
+      }
+    }, TICK_MS);
+    this.ticker.unref?.();
+  }
+  async logs(options = {}) {
+    const lines = Math.min(Math.max(options.lines ?? 100, 1), MAX_LOG_LINES);
+    const peer = options.peer ? await this.resolvePeer(options.peer) : undefined;
+    const mine = this.log.read({ id: peer && peerId(peer.key), lines });
+    if (!options.other)
+      return { file: this.log.path, mine };
+    const targets = peer ? [peer] : [...this.peers.values()];
+    const theirs = await Promise.all(targets.map(async (p) => {
+      try {
+        const reply = await this.deliver(p, { type: "log_request", lines });
+        if (reply.type === "log" && Array.isArray(reply.entries))
+          return { peer: labelOf(p), entries: reply.entries.slice(-lines) };
+        return { peer: labelOf(p), error: "its answer could not be read" };
+      } catch {
+        return { peer: labelOf(p), error: "could not get its log: it cannot be reached now, or it runs a coworker older than 0.7.0. Its human can open its log file instead (list_connections there shows the path)" };
+      }
+    }));
+    return { file: this.log.path, mine, theirs };
   }
   async resolvePeers(to) {
     const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map((n) => n.trim()).filter(Boolean);
@@ -17932,9 +18176,9 @@ ${f.evidence}`).join(`
   async deliverTo(peer, addr, body, timeoutMs) {
     const relayed = isRelayAddr(addr);
     const url = relayed ? addr : `http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`;
-    const failed = (kind) => {
+    const failed = (kind, detail) => {
       if (!this.abort.signal.aborted)
-        peer.lastError = { kind, at: Date.now() };
+        peer.lastError = { kind, at: Date.now(), detail, addr: relayed ? "relay" : addr };
       return null;
     };
     let res;
@@ -17946,18 +18190,18 @@ ${f.evidence}`).join(`
         signal: AbortSignal.any([AbortSignal.timeout(relayed ? Math.max(timeoutMs, this.opts.relayTimeoutMs) : timeoutMs), this.abort.signal])
       });
     } catch (e) {
-      return failed(linkErrorOf(e));
+      return failed(linkErrorOf(e), detailOf(e));
     }
     if (res.status === 403)
-      return failed("not_recognized"), "refused";
+      return failed("not_recognized", "HTTP 403"), "refused";
     if (res.status === 409) {
       const stale = (await res.text().catch(() => "")).startsWith("stale");
       if (stale)
         this.clockDiffers(peer.key);
-      return failed(stale ? "clock" : "bad_answer");
+      return failed(stale ? "clock" : "bad_answer", stale ? "HTTP 409 stale" : "HTTP 409");
     }
     if (!res.ok)
-      return failed("bad_answer");
+      return failed("bad_answer", `HTTP ${res.status}`);
     const sealed = await res.json().catch(() => null);
     if (sealed?.from !== peer.key)
       return failed("bad_answer");
@@ -17971,6 +18215,7 @@ ${f.evidence}`).join(`
       return failed(fresh === "stale" ? "clock" : "bad_answer");
     peer.lastSeen = Date.now();
     peer.lastError = undefined;
+    this.noteUp(peer, addr);
     this.wakeRetry(peer.key);
     return reply;
   }
@@ -17978,8 +18223,10 @@ ${f.evidence}`).join(`
     const last = this.clockOff.get(key);
     this.clockOff.set(key, Date.now());
     const peer = this.peers.get(key);
-    if (peer && (!last || Date.now() - last > 60 * 60000))
+    if (peer && (!last || Date.now() - last > 60 * 60000)) {
+      this.log.write("clock_differs", { id: peerId(key), peer: peer.name, what: "the two clocks differ by more than two hours, so envelopes are refused" });
       this.emit({ type: "clock", peer: peer.name, fix: CLOCK_FIX, at: now() });
+    }
   }
   async sendOrQueue(peer, payload, thread) {
     const skipDirect = peer.directFailed && this.isPulling(peer);
@@ -17988,8 +18235,10 @@ ${f.evidence}`).join(`
         await this.deliver(peer, payload);
         peer.directFailed = false;
         return "delivered";
-      } catch {
+      } catch (e) {
         peer.directFailed = true;
+        if (e instanceof DeliveryError && e.reason === "rejected")
+          this.rejoin(peer);
       }
     }
     if (this.isPulling(peer))
@@ -18009,6 +18258,7 @@ ${f.evidence}`).join(`
           continue;
         const peer = this.peers.get(item.peer);
         const drop = (reason) => {
+          this.log.write("undelivered", { id: peerId(item.peer), reason });
           this.outbox = this.outbox.filter((o) => o !== item);
           this.emit({ type: "undelivered", to: peer?.name ?? "disconnected session", thread: item.thread, reason, at: now() });
         };
@@ -18024,8 +18274,10 @@ ${f.evidence}`).join(`
           await this.deliver(peer, item.payload);
           this.outbox = this.outbox.filter((o) => o !== item);
           this.dirty();
-        } catch {
+        } catch (e) {
           blocked.add(item.peer);
+          if (e instanceof DeliveryError && e.reason === "rejected")
+            this.rejoin(peer);
         }
       }
     } finally {
@@ -18069,7 +18321,7 @@ ${log.join(`
 
 `);
     try {
-      mkdirSync2(dir, { recursive: true, mode: 448 });
+      mkdirSync3(dir, { recursive: true, mode: 448 });
       writeFileSync2(path, `${text}
 `, { mode: 384 });
       return path;
@@ -18085,7 +18337,7 @@ ${log.join(`
     if (!path)
       return;
     try {
-      mkdirSync2(join2(this.opts.home, "bridges"), { recursive: true, mode: 448 });
+      mkdirSync3(join2(this.opts.home, "bridges"), { recursive: true, mode: 448 });
       const state = { name: this.name, port: this.port, pid: process.pid, addrs: this.addrs(), code: this.lastCode, updatedAt: now() };
       writeFileSync2(path, JSON.stringify(state, null, 2), { mode: 384 });
     } catch {}
@@ -18101,7 +18353,7 @@ ${log.join(`
 var savedPath = (home, id) => join3(home, "sessions", `${id.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 function readSaved(path) {
   try {
-    const saved = JSON.parse(readFileSync(path, "utf8"));
+    const saved = JSON.parse(readFileSync2(path, "utf8"));
     return isSavedBridge(saved) ? saved : undefined;
   } catch {
     return;
@@ -18176,7 +18428,7 @@ function pruneSaved(home) {
   for (const name of names) {
     const path = join3(dir, name);
     try {
-      if (name.endsWith(".tmp") && Date.now() - statSync(path).mtimeMs > 60000)
+      if (name.endsWith(".tmp") && Date.now() - statSync2(path).mtimeMs > 60000)
         rmSync3(path, { force: true });
     } catch {}
   }
@@ -19002,7 +19254,7 @@ import { platform as platform4 } from "os";
 import { basename, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.6.0";
+var version2 = "0.7.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26546,7 +26798,7 @@ var EMPTY_COMPLETION_RESULT = {
 import { randomUUID as randomUUID2 } from "crypto";
 
 // src/hint.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3 } from "fs";
 import { join as join4 } from "path";
 var HINT = [
   "coworker: \uB3D9\uB8CC\uAC00 \uBCF4\uB0B8 \uC9C8\uBB38\uC774 \uC774 \uC138\uC158\uC5D0 \uBC14\uB85C \uB4E4\uC5B4\uC624\uAC8C \uD558\uB824\uBA74 Claude Code\uB97C \uC774\uB807\uAC8C \uCF1C\uC138\uC694.",
@@ -26556,9 +26808,9 @@ var HINT = [
 `);
 function firstTimeHint(home) {
   const seen = join4(home, "hint-shown");
-  if (existsSync2(seen))
+  if (existsSync3(seen))
     return;
-  mkdirSync3(home, { recursive: true });
+  mkdirSync4(home, { recursive: true });
   writeFileSync3(seen, `${new Date().toISOString()}
 `);
   return HINT;
@@ -26575,7 +26827,7 @@ function waitSeconds(requested, codex) {
 import { rmSync as rmSync5 } from "fs";
 
 // src/update.ts
-import { closeSync, mkdirSync as mkdirSync4, openSync, renameSync as renameSync2, rmSync as rmSync4, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
+import { closeSync, mkdirSync as mkdirSync5, openSync, renameSync as renameSync3, rmSync as rmSync4, statSync as statSync3, writeFileSync as writeFileSync4 } from "fs";
 import { join as join5 } from "path";
 var MARKETPLACE = "ai-coworker-without-me";
 var PLUGIN = `coworker@${MARKETPLACE}`;
@@ -26689,7 +26941,7 @@ async function appUpdate(script, current, home, deps = {}) {
       return;
     }) !== latest)
       return;
-    renameSync2(tmp, script);
+    renameSync3(tmp, script);
     return { to: latest };
   } finally {
     rmSync4(tmp, { force: true });
@@ -26702,12 +26954,12 @@ function command(name) {
 function lock(home) {
   const path = join5(home, "update.lock");
   try {
-    mkdirSync4(home, { recursive: true, mode: 448 });
+    mkdirSync5(home, { recursive: true, mode: 448 });
     closeSync(openSync(path, "wx"));
     return () => rmSync4(path, { force: true });
   } catch {
     try {
-      if (Date.now() - statSync2(path).mtimeMs > STALE_LOCK_MS) {
+      if (Date.now() - statSync3(path).mtimeMs > STALE_LOCK_MS) {
         rmSync4(path, { force: true });
         closeSync(openSync(path, "wx"));
         return () => rmSync4(path, { force: true });
@@ -27075,7 +27327,9 @@ function createSession(opts) {
 
   A connection ends only when a human ends it
   - Only close_bridge (on either side, when a human says so) ends a connection. Anything else is temporary: a computer asleep or turned off, a move to another network or VPN, a restart, a timeout, an error. Both sides keep reconnecting by themselves, with no limit on tries or time, and send what waited, in order, once they are back. Nobody needs a new code.
+  - Either side can bring a connection back: each side holds a token the other gave it, so if one side forgot the other (it lost its saved state, or an older version dropped it), the other side gets back in by itself.
   - list_connections shows each connection's state: "connected", or "reconnecting" with last_seen, last_error (what failed) and next_try. A connection the other side's human closed is listed under ended.
+  - If a connection broke and nobody knows why, call connection_log. It shows, from both sides when the other side can be reached, when the link went down and came back, what failed each time, whether a computer was asleep, and whether its address changed. It holds no message text. Give your human the summary and the log file path, so they can pass it on.
   - To wait a long time, keep the computer awake (on a Mac, run caffeinate -i in a terminal and leave it open). A computer that sleeps does not lose the connection, but nothing gets through until it wakes.`;
   const LISTENING = channel ? `Stay open until your human says stop
   - In this session, what the other side sends comes in by itself as a <channel> notice from coworker: a connection, a question, an answer, a note that they are asking their human, or them leaving. Do not call wait_for_message. Handle each notice, then end your turn; the next one arrives on its own.
@@ -27488,7 +27742,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("list_connections", {
     title: "List connections",
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
+    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, the connection log file, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
     inputSchema: {}
   }, tool(async () => {
     const earlier = await earlierBridges();
@@ -27499,6 +27753,22 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       viewer: viewer?.url,
       listen_command: getBridge().isOpen ? listenCommand() : undefined,
       earlier_bridges: earlier.length ? earlier : undefined
+    };
+  }));
+  server.registerTool("connection_log", {
+    title: "Connection log",
+    annotations: { readOnlyHint: true, openWorldHint: true },
+    description: "When a connection broke and the reason is not clear: show the connection log. It lists when each link went down and came back, what failed (kind and the system error), the addresses tried, sessions refused and why, and when this computer was asleep or moved to another network. It holds no message text. By default it also asks the other side, if it can be reached now, for its lines about this connection.",
+    inputSchema: {
+      peer: string2().optional().describe("Only the lines about this session (name or [id]). Leave it out for all."),
+      lines: number2().int().min(1).max(300).optional().describe("How many of the latest lines. Default 100."),
+      other_side: boolean2().optional().describe("Also ask the other side for its lines about this connection. Default true.")
+    }
+  }, tool(async ({ peer, lines, other_side }) => {
+    const log = await getBridge().logs({ peer, lines, other: other_side ?? true });
+    return {
+      ...log,
+      next: `Tell your human in a few lines what the log shows: when the link went down, what failed, and whether a computer was asleep or changed its address. Give them the log file path${log.file ? ` (${log.file})` : ""}, and say they can send that file on if the cause is still not clear.`
     };
   }));
   server.registerTool("send_question", {
