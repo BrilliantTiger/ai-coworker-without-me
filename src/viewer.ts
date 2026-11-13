@@ -183,6 +183,11 @@ export class Viewer {
 // 내용은 AI가 inbox 로 읽는다. 아무 일도 없으면 아무것도 돌려주지 않아 명령이 계속 기다린다.
 const LISTENING_ITSELF = 'coworker: this session is listening by itself now. Nothing to do.'
 
+// 다시 켠 뒤 깨우는 한 줄은 이것으로 시작한다. 훅은 코드 2로 끝나야 AI를 깨우는데, Claude Code 는 코드 2로 끝난 훅을
+// 언제나 실패(error)로 기록한다(2.1.323). 그래서 Orca 같은 화면은 이 한 줄을 빨간 「hook failed」 상자에 넣는다(2026-11-13).
+// 그 상자를 본 사람이 고장으로 여기지 않게, 맨 앞에서 오류가 아니라고 먼저 말한다.
+export const AFTER_RESTART = 'coworker: not an error.'
+
 export function newsLine(events: readonly BridgeEvent[], open: boolean, when: 'listening' | 'after-restart' = 'listening'): string | undefined {
   if (events.length) {
     const counts = new Map<string, number>()
@@ -192,7 +197,7 @@ export function newsLine(events: readonly BridgeEvent[], open: boolean, when: 'l
     }
     const list = [...counts].map(([what, n]) => `${n} ${what}`).join(', ')
     if (when === 'after-restart')
-      return `coworker: new for this session (${list}). It arrived after this session restarted, while nothing was listening. Call the coworker inbox tool to read and handle it, then start listening in the background again with the listen_command it gives.`
+      return `${AFTER_RESTART} New for this session (${list}) arrived after it restarted, while nothing was listening, so coworker woke it. Claude Code shows this as a failed hook only because waking needs exit code 2. Call the coworker inbox tool to read and handle it, then start listening in the background again with the listen_command it gives.`
     return `coworker: new for this session (${list}). Call the coworker inbox tool to read it and handle it, then run this listen command in the background again.`
   }
   if (!open) return "coworker: this session's bridge is closed, so there is nothing to listen for. Do not run this command again."

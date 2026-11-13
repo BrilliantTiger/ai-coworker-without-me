@@ -1,4 +1,5 @@
 import { readSaved, savedPath } from './resume'
+import { AFTER_RESTART } from './viewer'
 
 // Claude Code 세션을 다시 켰을 때(resume) 플러그인의 세션 시작 훅이 띄우는 명령이다.
 // 채널 없이 켠 세션은 AI가 걸어 둔 백그라운드 대기 명령이 끝나야 깨는데, 다시 켜면 그 명령이 사라진다.
@@ -23,7 +24,7 @@ export async function wake(home: string, input: string): Promise<number> {
         const res = await fetch(`http://127.0.0.1:${saved.viewer.port}/${saved.viewer.token}/wake`)
         if (res.ok) {
           const text = (await res.text()).trim()
-          if (text.startsWith('coworker: new for this session')) {
+          if (text.startsWith(AFTER_RESTART)) {
             process.stderr.write(`${text}\n`)
             return 2
           }

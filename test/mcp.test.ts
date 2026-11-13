@@ -616,7 +616,7 @@ test('a restarted Claude Code session is woken by its plugin hook when a message
 
   await codex('send_question', { question: '재시작한 뒤에도 받나요?' })
   expect(await hook.exited).toBe(2)
-  expect(await new Response(hook.stderr).text()).toMatch(/^coworker: new for this session \(1 question\)\. It arrived after this session restarted/)
+  expect(await new Response(hook.stderr).text()).toMatch(/^coworker: not an error\. New for this session \(1 question\) arrived after it restarted/)
   // 깨어난 AI는 받은 글함에서 그 질문을 읽는다.
   expect((await again('inbox')).events).toEqual([expect.objectContaining({ kind: 'question', text: '재시작한 뒤에도 받나요?' })])
 }, 30_000)
@@ -667,7 +667,7 @@ test('questions that piled up before the restart wake the AI as soon as the sess
   const hook = wakeHook(own, 'wake-piled', env.CLAUDE_PLUGIN_ROOT)
   expect(await hook.exited).toBe(2)
   expect(Date.now() - started).toBeLessThan(5000)
-  expect(await new Response(hook.stderr).text()).toMatch(/^coworker: new for this session \(\d+ question\)/)
+  expect(await new Response(hook.stderr).text()).toMatch(/^coworker: not an error\. New for this session \(\d+ question\)/)
   const texts: string[] = []
   for (let i = 0; i < 20 && texts.length < 2; i++) {
     texts.push(...(await again('inbox')).events.filter((e: { kind?: string }) => e.kind === 'question').map((e: { text: string }) => e.text))
