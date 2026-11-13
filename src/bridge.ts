@@ -8,6 +8,7 @@ import { fromB64, newKeyPair, open, randomToken, ReplayGuard, seal, toB64, type 
 import { hostForUrl, localAddresses } from './net'
 import { boxOf } from './box'
 import { assertNoSecrets } from './secrets'
+import { LinkLog, MAX_LOG_LINES, type LogEntry } from './linklog'
 
 // 사내 방화벽에 열어 달라고 요청하기 쉽게 정해 둔 범위.
 export const DEFAULT_PORTS: [number, number] = [7700, 7799]
@@ -36,13 +37,14 @@ const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' |
 export const isRelayAddr = (addr: string) => /^https?:\/\//.test(addr)
 
 // 상대에게 닿지 못한 까닭. no_route: 그 주소로 가는 길이 없다(꺼짐, 잠자기, 다른 네트워크로 옮김).
-// refused: 그 PC는 있지만 그 포트에서 브릿지가 받지 않는다. timeout: 정한 시간 안에 답이 없다.
+// refused: 그 PC는 있지만 그 포트에서 브릿지가 받지 않는다. cut: 이어져 있다가 도중에 끊겼다. timeout: 정한 시간 안에 답이 없다.
 // not_recognized: 브릿지는 답했지만 이 세션을 모른다고 한다. bad_answer: 알아볼 수 없는 답이 왔다.
 // clock: 브릿지는 답했지만 두 PC의 시계가 너무 달라 서로의 봉투를 받지 않는다.
-export type LinkError = 'no_route' | 'refused' | 'timeout' | 'not_recognized' | 'bad_answer' | 'clock'
+export type LinkError = 'no_route' | 'refused' | 'cut' | 'timeout' | 'not_recognized' | 'bad_answer' | 'clock'
 const LINK_ERRORS: Record<LinkError, string> = {
   no_route: 'no route to it: it is asleep, turned off, or on another network',
   refused: 'its computer answered, but no bridge is listening on that port: coworker there is restarting or stopped',
+  cut: 'the connection was cut while it was open: coworker there stopped, or the network dropped',
   timeout: 'no answer in time',
   not_recognized: 'its bridge answered but does not know this session; this side keeps offering the code it joined with',
   bad_answer: 'an answer came back that could not be read',
@@ -52,7 +54,8 @@ const LINK_ERRORS: Record<LinkError, string> = {
 // directFailed: 이쪽에서 상대로 바로 보내지 못했다. lastPollAt: 상대가 메시지를 가져가려고 마지막으로 접속한 때.
 // private: 개인용 코드로 이어진 상대. 그룹의 다른 세션에 소개하지 않고, 이 상대가 소개하는 세션도 받지 않는다.
 // lastSeen: 상대에게서 마지막으로 무엇이든 받은 때. lastError: 마지막으로 닿지 못한 까닭. retryAt: 다음에 다시 붙어 볼 때.
-// token: 이쪽이 상대의 연결 코드로 들어갈 때 쓴 토큰. 상대가 이쪽을 잊었으면 이것을 들고 다시 들어간다.
+// token: 상대가 이쪽을 잊었을 때 들고 다시 들어갈 토큰. 상대의 연결 코드에 있던 것이거나, 상대가 인사하며 건넨 것이다.
+// given: 이쪽이 상대에게 건넨 토큰. 이쪽이 상대를 잊어도 상대가 이것을 들고 다시 들어온다. 그래서 어느 쪽에서든 다시 붙는다.
 export type Peer = {
   key: string
   name: string
@@ -63,9 +66,10 @@ export type Peer = {
   lastPollAt?: number
   private?: boolean
   lastSeen?: number
-  lastError?: { kind: LinkError; at: number }
+  lastError?: { kind: LinkError; at: number; detail?: string; addr?: string }
   retryAt?: number
   token?: string
+  given?: string
 }
 
 // 상대 쪽 사람이 브릿지를 닫아 끝난 연결. 연결을 끝내는 것은 사람뿐이라서, 끝난 것은 이것만 남는다.
@@ -182,8 +186,9 @@ export type AgreementInput = {
 // hello 는 연결 코드의 토큰을 들고 오거나, 그룹 안의 누군가가 이쪽에 소개해 둔 세션이 토큰 없이 온다.
 // 이미 이어진 상대도 주소나 포트가 바뀌면 hello 로 알린다. back 은 그 상대가 다시 켜져 돌아왔다는 뜻이다.
 type Payload =
-  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean }
-  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean }
+  // rejoin: 받는 쪽이 보내는 쪽을 잊었다가 다시 붙을 때 들고 올 토큰. 보내는 쪽이 받는 쪽 키에만 쓰이게 만들어 건넨다.
+  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean; rejoin?: string }
+  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean; rejoin?: string }
   | { type: 'introduce'; member: Member }
   | { type: 'msg'; msg: WireMessage }
   | { type: 'ok' }
@@ -195,6 +200,9 @@ type Payload =
   // 같은 PC의 다른 세션이 이 브릿지를 이어받는다. 이 브릿지의 비밀키로 봉인해 보내므로, 저장한 상태를 읽을 수 있는 쪽만 보낼 수 있다.
   | { type: 'handover' }
   | { type: 'handover_ok' }
+  // 끊긴 까닭을 함께 보려고 상대의 연결 기록 가운데 이쪽에 관한 줄을 달라고 한다. 메시지 내용은 기록에 없다.
+  | { type: 'log_request'; lines?: number }
+  | { type: 'log'; entries: LogEntry[] }
 
 // 상대가 가져간 뒤 「받았다」고 알려 와야 줄에서 지운다. 가져가던 연결이 끊겨도 다음에 다시 넘긴다.
 export type Outgoing = { id: string; peer: string; payload: Payload; thread?: string; since: number }
@@ -324,17 +332,28 @@ const whereIs = (p: Peer) => {
   return addr ? placeOf(addr, p.port) : undefined
 }
 // 보내다 실패한 까닭을 가린다. 시간 초과, 포트에서 받지 않음, 나머지(주소를 찾지 못함, 길이 없음)는 길 없음이다.
+const detailOf = (e: unknown) => {
+  const err = e as { name?: string; code?: string | number; message?: string } | undefined
+  // 시간 초과는 code 가 숫자(23)라서 이름을 쓴다.
+  const name = err?.name === 'TimeoutError' || err?.name === 'AbortError' ? err.name : undefined
+  return String(name ?? err?.code ?? err?.name ?? err?.message ?? e).slice(0, 120)
+}
+const isToken = (t: unknown): t is string => typeof t === 'string' && t.length > 0 && t.length <= 200
 const linkErrorOf = (e: unknown): LinkError => {
   const err = e as { name?: string; code?: string } | undefined
   if (err?.name === 'TimeoutError') return 'timeout'
   if (err?.code === 'ECONNREFUSED' || err?.code === 'ConnectionRefused') return 'refused'
+  if (err?.code === 'ECONNRESET' || err?.code === 'EPIPE' || err?.code === 'ECONNABORTED' || err?.code === 'ConnectionClosed') return 'cut'
   return 'no_route'
 }
 const isoOf = (ms: number | undefined) => (ms ? new Date(ms).toISOString() : undefined)
 // 기억해 두는 「쓴 코드」와 「끝난 연결」의 수.
 const MAX_USED = 500
 const MAX_ENDED = 20
-const savedPeer = (p: Peer) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token })
+const savedPeer = (p: Peer) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given })
+// 이 PC가 잠들었다고 보는 시계의 빈틈. 5초마다 재는데 이만큼 넘게 비면 그동안 멈춰 있었다.
+const TICK_MS = 5000
+const PAUSE_MS = 30_000
 
 export class Bridge {
   readonly keys: KeyPair
@@ -352,6 +371,14 @@ export class Bridge {
   private ended: Ended[] = []
   // 상대마다 다시 붙기를 기다리는 중이면, 그 기다림을 바로 끝내는 함수.
   private retryWakers = new Map<string, () => void>()
+  // 연결 기록. 홈 폴더가 없으면(시험) 남기지 않는다.
+  readonly log: LinkLog
+  private ticker?: ReturnType<typeof setInterval>
+  private stopReason?: string
+  private rejoinTried = new Map<string, number>()
+  // 닿지 않는 상대. 언제부터, 몇 번 실패했는지, 마지막으로 기록한 까닭.
+  private down = new Map<string, { since: number; tries: number; what: string }>()
+  private addedAt = new Map<string, number>()
   private invites = new Map<string, Invite>()
   private closedAsks = new Map<string, string>()
   private seen = new Set<string>()
@@ -410,6 +437,7 @@ export class Bridge {
       ...options,
       relay: options.relay?.trim().replace(/\/+$/, '') || undefined,
     }
+    this.log = new LinkLog(this.opts.home ? join(this.opts.home, 'logs', `${this.route}.log`) : undefined)
   }
 
   // 저장해 둔 세션을 같은 키로 되살린다. 전에 쓰던 포트가 비어 있으면 그 포트로 연다.
@@ -424,7 +452,8 @@ export class Bridge {
         port: p.port,
         private: p.private || undefined,
         lastSeen: typeof p.lastSeen === 'number' ? p.lastSeen : undefined,
-        token: typeof p.token === 'string' ? p.token : undefined,
+        token: isToken(p.token) ? p.token : undefined,
+        given: isToken(p.given) ? p.given : undefined,
       })
     for (const t of saved.threads) b.threads.set(t.id, t)
     b.outbox = saved.outbox.filter(o => b.peers.has(o.peer))
@@ -442,8 +471,9 @@ export class Bridge {
     } catch {
       b.open()
     }
+    b.log.write('restored', { name: b.name, peers: b.peers.size, queued: b.outbox.length })
     for (const peer of b.peers.values()) {
-      void b.deliver(peer, { type: 'hello', name: b.name, addrs: b.addrs(), port: b.port, back: true }).catch(() => {})
+      void b.sayHello(peer, { back: true }).catch(() => {})
       void b.pollLoop(peer.key)
     }
     return b
@@ -530,6 +560,8 @@ export class Bridge {
       void this.tryInvites()
     }, this.opts.retryMs)
     this.timer.unref?.()
+    this.log.write('open', { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay })
+    this.watchThisPc()
     this.writeState()
     this.changed()
     // 열자마자 한 번은 바로 저장한다. 이 세션이 곧바로 꺼져도 다시 켜거나 다른 세션이 이어받을 수 있다.
@@ -562,25 +594,33 @@ export class Bridge {
       known.addrs = [...new Set([...known.addrs, ...code.addrs])].slice(0, MAX_ADDRS)
       known.token ??= code.token
       this.wakeRetry(known.key)
-      await this.deliver(known, { type: 'hello', token: known.token, name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {})
+      this.log.write('code_again', { id: peerId(known.key), peer: known.name })
+      await this.sayHello(known, { token: known.token }).catch(() => {})
       this.dirty()
       return known
     }
     const peer: Peer = { key: code.key, name: code.name, addrs: code.addrs, port: code.port, token: code.token }
     let reply: Payload
     try {
-      reply = await this.deliver(peer, { type: 'hello', token: code.token, name: this.name, addrs: this.addrs(), port: this.port })
+      reply = await this.sayHello(peer, { token: code.token })
     } catch (e) {
+      this.forgetGiven(peer)
+      this.log.write('connect_failed', { id: peerId(peer.key), peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail, addrs: peer.addrs, port: peer.port })
       if (e instanceof DeliveryError && e.reason === 'rejected')
         throw new Error('the other session refused this code; it was already used, expired, or that bridge was reopened. Ask for a new code')
       if (this.clockOff.has(code.key))
         throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`)
       throw new Error(`cannot reach ${code.name} at ${code.addrs.join(', ')} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`)
     }
-    if (reply.type !== 'hello_ack') throw new Error('unexpected answer from the other session')
+    if (reply.type !== 'hello_ack') {
+      this.forgetGiven(peer)
+      throw new Error('unexpected answer from the other session')
+    }
     peer.name = reply.name
     peer.private = !!reply.private
-    this.addPeer(peer)
+    peer.token ??= code.token
+    if (peer.given) this.used.set(peer.given, { key: peer.key, private: peer.private })
+    this.addPeer(peer, { how: 'code' })
     if (!peer.private) for (const m of Array.isArray(reply.members) ? reply.members : []) this.invite(m, peer.name)
     return peer
   }
@@ -770,12 +810,12 @@ export class Bridge {
               : undefined,
           queued: this.outbox.filter(o => o.peer === peer.key).length,
           last_seen: isoOf(peer.lastSeen),
-          last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], at: isoOf(error.at) } : undefined,
+          last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
           next_try: reachable ? undefined : (isoOf(peer.retryAt) ?? 'now'),
         }
       }),
     )
-    return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined }
+    return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined, log: this.log.path }
   }
 
   threadSummaries() {
@@ -827,6 +867,9 @@ export class Bridge {
 
   // 알리지 않고 바로 닫는다. 프로세스가 끝날 때 쓴다. 그때는 다시 켤 때를 위해 상태를 남긴다.
   shutdown() {
+    if (this.server) this.log.write('closed', { by: this.forget ? 'this side\'s human (close_bridge)' : (this.stopReason ?? 'the process stopped; it comes back on restart') })
+    this.stopReason = undefined
+    clearInterval(this.ticker)
     clearTimeout(this.saveTimer)
     this.saveTimer = undefined
     if (this.opts.saveTo) {
@@ -892,6 +935,7 @@ export class Bridge {
     // 같은 PC의 다른 세션이 이어받는다. 상태를 저장하고 멈춘다. 답을 보낸 뒤에 멈춰야 답이 간다.
     if (from === this.key && payload.type === 'handover' && this.server) {
       this.emit({ type: 'moved', at: now() })
+      this.stopReason = 'another session on this PC took over this bridge'
       this.save()
       setTimeout(() => {
         this.shutdown()
@@ -905,18 +949,24 @@ export class Bridge {
       if (payload.type !== 'hello' || !isHelloFields(payload)) return forbidden
       const invite = this.invites.get(from)
       const invited = !!invite
+      const why = invited ? undefined : this.whyRefused(payload.token, from)
       const token = invited ? undefined : this.takeToken(payload.token, from)
-      if (!invited && !token) return forbidden
+      if (!invited && !token) {
+        this.log.write('refused_stranger', { id: peerId(from), peer: payload.name.slice(0, MAX_NAME), from: seenAt ?? (relayed ? 'relay' : undefined), reason: why })
+        return forbidden
+      }
       // 다른 PC에서 왔으면 상대가 적어 보낸 127.0.0.1 은 이 PC를 가리키므로 뺀다. 중계 서버로 온 것도 다른 PC로 본다.
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
-      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private }
+      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined }
       // 그룹 코드로 들어왔으면, 이쪽 그룹의 다른 세션과 서로 소개한다. 소개받아 온 세션은 더 퍼뜨리지 않는다.
       const members = token && !token.private ? this.groupPeers().filter(p => p.key !== from) : []
       for (const m of members) void this.sendOrQueue(m, { type: 'introduce', member: memberOf(added) }).catch(() => {})
-      this.addPeer(added, { emit: true, via: invited ? invite!.by : undefined, again: token && 'again' in token })
-      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined })
+      const rejoin = this.rejoinFor(added)
+      const again = !!token && 'again' in token
+      this.addPeer(added, { emit: true, via: invited ? invite!.by : undefined, again, how: invited ? 'introduced' : again ? 'came back with its token' : 'code' })
+      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin })
     }
 
     // 상대에게서 무엇이든 왔으면 상대는 깨어 있다. 다시 붙기를 기다리던 중이면 바로 다시 붙어 본다.
@@ -945,6 +995,7 @@ export class Bridge {
     const signal = this.abort.signal
     const headers = { authorization: `Bearer ${this.relaySecret}`, 'content-type': 'application/json', ...(this.opts.relayKey ? { 'x-relay-key': this.opts.relayKey } : {}) }
     const setState = (state: RelayState) => {
+      if (JSON.stringify(state) !== JSON.stringify(this.relayState)) this.log.write('relay', { state })
       this.relayState = state
       for (const wake of this.relayWaiters.splice(0)) wake()
     }
@@ -999,15 +1050,20 @@ export class Bridge {
     if (isHelloFields(hello)) {
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? hello.addrs.filter(a => !isLoopback(a)) : hello.addrs
-      peer.addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
+      const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])].slice(0, MAX_ADDRS)
+      const moved = addrs.join() !== peer.addrs.join() || hello.port !== peer.port
+      this.log.write('hello_in', { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? 'relay' : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? hello.port : undefined })
+      peer.addrs = addrs
       peer.port = hello.port
       peer.lastAddr = undefined
       peer.directFailed = false
     }
+    // 상대가 건넨 토큰은 늘 새것으로 바꿔 둔다. 이쪽을 잊은 상대에게 다시 들어갈 때 그것을 든다.
+    if (isToken(hello.rejoin)) peer.token = hello.rejoin
     if (hello.back) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
     else this.changed()
     void this.flush()
-    return { type: 'hello_ack', name: this.name }
+    return { type: 'hello_ack', name: this.name, rejoin: this.rejoinFor(peer) }
   }
 
   // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
@@ -1030,6 +1086,9 @@ export class Bridge {
         // 개인용 코드로 이어진 상대가 소개하는 세션은 받지 않는다.
         if (!peer.private) this.invite(payload.member, peer.name)
         return { type: 'ok' }
+      case 'log_request':
+        // 이 상대에 관한 줄과 이 PC 전체에 관한 줄만 준다. 다른 상대에 관한 줄은 주지 않는다.
+        return { type: 'log', entries: this.log.read({ id: peerId(peer.key), lines: typeof payload.lines === 'number' ? payload.lines : 100 }) }
       default:
         return null
     }
@@ -1040,9 +1099,11 @@ export class Bridge {
   }
 
   // 새로 이어진 상대를 등록한다. 양쪽이 동시에 인사해 이미 등록돼 있으면 아무것도 하지 않는다.
-  private addPeer(peer: Peer, options: { emit?: boolean; via?: string; again?: boolean } = {}) {
+  private addPeer(peer: Peer, options: { emit?: boolean; via?: string; again?: boolean; how?: string } = {}) {
     if (this.peers.has(peer.key)) return false
     this.peers.set(peer.key, peer)
+    this.addedAt.set(peer.key, Date.now())
+    this.log.write('connected', { id: peerId(peer.key), peer: peer.name, how: options.how, via: options.via, addrs: peer.addrs, port: peer.port })
     this.invites.delete(peer.key)
     this.ended = this.ended.filter(e => e.id !== peerId(peer.key))
     // 바로 저장한다. 연결하자마자 프로세스가 죽어도 다시 켜면 이 상대에게 다시 붙는다.
@@ -1070,12 +1131,13 @@ export class Bridge {
         const peer: Peer = { key: invite.key, name: invite.name, addrs: invite.addrs, port: invite.port }
         try {
           // 상대가 아직 소개를 못 받았으면 거절한다. 그때는 조금 뒤에 다시 인사한다.
-          const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port })
+          const reply = await this.sayHello(peer)
           if (reply.type === 'hello_ack' && this.invites.has(invite.key)) {
             peer.name = reply.name
-            this.addPeer(peer, { emit: true, via: invite.by })
-          }
+            this.addPeer(peer, { emit: true, via: invite.by, how: 'introduced' })
+          } else this.forgetGiven(peer)
         } catch {
+          this.forgetGiven(peer)
           invite.nextTry = Date.now() + invite.backoff
           invite.backoff = Math.min(invite.backoff * 2, this.opts.maxRetryMs)
         } finally {
@@ -1119,6 +1181,9 @@ export class Bridge {
   // 상대 쪽 사람이 브릿지를 닫아 「끝」을 알려 왔다. 연결이 끝나는 것은 이때뿐이다.
   private dropPeer(peer: Peer) {
     if (!this.peers.delete(peer.key)) return
+    this.log.write('ended', { id: peerId(peer.key), peer: peer.name, by: 'the other side\'s human (close_bridge)' })
+    // 사람이 끝낸 연결이다. 그 상대가 들고 있는 토큰으로는 다시 들어오지 못한다. 다시 이으려면 새 코드가 있어야 한다.
+    for (const [token, u] of this.used) if (u.key === peer.key) this.used.delete(token)
     this.outbox = this.outbox.filter(o => o.peer !== peer.key)
     this.wakeRetry(peer.key)
     const id = peerId(peer.key)
@@ -1209,7 +1274,7 @@ export class Bridge {
           ack = []
           if (lost) {
             lost = false
-            void this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {})
+            void this.sayHello(peer).catch(() => {})
             void this.flush()
             this.changed()
           }
@@ -1221,8 +1286,8 @@ export class Bridge {
         } catch (e) {
           if (this.abort.signal.aborted) break
           // 상대가 이쪽을 모른다고 하면(막 연결된 직후이거나, 상대가 이쪽을 잊었다) 처음 들어갈 때 쓴 코드를 다시 들고 간다.
-          if (e instanceof DeliveryError && e.reason === 'rejected' && peer.token)
-            await this.deliver(peer, { type: 'hello', token: peer.token, name: this.name, addrs: this.addrs(), port: this.port }).catch(() => {})
+          this.noteDown(peer)
+          if (e instanceof DeliveryError && e.reason === 'rejected') await this.rejoin(peer)
           peer.lastAddr = undefined
           if (!lost) this.changed()
           lost = true
@@ -1369,8 +1434,147 @@ export class Bridge {
     this.dirty()
     if (!entry || entry.expires <= Date.now()) return undefined
     this.used.set(token, { key: from, private: entry.private })
-    if (this.used.size > MAX_USED) this.used.delete(this.used.keys().next().value!)
+    this.trimUsed()
     return entry
+  }
+
+  // 기억해 둔 토큰이 너무 많으면 오래된 것부터 지운다. 지금 이어진 상대의 토큰은 지우지 않는다.
+  private trimUsed() {
+    for (const [token, u] of this.used) {
+      if (this.used.size <= MAX_USED) return
+      if (!this.peers.has(u.key)) this.used.delete(token)
+    }
+  }
+
+  // 들어오지 못할 까닭. 토큰을 쓰기 전에 보고, 기록에만 쓴다. 들어올 수 있으면 undefined.
+  private whyRefused(token: unknown, from: string) {
+    if (!isToken(token)) return 'it brought no code: this side does not know it (it may have lost its saved state, or joined before 0.7.0)'
+    const used = this.used.get(token)
+    if (used) return used.key === from ? undefined : 'that code was already used by another session'
+    const entry = this.tokens.get(token)
+    if (entry) return entry.expires <= Date.now() ? 'the code has expired' : undefined
+    return 'unknown code: it was never issued here, or this side was closed by its human and forgot it'
+  }
+
+  // 상대가 이쪽을 잊었다가 다시 들어올 때 들 토큰. 상대 키에만 쓰인다. 한 상대에 하나만 만들어 두고 다시 준다.
+  private rejoinFor(peer: Peer) {
+    if (peer.given && this.used.get(peer.given)?.key === peer.key) return peer.given
+    const token = randomToken()
+    this.used.set(token, { key: peer.key, private: !!peer.private })
+    peer.given = token
+    this.trimUsed()
+    this.dirty()
+    return token
+  }
+
+  // 이어지지 못한 상대에게 건넨 토큰은 지운다.
+  private forgetGiven(peer: Peer) {
+    if (peer.given && !this.peers.has(peer.key)) this.used.delete(peer.given)
+    peer.given = undefined
+  }
+
+  // 끊긴 순간과, 실패한 까닭이 바뀐 때만 기록한다. 같은 까닭으로 다시 실패한 것은 횟수만 센다.
+  private noteDown(peer: Peer) {
+    const err = peer.lastError
+    // 막 이어진 직후에는 상대가 아직 이쪽을 등록하지 않아 「모른다」고 할 수 있다. 끊긴 것이 아니므로 적지 않는다.
+    if (err?.kind === 'not_recognized' && Date.now() - (this.addedAt.get(peer.key) ?? 0) < 5000) return
+    const what = `${err?.kind}|${err?.detail}`
+    const down = this.down.get(peer.key)
+    if (!down || down.what !== what)
+      this.log.write(down ? 'still_down' : 'link_down', {
+        id: peerId(peer.key),
+        peer: peer.name,
+        kind: err?.kind,
+        detail: err?.detail,
+        addr: err?.addr,
+        tried: [...new Set([...(peer.lastAddr ? [peer.lastAddr] : []), ...peer.addrs])],
+        port: peer.port,
+        tries: down?.tries,
+        last_seen: isoOf(peer.lastSeen),
+      })
+    this.down.set(peer.key, { since: down?.since ?? Date.now(), tries: (down?.tries ?? 0) + 1, what })
+  }
+
+  // 다시 닿았다. 얼마나 끊겨 있었는지 기록한다.
+  private noteUp(peer: Peer, addr: string) {
+    const down = this.down.get(peer.key)
+    if (!down) return
+    this.down.delete(peer.key)
+    this.log.write('link_up', { id: peerId(peer.key), peer: peer.name, down_for_s: Math.round((Date.now() - down.since) / 1000), tries: down.tries, addr: isRelayAddr(addr) ? 'relay' : addr })
+  }
+
+  // 상대가 이쪽을 모른다고 했다. 건네받은 토큰을 들고 다시 들어간다. 보내기마다 부르므로 retryMs 에 한 번만 해 본다.
+  private async rejoin(peer: Peer) {
+    const last = this.rejoinTried.get(peer.key) ?? 0
+    if (Date.now() - last < this.opts.retryMs) return
+    this.rejoinTried.set(peer.key, Date.now())
+    const id = peerId(peer.key)
+    if (!peer.token) {
+      // 0.7.0 전에 맺은 연결에서 코드를 준 쪽은 토큰이 없다. 상대가 코드를 다시 넣거나 새 코드로 이어야 한다.
+      if (!last) this.log.write('cannot_rejoin', { id, peer: peer.name, why: 'the other side forgot this session, and this side holds no token for it (connected before 0.7.0). The other side can put in this side\'s code again, or use a new code' })
+      return
+    }
+    try {
+      const reply = await this.sayHello(peer, { token: peer.token })
+      if (reply.type === 'hello_ack') {
+        // 막 이어진 직후의 엇갈림은 적지 않는다.
+        if (Date.now() - (this.addedAt.get(peer.key) ?? 0) >= 5000) this.log.write('rejoined', { id, peer: peer.name })
+        void this.flush()
+      }
+    } catch {
+      if (!last) this.log.write('rejoin_failed', { id, peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail })
+    }
+  }
+
+  // 인사한다. 상대가 이쪽을 잊으면 들고 올 토큰을 함께 건네고, 상대가 건넨 토큰은 받아 둔다.
+  private async sayHello(peer: Peer, extra: { token?: string; back?: boolean } = {}) {
+    const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), ...extra })
+    if (reply.type === 'hello_ack' && isToken(reply.rejoin)) {
+      peer.token = reply.rejoin
+      if (this.peers.has(peer.key)) this.dirty()
+    }
+    return reply
+  }
+
+  // 이 PC 쪽 일을 기록한다: 잠들었다 깸(시계가 비었다), 주소가 바뀜(다른 네트워크로 옮김).
+  private watchThisPc() {
+    clearInterval(this.ticker)
+    let last = Date.now()
+    let addrs = this.opts.addrs().join()
+    let n = 0
+    this.ticker = setInterval(() => {
+      const t = Date.now()
+      if (t - last > PAUSE_MS) this.log.write('this_pc_paused', { for_s: Math.round((t - last) / 1000), what: 'this computer was asleep or stopped; nothing could get through meanwhile' })
+      last = t
+      // 주소 찾기는 명령을 부르므로 30초에 한 번만 본다.
+      if (++n % 6 === 0) {
+        const now = this.opts.addrs().join()
+        if (now !== addrs) this.log.write('this_pc_moved', { from: addrs.split(','), to: now.split(',') })
+        addrs = now
+      }
+    }, TICK_MS)
+    this.ticker.unref?.()
+  }
+
+  // 연결 기록. 상대를 주면 그 상대에 관한 줄만 준다. other 면, 닿는 상대에게도 이쪽에 관한 줄을 달라고 한다.
+  async logs(options: { peer?: string; lines?: number; other?: boolean } = {}) {
+    const lines = Math.min(Math.max(options.lines ?? 100, 1), MAX_LOG_LINES)
+    const peer = options.peer ? await this.resolvePeer(options.peer) : undefined
+    const mine = this.log.read({ id: peer && peerId(peer.key), lines })
+    if (!options.other) return { file: this.log.path, mine }
+    const targets = peer ? [peer] : [...this.peers.values()]
+    const theirs = await Promise.all(
+      targets.map(async p => {
+        try {
+          const reply = await this.deliver(p, { type: 'log_request', lines })
+          if (reply.type === 'log' && Array.isArray(reply.entries)) return { peer: labelOf(p), entries: reply.entries.slice(-lines) }
+          return { peer: labelOf(p), error: 'its answer could not be read' }
+        } catch {
+          return { peer: labelOf(p), error: 'could not get its log: it cannot be reached now, or it runs a coworker older than 0.7.0. Its human can open its log file instead (list_connections there shows the path)' }
+        }
+      }),
+    )
+    return { file: this.log.path, mine, theirs }
   }
 
   private async resolvePeers(to?: string | string[]): Promise<Peer[]> {
@@ -1453,8 +1657,8 @@ export class Bridge {
   private async deliverTo(peer: Peer, addr: string, body: string, timeoutMs: number): Promise<Payload | 'refused' | null> {
     const relayed = isRelayAddr(addr)
     const url = relayed ? addr : `http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`
-    const failed = (kind: LinkError) => {
-      if (!this.abort.signal.aborted) peer.lastError = { kind, at: Date.now() }
+    const failed = (kind: LinkError, detail?: string) => {
+      if (!this.abort.signal.aborted) peer.lastError = { kind, at: Date.now(), detail, addr: relayed ? 'relay' : addr }
       return null
     }
     let res: Response
@@ -1466,16 +1670,16 @@ export class Bridge {
         signal: AbortSignal.any([AbortSignal.timeout(relayed ? Math.max(timeoutMs, this.opts.relayTimeoutMs) : timeoutMs), this.abort.signal]),
       })
     } catch (e) {
-      return failed(linkErrorOf(e))
+      return failed(linkErrorOf(e), detailOf(e))
     }
-    if (res.status === 403) return (failed('not_recognized'), 'refused')
+    if (res.status === 403) return (failed('not_recognized', 'HTTP 403'), 'refused')
     // 409: 같은 봉투가 다시 왔거나(다른 주소로 다시 보낸 것) 두 PC의 시계가 너무 다르다.
     if (res.status === 409) {
       const stale = (await res.text().catch(() => '')).startsWith('stale')
       if (stale) this.clockDiffers(peer.key)
-      return failed(stale ? 'clock' : 'bad_answer')
+      return failed(stale ? 'clock' : 'bad_answer', stale ? 'HTTP 409 stale' : 'HTTP 409')
     }
-    if (!res.ok) return failed('bad_answer')
+    if (!res.ok) return failed('bad_answer', `HTTP ${res.status}`)
     const sealed = (await res.json().catch(() => null)) as Sealed | null
     if (sealed?.from !== peer.key) return failed('bad_answer')
     const reply = open(sealed, this.keys) as Payload | null
@@ -1485,6 +1689,7 @@ export class Bridge {
     if (fresh !== 'ok') return failed(fresh === 'stale' ? 'clock' : 'bad_answer')
     peer.lastSeen = Date.now()
     peer.lastError = undefined
+    this.noteUp(peer, addr)
     this.wakeRetry(peer.key)
     return reply
   }
@@ -1494,7 +1699,10 @@ export class Bridge {
     const last = this.clockOff.get(key)
     this.clockOff.set(key, Date.now())
     const peer = this.peers.get(key)
-    if (peer && (!last || Date.now() - last > 60 * 60_000)) this.emit({ type: 'clock', peer: peer.name, fix: CLOCK_FIX, at: now() })
+    if (peer && (!last || Date.now() - last > 60 * 60_000)) {
+      this.log.write('clock_differs', { id: peerId(key), peer: peer.name, what: 'the two clocks differ by more than two hours, so envelopes are refused' })
+      this.emit({ type: 'clock', peer: peer.name, fix: CLOCK_FIX, at: now() })
+    }
   }
 
   private async sendOrQueue(peer: Peer, payload: Payload, thread?: string): Promise<'delivered' | 'queued'> {
@@ -1506,9 +1714,10 @@ export class Bridge {
         await this.deliver(peer, payload)
         peer.directFailed = false
         return 'delivered'
-      } catch {
+      } catch (e) {
         // 닿지 않거나 상대가 이쪽을 모른다고 해도 버리지 않는다. 줄에 세워 두고, 다시 붙으면 순서대로 보낸다.
         peer.directFailed = true
+        if (e instanceof DeliveryError && e.reason === 'rejected') void this.rejoin(peer)
       }
     }
     if (this.isPulling(peer)) return (await this.handOver(peer, payload, 3000, thread)) ? 'delivered' : 'queued'
@@ -1526,6 +1735,7 @@ export class Bridge {
         if (blocked.has(item.peer)) continue
         const peer = this.peers.get(item.peer)
         const drop = (reason: string) => {
+          this.log.write('undelivered', { id: peerId(item.peer), reason })
           this.outbox = this.outbox.filter(o => o !== item)
           this.emit({ type: 'undelivered', to: peer?.name ?? 'disconnected session', thread: item.thread, reason, at: now() })
         }
@@ -1542,9 +1752,10 @@ export class Bridge {
           await this.deliver(peer, item.payload)
           this.outbox = this.outbox.filter(o => o !== item)
           this.dirty()
-        } catch {
-          // 거절당해도 버리지 않는다. 상대가 이쪽을 다시 알아보면 그때 간다.
+        } catch (e) {
+          // 거절당해도 버리지 않는다. 다시 들어가 보고, 상대가 이쪽을 다시 알아보면 그때 간다.
           blocked.add(item.peer)
+          if (e instanceof DeliveryError && e.reason === 'rejected') void this.rejoin(peer)
         }
       }
     } finally {

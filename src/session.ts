@@ -86,7 +86,9 @@ export function createSession(opts: SessionOptions) {
 
   A connection ends only when a human ends it
   - Only close_bridge (on either side, when a human says so) ends a connection. Anything else is temporary: a computer asleep or turned off, a move to another network or VPN, a restart, a timeout, an error. Both sides keep reconnecting by themselves, with no limit on tries or time, and send what waited, in order, once they are back. Nobody needs a new code.
+  - Either side can bring a connection back: each side holds a token the other gave it, so if one side forgot the other (it lost its saved state, or an older version dropped it), the other side gets back in by itself.
   - list_connections shows each connection's state: "connected", or "reconnecting" with last_seen, last_error (what failed) and next_try. A connection the other side's human closed is listed under ended.
+  - If a connection broke and nobody knows why, call connection_log. It shows, from both sides when the other side can be reached, when the link went down and came back, what failed each time, whether a computer was asleep, and whether its address changed. It holds no message text. Give your human the summary and the log file path, so they can pass it on.
   - To wait a long time, keep the computer awake (on a Mac, run caffeinate -i in a terminal and leave it open). A computer that sleeps does not lose the connection, but nothing gets through until it wakes.`
   const LISTENING = channel
     ? `Stay open until your human says stop
@@ -589,7 +591,7 @@ export function createSession(opts: SessionOptions) {
       title: 'List connections',
       annotations: { readOnlyHint: true, openWorldHint: true },
       description:
-        "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
+        "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, the connection log file, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
       inputSchema: {},
     },
     tool(async () => {
@@ -601,6 +603,28 @@ export function createSession(opts: SessionOptions) {
         viewer: viewer?.url,
         listen_command: getBridge().isOpen ? listenCommand() : undefined,
         earlier_bridges: earlier.length ? earlier : undefined,
+      }
+    }),
+  )
+
+  server.registerTool(
+    'connection_log',
+    {
+      title: 'Connection log',
+      annotations: { readOnlyHint: true, openWorldHint: true },
+      description:
+        'When a connection broke and the reason is not clear: show the connection log. It lists when each link went down and came back, what failed (kind and the system error), the addresses tried, sessions refused and why, and when this computer was asleep or moved to another network. It holds no message text. By default it also asks the other side, if it can be reached now, for its lines about this connection.',
+      inputSchema: {
+        peer: z.string().optional().describe('Only the lines about this session (name or [id]). Leave it out for all.'),
+        lines: z.number().int().min(1).max(300).optional().describe('How many of the latest lines. Default 100.'),
+        other_side: z.boolean().optional().describe('Also ask the other side for its lines about this connection. Default true.'),
+      },
+    },
+    tool(async ({ peer, lines, other_side }: { peer?: string; lines?: number; other_side?: boolean }) => {
+      const log = await getBridge().logs({ peer, lines, other: other_side ?? true })
+      return {
+        ...log,
+        next: `Tell your human in a few lines what the log shows: when the link went down, what failed, and whether a computer was asleep or changed its address. Give them the log file path${log.file ? ` (${log.file})` : ''}, and say they can send that file on if the cause is still not clear.`,
       }
     }),
   )

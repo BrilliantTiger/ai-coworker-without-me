@@ -76,6 +76,11 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   const view = (await (await fetch(`${opened.viewer}/data`)).json()) as { conversations: unknown[] }
   expect(view.conversations[0]).toMatchObject({ id: asked.thread, startedBy: 'peer', peerName: joined.myName, messages: [{ text: 'What is 2+2?' }, { text: '4' }] })
   expect((await codex('list_connections')).viewer).toStartWith('http://127.0.0.1:')
+  // 연결 기록은 상대 쪽 기록도 함께 받아 온다. 메시지 내용은 없다.
+  const log = await codex('connection_log', {})
+  expect(log.mine.map((e: { event: string }) => e.event)).toContain('connected')
+  expect(log.theirs[0].entries.map((e: { event: string }) => e.event)).toContain('connected')
+  expect(JSON.stringify(log)).not.toContain('What is 2+2?')
 
   // 결정이 필요한 질문: 받은 쪽이 사람에게 묻는 중이라고 알린다. 질문 창을 띄울 수 없는 앱이면 AI가 번호 보기로 묻고, 사람의 결정을 답으로 보낸다.
   const decide = await codex('send_question', { question: 'Release on Friday or Monday?' })

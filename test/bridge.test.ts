@@ -943,3 +943,83 @@ describe('coming back after a restart', () => {
     expect(existsSync(saveTo)).toBe(false)
   })
 })
+
+describe('either side gets back in', () => {
+  test('the side that gave the code gets back in when the side that joined forgot it', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    // B가 A를 잊었다. 코드를 준 쪽인 A는 예전에는 다시 들어갈 토큰이 없었다. 이제 B가 인사하며 건넨 토큰을 들고 간다.
+    b.peers.delete(a.key)
+    expect(a.peers.get(b.key)!.token).toBeDefined()
+    await a.ask(undefined, 'remember me?')
+    const seen: BridgeEvent[] = []
+    for (let i = 0; i < 40 && !seen.some(e => e.type === 'message'); i++) seen.push(...(await b.wait(100)))
+    expect(seen).toContainEqual(expect.objectContaining({ type: 'connected', peer: 'A · Claude Code', again: true }))
+    expect(seen).toContainEqual(expect.objectContaining({ type: 'message', text: 'remember me?' }))
+    expect(a.peers.has(b.key)).toBe(true)
+  }, 15_000)
+
+  test('two sessions the group introduced each get back in when the other forgot', async () => {
+    const { b, c } = await team()
+    c.peers.delete(b.key)
+    await b.ask('C · Claude Code', 'from b')
+    expect((await messages(c, 1))[0]).toMatchObject({ from: 'B · Codex', text: 'from b' })
+    b.peers.delete(c.key)
+    await c.ask('B · Codex', 'from c')
+    expect((await messages(b, 1))[0]).toMatchObject({ from: 'C · Claude Code', text: 'from c' })
+  }, 20_000)
+
+  test('a session the other side\'s human closed cannot get back in with its old token', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const token = b.peers.get(a.key)!.token!
+    const keys = b.keys
+    await b.close()
+    await next(a, 'peer_closed')
+    const url = `http://127.0.0.1:${a.port}/v1/${routeId(a.key)}`
+    const hello = seal({ type: 'hello', token, name: 'B · Codex', addrs: ['127.0.0.1'], port: 1 }, fromB64(a.key), keys)
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify(hello) })).status).toBe(403)
+  })
+})
+
+describe('connection log', () => {
+  test('records when a link goes down and comes back, and each side can read the other\'s lines about it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'coworker-log-'))
+    const a = make('A · Claude Code', { home: join(home, 'a') })
+    const b = make('B · Codex', { home: join(home, 'b') })
+    a.open()
+    await b.connect(a.newCode())
+    await next(b, 'connected').catch(() => {})
+    const port = a.port
+    ;(a as any).server.stop(true)
+    ;(a as any).abort.abort()
+    b.peers.get(a.key)!.lastPollAt = undefined
+    await b.ask(undefined, 'there?')
+    ;(a as any).abort = new AbortController()
+    expect((a as any).listen(port)).toBe(true)
+    await next(a, 'message')
+    for (let i = 0; i < 200 && !b.log.read().some(e => e.event === 'link_up'); i++) await Bun.sleep(50)
+
+    const { file, mine, theirs } = await b.logs({ other: true })
+    expect(file).toContain(join(home, 'b', 'logs'))
+    const events = mine.map(e => e.event)
+    expect(events).toEqual(expect.arrayContaining(['open', 'connected', 'link_down', 'link_up']))
+    expect(mine.find(e => e.event === 'link_down')).toMatchObject({ kind: expect.any(String), detail: expect.any(String), peer: 'A · Claude Code' })
+    expect(mine.find(e => e.event === 'link_up')!.down_for_s).toBeGreaterThanOrEqual(0)
+    // 상대의 기록은 이쪽에 관한 줄과 그 PC 전체에 관한 줄만 온다. 메시지 내용은 없다.
+    expect(theirs![0]!.entries!.map(e => e.event)).toEqual(expect.arrayContaining(['open', 'connected']))
+    expect(JSON.stringify(theirs)).not.toContain('there?')
+    expect((await b.connections()).log).toBe(file)
+  }, 20_000)
+
+  test('records why a stranger was refused', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'coworker-log-'))
+    const a = make('A · Claude Code', { home })
+    a.open()
+    const stranger = newKeyPair()
+    const url = `http://127.0.0.1:${a.port}/v1/${routeId(a.key)}`
+    const hello = seal({ type: 'hello', token: 'nope', name: 'evil', addrs: [], port: 1 }, fromB64(a.key), stranger)
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify(hello) })).status).toBe(403)
+    expect(a.log.read().find(e => e.event === 'refused_stranger')).toMatchObject({ peer: 'evil', reason: expect.stringContaining('unknown code') })
+  })
+})

@@ -64,7 +64,7 @@ test('the bundled server starts from a copy of the plugin folder with no package
     expect(client.getServerVersion()).toMatchObject({ name: 'coworker', version: json(join(root, 'package.json')).version })
     const { tools } = await client.listTools()
     expect(tools.map(t => t.name).sort()).toEqual(
-      ['check_with_human', 'close_bridge', 'connect', 'inbox', 'list_connections', 'open_bridge', 'read_conversation', 'reply', 'send_question', 'wait_for_message', 'write_agreement'].sort(),
+      ['check_with_human', 'close_bridge', 'connect', 'inbox', 'list_connections', 'open_bridge', 'read_conversation', 'reply', 'send_question', 'wait_for_message', 'write_agreement', 'connection_log'].sort(),
     )
     const res = (await client.callTool({ name: 'open_bridge', arguments: {} })) as { content: { text: string }[] }
     expect(JSON.parse(res.content[0]!.text).code).toStartWith('cw1.')
