@@ -254,6 +254,8 @@ export type SavedBridge = {
   // 이미 쓴 코드와 그 코드로 들어온 세션. 같은 세션이 그 코드를 다시 들고 오면 받아 준다.
   used?: { token: string; key: string; private: boolean }[]
   ended?: Ended[]
+  // 중계 서버 우편함의 비밀. 다시 켜도 같은 우편함을 쓰므로, 양쪽이 다 다시 켜져도 서로의 우편함을 찾는다.
+  relaySecret?: string
   seen: string[]
   closedAsks: [string, string][]
   // 왔지만 AI가 아직 읽지 않은 소식. 다시 켠 뒤 inbox 나 기다리기로 받는다.
@@ -407,6 +409,8 @@ export class Bridge {
   private abort = new AbortController()
   private relaySecret?: string
   private relayBox?: string
+  // 다시 켤 때 이어 쓸 우편함 비밀. 사람이 브릿지를 닫으면 버린다.
+  private keptRelaySecret?: string
   relayState: RelayState = 'off'
   private relayWaiters: Array<() => void> = []
   private saveTimer?: ReturnType<typeof setTimeout>
@@ -465,6 +469,7 @@ export class Bridge {
     // 「다른 세션이 이어받았다」는 알림은 넘겨준 세션의 것이다. 이어받은 쪽에는 넘기지 않는다.
     b.events = (saved.events ?? []).filter(e => e.type !== 'moved')
     b.viewerAddress = saved.viewer
+    if (isToken(saved.relaySecret)) b.keptRelaySecret = saved.relaySecret
     for (const q of saved.asking ?? []) b.asking.set(q.thread, q)
     try {
       b.open(saved.port)
@@ -516,6 +521,7 @@ export class Bridge {
         .map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private })),
       used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private })),
       ended: this.ended,
+      relaySecret: this.keptRelaySecret,
       seen: [...this.seen].slice(-2000),
       closedAsks: [...this.closedAsks],
       events: this.events,
@@ -550,7 +556,8 @@ export class Bridge {
     }
     this.abort = new AbortController()
     if (this.opts.relay) {
-      this.relaySecret = randomToken()
+      this.relaySecret = this.keptRelaySecret ?? randomToken()
+      this.keptRelaySecret = this.relaySecret
       this.relayBox = boxOf(this.relaySecret)
       this.relayState = 'connecting'
       void this.relayLoop()
@@ -876,6 +883,7 @@ export class Bridge {
       if (this.forget) rmSync(this.opts.saveTo, { force: true })
       else this.save()
     }
+    if (this.forget) this.keptRelaySecret = undefined
     this.forget = false
     this.abort.abort()
     for (const wakers of this.pollWaiters.values()) for (const wake of [...wakers]) wake()
