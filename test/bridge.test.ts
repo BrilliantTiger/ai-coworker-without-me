@@ -205,6 +205,27 @@ describe('bridge', () => {
     expect((await a.connections()).peers).toHaveLength(1)
   })
 
+  test('when the two clocks differ by hours, both humans are told how to fix it', async () => {
+    // 이어진 상대의 시계가 세 시간 늦다.
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const url = `http://127.0.0.1:${a.port}/v1/${routeId(a.key)}`
+    const real = Date.now
+    Date.now = () => real() - 3 * 60 * 60_000
+    const ping = JSON.stringify(seal({ type: 'ping' }, fromB64(a.key), (b as unknown as { keys: ReturnType<typeof newKeyPair> }).keys))
+    Date.now = real
+    const res = await fetch(url, { method: 'POST', body: ping })
+    expect(res.status).toBe(409)
+    expect(await res.text()).toStartWith('stale')
+    expect(await next(a, 'clock')).toMatchObject({ peer: 'B · Codex', fix: expect.stringContaining('automatic date and time') })
+    expect((await a.connections()).peers).toHaveLength(1)
+
+    // 연결하려는 쪽에서 보면: 상대가 답은 하지만 시계 때문에 받지 않는다.
+    const c = make('C', { clock: () => Date.now() + 3 * 60 * 60_000 })
+    c.open()
+    await expect(make('D').connect(c.newCode())).rejects.toThrow(/clocks of the two PCs differ/)
+  })
+
   test('a peer cannot hand over a name or address list of any size', async () => {
     const a = make('A')
     a.open()

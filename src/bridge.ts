@@ -29,6 +29,8 @@ export const routeId = (key: string) => Buffer.from(key, 'base64').toString('bas
 // 연결된 세션마다 붙는 짧은 ID. 이름이 같은 세션이 여럿일 때 하나를 집어 부를 수 있다.
 export const peerId = (key: string) => routeId(key).slice(0, 6)
 const labelOf = (p: { key: string; name: string }) => `${p.name} [${peerId(p.key)}]`
+const CLOCK_FIX =
+  "Messages are kept and sent once the clocks agree. Turn on automatic date and time on this PC and ask the coworker to do the same (macOS: System Settings > General > Date & Time; Windows: Settings > Time & language > Date & time > Set time automatically)."
 const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' || addr === 'localhost'
 // 주소 목록에서 http(s):// 로 시작하는 것은 중계 서버의 우편함이다. 나머지는 IP나 컴퓨터 이름이다.
 export const isRelayAddr = (addr: string) => /^https?:\/\//.test(addr)
@@ -36,13 +38,15 @@ export const isRelayAddr = (addr: string) => /^https?:\/\//.test(addr)
 // 상대에게 닿지 못한 까닭. no_route: 그 주소로 가는 길이 없다(꺼짐, 잠자기, 다른 네트워크로 옮김).
 // refused: 그 PC는 있지만 그 포트에서 브릿지가 받지 않는다. timeout: 정한 시간 안에 답이 없다.
 // not_recognized: 브릿지는 답했지만 이 세션을 모른다고 한다. bad_answer: 알아볼 수 없는 답이 왔다.
-export type LinkError = 'no_route' | 'refused' | 'timeout' | 'not_recognized' | 'bad_answer'
+// clock: 브릿지는 답했지만 두 PC의 시계가 너무 달라 서로의 봉투를 받지 않는다.
+export type LinkError = 'no_route' | 'refused' | 'timeout' | 'not_recognized' | 'bad_answer' | 'clock'
 const LINK_ERRORS: Record<LinkError, string> = {
   no_route: 'no route to it: it is asleep, turned off, or on another network',
   refused: 'its computer answered, but no bridge is listening on that port: coworker there is restarting or stopped',
   timeout: 'no answer in time',
   not_recognized: 'its bridge answered but does not know this session; this side keeps offering the code it joined with',
   bad_answer: 'an answer came back that could not be read',
+  clock: 'its bridge answered, but the clocks of the two PCs differ by more than two hours, so neither side takes the other\'s messages. Turn on automatic date and time on both PCs',
 }
 
 // directFailed: 이쪽에서 상대로 바로 보내지 못했다. lastPollAt: 상대가 메시지를 가져가려고 마지막으로 접속한 때.
@@ -145,6 +149,8 @@ export type BridgeEvent =
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
   // 이 브릿지를 같은 PC의 다른 세션이 이어받았다. 이 세션은 더 듣지 않는다.
   | { type: 'moved'; at: string }
+  // 두 PC의 시계가 너무 달라서 그 상대와 주고받지 못한다. 시계를 맞출 때까지 메시지는 보내지 않고 들고 있다.
+  | { type: 'clock'; peer: string; fix: string; at: string }
   // 이쪽 사람이 질문 창에 답했다. 고른 것과 쓴 말은 상대에게 이미 보냈다. closed: 답하지 않고 창을 닫았다. error: 보내지 못한 까닭.
   | { type: 'decision'; thread: string; peer: string; choice?: string; text?: string; delivery?: 'delivered' | 'queued'; closed?: boolean; error?: string; at: string }
 
@@ -219,6 +225,8 @@ export type BridgeOptions = {
   keys?: KeyPair
   // 이 세션을 다시 켰을 때 되살릴 수 있게 상태를 저장할 파일. 없으면 저장하지 않는다.
   saveTo?: string
+  // 받은 봉투의 시각을 견줄 이 PC의 시계. 시험에서 시계가 틀린 PC를 흉내 낼 때만 바꾼다.
+  clock?: () => number
 }
 
 // 사람이 브라우저로 여는 대화 보기 화면의 주소. 세션을 다시 켜도 이 포트와 토큰으로 다시 열어서, 열어 둔 화면이 스스로 다시 붙는다.
@@ -348,7 +356,9 @@ export class Bridge {
   private closedAsks = new Map<string, string>()
   private seen = new Set<string>()
   // 예전 봉투를 다시 보내 오는 것을 거른다. 받는 요청과 받은 답 모두.
-  private replay = new ReplayGuard()
+  private replay: ReplayGuard
+  // 시계가 달라 주고받지 못한 상대와 그때. 사람에게는 상대마다 한 시간에 한 번만 알린다.
+  private clockOff = new Map<string, number>()
   private outbox: Outgoing[] = []
   private events: BridgeEvent[] = []
   private waiters: Array<() => void> = []
@@ -375,7 +385,7 @@ export class Bridge {
   private saveTimer?: ReturnType<typeof setTimeout>
   // close 로 닫았으면 저장한 상태를 지운다. 프로세스가 끝나서 닫힐 때는 다시 켤 때를 위해 남긴다.
   private forget = false
-  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey' | 'keys' | 'saveTo'>> & {
+  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey' | 'keys' | 'saveTo' | 'clock'>> & {
     home?: string
     relay?: string
     relayKey?: string
@@ -384,6 +394,7 @@ export class Bridge {
 
   constructor(options: BridgeOptions) {
     this.keys = options.keys ?? newKeyPair()
+    this.replay = new ReplayGuard(undefined, options.clock)
     this.key = toB64(this.keys.publicKey)
     this.route = routeId(this.key)
     this.name = options.name
@@ -562,6 +573,8 @@ export class Bridge {
     } catch (e) {
       if (e instanceof DeliveryError && e.reason === 'rejected')
         throw new Error('the other session refused this code; it was already used, expired, or that bridge was reopened. Ask for a new code')
+      if (this.clockOff.has(code.key))
+        throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`)
       throw new Error(`cannot reach ${code.name} at ${code.addrs.join(', ')} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`)
     }
     if (reply.type !== 'hello_ack') throw new Error('unexpected answer from the other session')
@@ -870,6 +883,7 @@ export class Bridge {
     if (!payload) return { status: 403, body: 'forbidden' }
     // 다시 온 봉투는 거절하되 403 은 쓰지 않는다. 보낸 쪽이 같은 봉투를 다른 주소로 다시 보낸 것일 수도 있어서, 연결을 끊지 않고 다시 보내게 한다.
     const fresh = this.replay.check(sealed as Sealed, payload)
+    if (fresh === 'stale') this.clockDiffers((sealed as Sealed).from)
     if (fresh !== 'ok') return { status: 409, body: fresh === 'stale' ? 'stale: the two PCs clocks differ by more than two hours' : 'already received' }
     const from = (sealed as { from: string }).from
     const answer = (p: Payload) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) })
@@ -1455,15 +1469,32 @@ export class Bridge {
       return failed(linkErrorOf(e))
     }
     if (res.status === 403) return (failed('not_recognized'), 'refused')
+    // 409: 같은 봉투가 다시 왔거나(다른 주소로 다시 보낸 것) 두 PC의 시계가 너무 다르다.
+    if (res.status === 409) {
+      const stale = (await res.text().catch(() => '')).startsWith('stale')
+      if (stale) this.clockDiffers(peer.key)
+      return failed(stale ? 'clock' : 'bad_answer')
+    }
     if (!res.ok) return failed('bad_answer')
     const sealed = (await res.json().catch(() => null)) as Sealed | null
     if (sealed?.from !== peer.key) return failed('bad_answer')
     const reply = open(sealed, this.keys) as Payload | null
-    if (!reply || this.replay.check(sealed, reply) !== 'ok') return failed('bad_answer')
+    if (!reply) return failed('bad_answer')
+    const fresh = this.replay.check(sealed, reply)
+    if (fresh === 'stale') this.clockDiffers(peer.key)
+    if (fresh !== 'ok') return failed(fresh === 'stale' ? 'clock' : 'bad_answer')
     peer.lastSeen = Date.now()
     peer.lastError = undefined
     this.wakeRetry(peer.key)
     return reply
+  }
+
+  // 시계가 달라 봉투를 주고받지 못했다. 이어진 상대면 사람에게 알린다. 연결하는 중이면 연결 오류에서 알린다.
+  private clockDiffers(key: string) {
+    const last = this.clockOff.get(key)
+    this.clockOff.set(key, Date.now())
+    const peer = this.peers.get(key)
+    if (peer && (!last || Date.now() - last > 60 * 60_000)) this.emit({ type: 'clock', peer: peer.name, fix: CLOCK_FIX, at: now() })
   }
 
   private async sendOrQueue(peer: Peer, payload: Payload, thread?: string): Promise<'delivered' | 'queued'> {

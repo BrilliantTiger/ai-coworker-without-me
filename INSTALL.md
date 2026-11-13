@@ -305,7 +305,10 @@ New-Item -ItemType Directory -Force "$HOME\.coworker" | Out-Null; curl.exe -fsSL
 - Mac은 사용자 LaunchAgent(`~/Library/LaunchAgents/com.brillianttiger.coworker.plist`)로, Windows는 시작프로그램 폴더의 바로가기(`coworker.lnk`, 최소화된 창)로 켠다. 관리자 권한은 필요 없다.
 - 켜져 있는지는 브라우저나 `curl http://127.0.0.1:7690/health`로 본다. `coworker app <판>`이 나오면 된 것이다.
 - 끄려면 `bun ~/.coworker/coworker.js autostart off`(Windows는 `bun "$HOME\.coworker\coworker.js" autostart off`)를 실행한다.
-- 새 판으로 올릴 때는 같은 한 줄을 다시 실행한다.
+- 앱은 스스로 새 판으로 올린다. 켜지고 잠시 뒤와 그 뒤 6시간마다 새 판이 있는지 보고, 있으면 GitHub 릴리스의 `coworker.js`를 받아 바꿔 둔다. 받은 파일은 그 판으로 한 번 띄워 판 번호가 맞을 때만 바꾼다. 앱에 붙은 세션이 하나도 없을 때 새 판으로 다시 켠다. 붙어 있는 세션의 AI는 새 판을 받았다고 한 번 알려 준다.
+- 바로 새 판으로 바꾸려면 위의 `autostart on` 명령을 다시 실행한다. 앱이 다시 켜지면 AI에게 「브릿지 이어받아」라고 해서 연결을 되살린다.
+- 스스로 올리는 것을 끄려면 앱을 켜기 전에 `COWORKER_AUTO_UPDATE=off`를 둔다. 그때는 위의 한 줄을 다시 실행해 올린다.
+- 한 앱에 붙을 수 있는 세션은 100개까지다. 넘으면 새 세션을 받지 않는다. 쓰지 않는 세션을 닫거나 `autostart on`으로 앱을 다시 켠다.
 - 디렉터리판 플러그인은 `127.0.0.1:7690`에만 붙는다. 7690번을 다른 프로그램이 쓰고 있으면 그 프로그램을 끄고 앱을 다시 켠다.
 - 방화벽은 GitHub판과 같다. 앱이 처음 브릿지를 열 때 Windows에서 허용 창이 뜨면 「개인 네트워크」에 체크한다.
 

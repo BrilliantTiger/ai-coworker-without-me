@@ -204,6 +204,7 @@ const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
   undelivered: 'undelivered',
   decision: 'decision by your human',
   moved: 'moved to another session',
+  clock: 'clocks differ',
 }
 
 const PAGE = `<!doctype html>

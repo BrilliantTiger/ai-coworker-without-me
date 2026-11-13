@@ -8,15 +8,12 @@ import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { rmSync } from 'node:fs'
 import { listSaved, readSaved, savedPath, stillRunning, waitUntilStopped } from './resume'
-import { newer, selfUpdate } from './update'
+import { firstCheckMs, newer, selfUpdate, UPDATE_EVERY_MS } from './update'
 import { Viewer } from './viewer'
 
 // 연결 코드를 쓸 수 있는 시간(분). 0 을 주면 시간 제한 없이 브릿지를 닫을 때까지 쓴다. 어느 쪽이든 한 번만 쓴다.
 const DEFAULT_CODE_MINUTES = 60
 const MAX_CODE_MINUTES = 365 * 24 * 60
-
-// 새 판이 있는지 보는 간격. COWORKER_UPDATE_EVERY_MS 는 시험용이다.
-const UPDATE_EVERY_MS = Number(process.env.COWORKER_UPDATE_EVERY_MS) || 6 * 60 * 60_000
 
 // 질문 창은 사람이 답할 때까지 둔다. 요청에 시간 제한을 두지 않으려고 타이머가 받는 가장 큰 값을 준다.
 const WAIT_FOREVER_MS = 2 ** 31 - 1
@@ -62,6 +59,8 @@ export type SessionOptions = {
   autoUpdate?: boolean
   // 시험에서 실제 claude·codex 명령 대신 쓸 업데이트 함수.
   updater?: typeof selfUpdate
+  // 앱(serve)에 붙은 세션이면: 앱이 받아 둔 새 판과, 사람이 지금 바로 새 판으로 다시 켜는 명령.
+  app?: { downloaded: () => string | undefined; restartCommand: string }
 }
 
 // 이 프로세스에서 지금 돌고 있는 브릿지. 앱은 Claude Code 가 다시 켜지면 새 MCP 세션을 받으므로,
@@ -345,6 +344,7 @@ export function createSession(opts: SessionOptions) {
         return { type: event.type, kind: event.kind, from: event.from, thread: event.thread }
       case 'connected':
       case 'peer_closed':
+      case 'clock':
         return { type: event.type, peer: event.peer }
       case 'undelivered':
         return { type: event.type, to: event.to, ...(event.thread ? { thread: event.thread } : {}) }
@@ -458,7 +458,7 @@ export function createSession(opts: SessionOptions) {
         const note = updateNote()
         if (note && value && typeof value === 'object' && !Array.isArray(value)) {
           const next = (value as { next?: unknown }).next
-          return result({ ...value, update: { running: version, installed: installedUpdate }, next: typeof next === 'string' ? `${next} ${note}` : note })
+          return result({ ...value, update: { running: version, installed: readyUpdate() }, next: typeof next === 'string' ? `${next} ${note}` : note })
         }
         return result(value)
       } catch (e) {
@@ -841,12 +841,16 @@ export function createSession(opts: SessionOptions) {
       const done = await (opts.updater ?? selfUpdate)(app, version, home).catch(() => undefined)
       if (done && (!installedUpdate || newer(done.to, installedUpdate))) installedUpdate = done.to
     }
-    setTimeout(() => void check(), Number(process.env.COWORKER_UPDATE_FIRST_MS) || 5_000 + Math.random() * 25_000).unref?.()
+    setTimeout(() => void check(), firstCheckMs()).unref?.()
     setInterval(() => void check(), UPDATE_EVERY_MS).unref?.()
   }
+  const readyUpdate = () => opts.app?.downloaded() ?? installedUpdate
   const updateNote = () => {
-    if (!installedUpdate || updateTold === installedUpdate) return undefined
-    updateTold = installedUpdate
+    const ready = readyUpdate()
+    if (!ready || updateTold === ready) return undefined
+    updateTold = ready
+    if (opts.app)
+      return `Also tell your human once: the coworker app downloaded ${ready} (it still runs ${version}). It restarts into the new version by itself when no session is connected to it. To switch now, your human runs: ${opts.app.restartCommand} . After that, call open_bridge with resume set to this session_id (${identity}) to bring the bridge back.`
     return isCodex()
       ? `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version}). Restarting Codex uses it; after that, call open_bridge with resume set to this session_id (${identity}) to bring the bridge back.`
       : `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version}). Typing /reload-plugins, or restarting Claude Code, uses it; the bridge and its conversations come back by themselves.`

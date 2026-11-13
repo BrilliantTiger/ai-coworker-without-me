@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, rmSync, statSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // 플러그인으로 설치한 coworker 가 스스로 최신 판으로 올린다(사람이 정함, 2026-11-11: 「최초에 시작해서 옛 버전이면 업데이트하면 되지 않아?」).
@@ -13,6 +13,11 @@ const LATEST_URL = 'https://raw.githubusercontent.com/BrilliantTiger/ai-coworker
 const STALE_LOCK_MS = 10 * 60_000
 
 export type App = 'claude' | 'codex'
+
+// 새 판이 있는지 보는 간격. COWORKER_UPDATE_EVERY_MS 는 시험용이다.
+export const UPDATE_EVERY_MS = Number(process.env.COWORKER_UPDATE_EVERY_MS) || 6 * 60 * 60_000
+// 뜬 뒤 처음 볼 때까지. 같은 PC의 여러 세션이 한꺼번에 보지 않게 흩는다. COWORKER_UPDATE_FIRST_MS 는 시험용이다.
+export const firstCheckMs = () => Number(process.env.COWORKER_UPDATE_FIRST_MS) || 5_000 + Math.random() * 25_000
 export type Run = (cmd: string[]) => Promise<{ code: number; out: string }>
 
 const run: Run = async cmd => {
@@ -87,6 +92,55 @@ export async function selfUpdate(app: App, current: string, home: string, exec: 
     const after = await installed(app, exec)
     return after && newer(after.version, current) ? { to: after.version } : undefined
   } finally {
+    release()
+  }
+}
+
+// coworker 앱(디렉터리판이 붙는 serve)도 스스로 새 판을 받는다(사람이 정함, 2026-11-12).
+// 앱은 플러그인 명령으로 설치한 것이 아니라 사람이 받은 coworker.js 파일 하나라서, 그 파일을 새 판의 릴리스 파일로 바꾼다.
+// 받은 파일은 그 판으로 한 번 띄워 판 번호를 물어 보고, 맞을 때만 바꿔 넣는다. 반쯤 받았거나 다른 파일이면 그대로 둔다.
+// 도는 앱은 예전 판으로 계속 돈다. 새 판으로 다시 켜는 것은 serve 가 붙은 세션이 없을 때 한다.
+// COWORKER_RELEASE_BASE 는 시험용이다.
+export const releaseAsset = (version: string) =>
+  `${process.env.COWORKER_RELEASE_BASE || 'https://github.com/BrilliantTiger/ai-coworker-without-me/releases/download'}/v${version}/coworker.js`
+const BANNER = '// AI Co-worker Without Me: built from src/'
+
+export type AppUpdateDeps = {
+  latest?: () => Promise<string | undefined>
+  download?: (url: string) => Promise<string | undefined>
+  versionOf?: (file: string) => Promise<string | undefined>
+}
+
+const download = async (url: string) => {
+  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) })
+  return res.ok ? res.text() : undefined
+}
+
+// 받은 파일을 그 판으로 띄워 판 번호를 묻는다(bun coworker.js version).
+const versionOfFile = async (file: string) => {
+  const p = Bun.spawn([process.execPath, '--no-install', file, 'version'], { stdout: 'pipe', stderr: 'ignore', stdin: 'ignore' })
+  const timer = setTimeout(() => p.kill(), 15_000)
+  const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited])
+  clearTimeout(timer)
+  return code === 0 ? out.trim() : undefined
+}
+
+export async function appUpdate(script: string, current: string, home: string, deps: AppUpdateDeps = {}): Promise<{ to: string } | undefined> {
+  const latest = await (deps.latest ?? latestVersion)()
+  if (!latest || !newer(latest, current)) return undefined
+  const release = lock(home)
+  if (!release) return undefined
+  const tmp = `${script}.download`
+  try {
+    const text = await (deps.download ?? download)(releaseAsset(latest)).catch(() => undefined)
+    // 묶은 파일은 #!/usr/bin/env bun, // @bun 다음 줄에 이 안내가 있다.
+    if (!text?.slice(0, 500).includes(BANNER)) return undefined
+    writeFileSync(tmp, text)
+    if ((await (deps.versionOf ?? versionOfFile)(tmp).catch(() => undefined)) !== latest) return undefined
+    renameSync(tmp, script)
+    return { to: latest }
+  } finally {
+    rmSync(tmp, { force: true })
     release()
   }
 }

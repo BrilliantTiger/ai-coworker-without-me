@@ -53,9 +53,13 @@ export class ReplayGuard {
   private nonces = new Map<string, number>()
   private lastSweep = 0
 
-  constructor(private readonly maxAgeMs = REPLAY_MAX_AGE_MS) {}
+  // clock 은 시험에서 이 PC의 시계가 틀린 것을 흉내 낼 때 쓴다.
+  constructor(
+    private readonly maxAgeMs = REPLAY_MAX_AGE_MS,
+    private readonly clock: () => number = Date.now,
+  ) {}
 
-  check(sealed: Sealed, opened: unknown, now = Date.now()): 'ok' | 'again' | 'stale' {
+  check(sealed: Sealed, opened: unknown, now = this.clock()): 'ok' | 'again' | 'stale' {
     const t = (opened as { t?: unknown } | null)?.t
     if (typeof t === 'number' && Math.abs(now - t) > this.maxAgeMs) return 'stale'
     if (now - this.lastSweep > 60_000) {

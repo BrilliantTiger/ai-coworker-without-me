@@ -127,6 +127,20 @@ test('a quiet session keeps its bridge open; a session that ends stops it and ca
   expect(await again.call('open_bridge', { resume: opened.session_id })).toMatchObject({ resumed: true, session_id: opened.session_id, name: opened.name })
 }, 20_000)
 
+test('the app takes only so many sessions at once', async () => {
+  const { port } = await startApp({ COWORKER_APP_MAX_SESSIONS: '2' })
+  await session(port, 'claude-code')
+  await session(port, 'claude-code')
+  const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x', version: '1' } } }
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify(init),
+  })
+  expect(res.status).toBe(503)
+  expect(await res.text()).toContain('already has 2 sessions')
+})
+
 test('starting the app twice leaves the running one alone', async () => {
   const { port, home } = await startApp()
   const second = Bun.spawn([process.execPath, entry, 'serve'], {

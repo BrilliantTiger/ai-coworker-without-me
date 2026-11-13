@@ -306,6 +306,13 @@ docker compose up -d
 
 Caddy가 HTTPS 인증서를 자동으로 받아 붙인다. `https://relay.example.com/healthz`가 `coworker relay`를 보여 주면 된 것이다. 키는 `relay/.env`에 있고, git에는 올라가지 않는다.
 
+이미지 판은 고정되어 있다(`relay/Dockerfile`의 Bun, `relay/compose.yaml`의 Caddy). 보안 수정이 나오면 그 판 번호를 올린 저장소를 받아 다시 띄운다.
+
+```
+git pull
+docker compose up -d --build
+```
+
 **Bun으로 바로.** HTTPS는 앞단(nginx, Caddy, 클라우드 로드밸런서 등)에서 붙인다. 응답을 25초 넘게 붙잡아 두는 요청이 있으니, 앞단의 응답 시간 제한은 60초 이상으로 둔다.
 
 ```

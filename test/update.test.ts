@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { version } from '../package.json'
 import { createSession } from '../src/session'
-import { newer, PLUGIN, selfUpdate, type Run } from '../src/update'
+import { appUpdate, newer, PLUGIN, releaseAsset, selfUpdate, type Run } from '../src/update'
 
 // 릴리스 브랜치의 매니페스트 노릇을 하는 서버. 시험마다 최신 판 번호를 바꾼다.
 let latest = '0.5.0'
@@ -111,4 +111,64 @@ test('after an update the AI tells its human once to reload', async () => {
   } finally {
     delete process.env.COWORKER_UPDATE_FIRST_MS
   }
+})
+
+test('the app swaps its coworker.js for the new release only when the download really is that version', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coworker-app-update-'))
+  const script = join(dir, 'coworker.js')
+  const OLD = '// AI Co-worker Without Me: built from src/ old'
+  const NEW = '#!/usr/bin/env bun\n// @bun\n// AI Co-worker Without Me: built from src/ new'
+  writeFileSync(script, OLD)
+  const asked: string[] = []
+  const deps = (body: string | undefined, says: string | undefined) => ({
+    latest: async () => '9.9.9',
+    download: async (url: string) => (asked.push(url), body),
+    versionOf: async () => says,
+  })
+  // 받은 것이 반쯤이거나 다른 파일이거나, 띄워 보니 다른 판이면 그대로 둔다.
+  expect(await appUpdate(script, version, dir, deps(undefined, '9.9.9'))).toBeUndefined()
+  expect(await appUpdate(script, version, dir, deps('<html>not found</html>', '9.9.9'))).toBeUndefined()
+  expect(await appUpdate(script, version, dir, deps(NEW, '0.0.1'))).toBeUndefined()
+  expect(readFileSync(script, 'utf8')).toBe(OLD)
+  expect(existsSync(`${script}.download`)).toBe(false)
+  expect(asked[0]).toBe(releaseAsset('9.9.9'))
+  expect(asked[0]).toBe('https://github.com/BrilliantTiger/ai-coworker-without-me/releases/download/v9.9.9/coworker.js')
+
+  expect(await appUpdate(script, version, dir, deps(NEW, '9.9.9'))).toEqual({ to: '9.9.9' })
+  expect(readFileSync(script, 'utf8')).toBe(NEW)
+  // 이미 최신이면 받지 않는다.
+  asked.length = 0
+  expect(await appUpdate(script, '9.9.9', dir, deps(NEW, '9.9.9'))).toBeUndefined()
+  expect(asked).toEqual([])
+})
+
+test('a session on the app tells its human once that the app downloaded a new version', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'coworker-update-'))
+  let downloaded: string | undefined
+  const session = createSession({
+    channel: false,
+    hint: false,
+    home,
+    folder: () => undefined,
+    app: { downloaded: () => downloaded, restartCommand: 'bun "/x/coworker.js" autostart on' },
+  })
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+  await session.server.connect(serverSide)
+  const client = new Client({ name: 'claude-code', version: '1.0.0' })
+  await client.connect(clientSide)
+  const call = async () => JSON.parse(((await client.callTool({ name: 'list_connections', arguments: {} })) as { content: { text: string }[] }).content[0]!.text)
+  expect((await call()).update).toBeUndefined()
+  downloaded = '9.9.9'
+  const told = await call()
+  expect(told.update).toEqual({ running: version, installed: '9.9.9' })
+  expect(told.next).toMatch(/app downloaded 9\.9\.9 .*autostart on/)
+  expect((await call()).update).toBeUndefined()
+  await client.close()
+  session.shutdown()
+})
+
+test('coworker.js says its own version', async () => {
+  const p = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'mcp.ts'), 'version'], { stdout: 'pipe' })
+  expect((await new Response(p.stdout).text()).trim()).toBe(version)
+  expect(await p.exited).toBe(0)
 })

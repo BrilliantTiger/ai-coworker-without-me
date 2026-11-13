@@ -13,7 +13,7 @@ services:
       RELAY_KEY: ${RELAY_KEY:?RELAY_KEY 를 정한다}
     restart: unless-stopped
   caddy:
-    image: caddy:2
+    image: caddy:2.11.9
     depends_on: [relay]
     ports:
       - "80:80"
