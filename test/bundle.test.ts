@@ -56,7 +56,7 @@ test('the bundled server starts from a copy of the plugin folder with no package
       command: process.execPath,
       args: ['--no-install', join(dir, 'coworker.js')],
       cwd: dir,
-      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDECODE: '', COWORKER_AUTO_UPDATE: 'off' } as Record<string, string>,
+      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDECODE: '', COWORKER_AUTO_UPDATE: 'off', COWORKER_NOTIFY: 'off' } as Record<string, string>,
       stderr: 'inherit',
     }),
   )

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Bridge, isSavedBridge, parsePorts, routeId, type BridgeEvent, type SavedBridge } from '../src/bridge'
+import { Bridge, defersToHuman, isSavedBridge, parsePorts, routeId, type BridgeEvent, type SavedBridge } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, ReplayGuard, seal, fromB64 } from '../src/crypto'
 import { Viewer } from '../src/viewer'
@@ -1021,5 +1021,80 @@ describe('connection log', () => {
     const hello = seal({ type: 'hello', token: 'nope', name: 'evil', addrs: [], port: 1 }, fromB64(a.key), stranger)
     expect((await fetch(url, { method: 'POST', body: JSON.stringify(hello) })).status).toBe(403)
     expect(a.log.read().find(e => e.event === 'refused_stranger')).toMatchObject({ peer: 'evil', reason: expect.stringContaining('unknown code') })
+  })
+})
+
+describe('waiting for the other side\'s human', () => {
+  async function asking(extra: Partial<ConstructorParameters<typeof Bridge>[0]> = {}) {
+    const a = make('A · Claude Code', extra)
+    const b = make('B · Codex')
+    a.open()
+    await b.connect(a.newCode())
+    await next(a, 'connected')
+    const asked = await a.ask(undefined, '배포 날짜를 정해 주세요.')
+    await next(b, 'message')
+    return { a, b, thread: asked.thread }
+  }
+
+  test('the asking side sees since when, for how long, and the state of the question window, and is told when it takes long', async () => {
+    const slow: string[] = []
+    const { a, b, thread } = await asking({ nudgeMs: 400, tickMs: 50 })
+    a.onSlow = e => slow.push(e.thread)
+    await b.hold(thread, '담당자에게 묻는 중입니다.')
+    b.waitForHuman({ thread, question: '배포 날짜?', options: ['금요일', '월요일'], at: new Date().toISOString() })
+    await next(a, 'message')
+
+    const summary = a.threadSummaries().find(t => t.id === thread)!
+    expect(summary.status).toBe('peer_checking_with_their_human')
+    expect(summary.their_human).toMatchObject({ since: expect.any(String), minutes: 0 })
+    let deciding = (await a.connections()).peers[0]!.their_human_deciding!
+    expect(deciding).toEqual([expect.objectContaining({ thread, window: expect.stringContaining("on their human's screen"), reminders: 0 })])
+
+    // 사람이 창을 봤지만 답하지 않고 닫았다. 다시 알렸다.
+    b.humanClosedWindow(thread, true)
+    b.remindedHuman(thread)
+    deciding = (await a.connections()).peers[0]!.their_human_deciding!
+    expect(deciding[0]).toMatchObject({ window: expect.stringContaining('closed it without answering'), reminders: 1, last_reminder: expect.any(String) })
+    // 질문 내용은 상대에게 가지 않는다.
+    expect(JSON.stringify(deciding)).not.toContain('배포 날짜?')
+
+    const e = (await next(a, 'peer_human_slow')) as Extract<BridgeEvent, { type: 'peer_human_slow' }>
+    expect(e).toMatchObject({ thread, peer: 'B · Codex', subject: '배포 날짜를 정해 주세요.', since: summary.their_human!.since })
+    expect(slow).toContain(thread)
+
+    // 이쪽이 재촉해도 상대는 여전히 사람의 결정을 기다린다.
+    await a.reply(thread, '혹시 진행 상황이 있나요?')
+    expect(a.threads.get(thread)!.status).toBe('peer_checking_with_their_human')
+
+    // 사람이 정해 답이 오면 기다림은 끝난다.
+    b.humanDone(thread)
+    await b.reply(thread, '사람이 정했습니다: 월요일', { human: true })
+    await next(a, 'message')
+    expect(a.threadSummaries().find(t => t.id === thread)!.their_human).toBeUndefined()
+    expect((await a.connections()).peers[0]!.their_human_deciding).toBeUndefined()
+  }, 20_000)
+
+  test('an older peer that only writes that it passed the question to its human is seen as asking its human', async () => {
+    const { a, b, thread } = await asking({ nudgeMs: 300, tickMs: 50 })
+    await b.reply(thread, '담당자에게 올렸습니다. 정해지면 알려 드리겠습니다.')
+    await next(a, 'message')
+    expect(a.threads.get(thread)!.status).toBe('peer_checking_with_their_human')
+    expect(a.threadSummaries().find(t => t.id === thread)!.their_human!.window).toContain('older coworker version')
+    expect(await next(a, 'peer_human_slow')).toMatchObject({ thread, said_in_text: true })
+  }, 20_000)
+
+  test('tells an answer that leaves the decision to a human from one that does not', () => {
+    for (const t of [
+      '담당자에게 올렸습니다. 정해지면 알리겠습니다.',
+      '보안 담당에게 전달했어요.',
+      '확인 후 알려 드릴게요.',
+      '결정되면 회신하겠습니다.',
+      'I asked my human and will get back to you.',
+      'I will let you know once my manager decides.',
+      'Checking with my human now.',
+    ])
+      expect([t, defersToHuman(t)]).toEqual([t, true])
+    for (const t of ['네, 설치하셔도 됩니다.', '확인했습니다. 7판이 맞습니다.', '사람에게 보이는 화면은 viewer.ts 에 있습니다.', 'The human-readable log is in logs/.', 'Yes, Monday works.'])
+      expect([t, defersToHuman(t)]).toEqual([t, false])
   })
 })

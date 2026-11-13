@@ -2,10 +2,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { version } from '../package.json'
-import { Bridge, parsePorts, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
+import { Bridge, defersToHuman, parsePorts, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
 import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
+import { osNotify, type Notify } from './notify'
 import { rmSync } from 'node:fs'
 import { listSaved, readSaved, savedPath, stillRunning, waitUntilStopped } from './resume'
 import { firstCheckMs, newer, selfUpdate, UPDATE_EVERY_MS } from './update'
@@ -22,14 +23,14 @@ const WINDOW_KO = {
   choose: '고르기',
   recommended: ' (추천)',
   other: '직접 입력',
-  otherHint: '보기에 없으면 여기에 쓰세요. 고른 것에 덧붙일 말도 여기에 씁니다. 답하지 않고 닫으면 AI가 다시 묻습니다.',
+  otherHint: '보기에 없으면 여기에 쓰세요. 고른 것에 덧붙일 말도 여기에 씁니다. 답하지 않고 닫으면 AI가 대화로 다시 묻고, 다음 알림 때 이 창이 다시 뜹니다.',
   about: (peer: string, subject: string) => `대화 상대: ${peer} · 주제: ${subject}`,
 }
 const WINDOW_EN = {
   choose: 'Choose',
   recommended: ' (recommended)',
   other: 'Or write your own answer',
-  otherHint: 'Write here if no option fits, or to add to your choice. Close it without answering and the AI will ask again.',
+  otherHint: 'Write here if no option fits, or to add to your choice. Close it without answering and the AI asks again in the conversation, and this window opens again with the next reminder.',
   about: (peer: string, subject: string) => `Conversation with ${peer}: ${subject}`,
 }
 // 상대에게 가는 사람의 결정. 번호는 상대가 보지 못한 목록의 것이라 빼고, 고른 말과 쓴 말만 보낸다.
@@ -61,7 +62,14 @@ export type SessionOptions = {
   updater?: typeof selfUpdate
   // 앱(serve)에 붙은 세션이면: 앱이 받아 둔 새 판과, 사람이 지금 바로 새 판으로 다시 켜는 명령.
   app?: { downloaded: () => string | undefined; restartCommand: string }
+  // 사람에게 띄울 OS 알림. 시험에서만 바꾼다.
+  notify?: Notify
 }
+
+// 사람이 질문에 답할 때까지 이 간격으로 OS 알림을 다시 띄우고, 닫힌 질문 창을 다시 띄운다. 상대가 오래 답하지 않으면 nudge 간격으로 이쪽 사람에게 알린다.
+const REMIND_MS = Number(process.env.COWORKER_REMIND_MS) || 10 * 60_000
+const NUDGE_MS = Number(process.env.COWORKER_NUDGE_MS) || 30 * 60_000
+const TICK_MS = Number(process.env.COWORKER_TICK_MS) || undefined
 
 // 이 프로세스에서 지금 돌고 있는 브릿지. 앱은 Claude Code 가 다시 켜지면 새 MCP 세션을 받으므로,
 // 그 세션이 resume 으로 같은 이름표의 브릿지를 넘겨받게 한다.
@@ -125,6 +133,8 @@ export function createSession(opts: SessionOptions) {
   Answer what is settled, ask your human what needs deciding
   - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
   - If the question needs a decision nobody has made yet (choosing between options, priorities, scope, schedule, anything your human would want a say in), do not decide it yourself. Call check_with_human with the question for your human, 2 to 6 options in their language, and the one you recommend. It tells the other side you are asking and opens a question window on your human's screen, where they pick a number or write their own answer. Their decision then goes to the other side by itself, marked as your human's decision, and you get a decision event; tell your human in one line what was sent. Do not leave a decision as plain text only.
+  - Never answer the other side with only "I passed it to my human" or "I will let you know after checking"; reply refuses such an answer. Use check_with_human: it shows a desktop notification with sound, reminds your human every few minutes until they answer, opens a closed window again, and lets the other side see that you are asking, since when, and whether the window was seen.
+  - When the other side is checking with its human, list_connections and inbox show it under their_human (since when, for how many minutes, and the state of their question window). If it takes long, you get a peer_human_slow event (after 30 minutes, then every 30 minutes) and your human gets a desktop notification: tell your human, so they can reach the other person by phone or messenger.
   - If no window could be opened, or your human closed it without answering, ask in your reply: the question, then the options numbered 1, 2, 3 … with your recommendation marked, and that they can answer with a number or in their own words (in Claude Code, use the AskUserQuestion tool if you have it). When they answer, send it with reply and decided_by_human set to true.
   - If you cannot find the answer, say what you checked and what you could not confirm.
 
@@ -194,7 +204,8 @@ export function createSession(opts: SessionOptions) {
     } catch {}
   }
 
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity) })
+  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS })
+  const notify = opts.notify ?? osNotify
 
   function getBridge() {
     if (!bridge) {
@@ -211,6 +222,11 @@ export function createSession(opts: SessionOptions) {
     bridge = b
     moved = false
     if (channel) b.onEvent = () => void (pushing = pushing.then(pushEvents))
+    // 상대가 자기 사람에게 묻기 시작한 지 오래됐다. 이쪽 사람이 다른 길(전화, 메신저)로 재촉할 수 있게 화면에 알린다.
+    b.onSlow = e =>
+      KOREAN.test(e.subject)
+        ? notify(`coworker · ${e.peer}`, `상대 쪽 사람의 결정을 ${e.minutes}분째 기다립니다: ${e.subject}. 전화나 메신저로 재촉해 보세요.`)
+        : notify(`coworker · ${e.peer}`, `Waiting ${e.minutes} min for their human to decide: ${e.subject}. Consider a call or a message.`)
     b.onMoved = () => {
       if (bridge !== b) return
       moved = true
@@ -325,7 +341,7 @@ export function createSession(opts: SessionOptions) {
   const NOT_OPEN =
     'the bridge is not open; call open_bridge or connect first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result'
   const NEWS =
-    "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options."
+    "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options (the window also opens again by itself with the next reminder). A peer_human_slow event means the other side has been waiting that many minutes for their human's decision: tell your human who, on what, for how long, and what is known about the other side's question window, and suggest they reach the other person another way (a call or a messenger); do not send the other side more messages about it."
   const PUSHED = `${NEWS} Then end your turn; the next message comes in by itself.`
 
   async function pushEvents() {
@@ -352,6 +368,8 @@ export function createSession(opts: SessionOptions) {
         return { type: event.type, to: event.to, ...(event.thread ? { thread: event.thread } : {}) }
       case 'decision':
         return { type: event.type, thread: event.thread, ...(event.closed ? { closed: 'true' } : {}) }
+      case 'peer_human_slow':
+        return { type: event.type, thread: event.thread, peer: event.peer, minutes: String(event.minutes) }
       case 'moved':
         return { type: event.type }
     }
@@ -366,7 +384,7 @@ export function createSession(opts: SessionOptions) {
   const windows = new Map<string, AbortController>()
   const now = () => new Date().toISOString()
 
-  function openWindow(b: Bridge, asked: HumanQuestion, relatedRequestId?: string | number) {
+  function openWindow(b: Bridge, asked: HumanQuestion, relatedRequestId?: string | number, minutes?: number) {
     if (windows.has(asked.thread)) return
     const stop = new AbortController()
     windows.set(asked.thread, stop)
@@ -386,13 +404,20 @@ export function createSession(opts: SessionOptions) {
       },
     }
     const message = `${asked.question}${t ? `\n\n${say.about(t.peerName, t.subject)}` : ''}`
+    b.humanClosedWindow(asked.thread, false)
+    alert(asked, ko, minutes)
     server.server
       .elicitInput({ mode: 'form', message, requestedSchema }, { relatedRequestId, signal: stop.signal, timeout: WAIT_FOREVER_MS })
       .then(async res => {
-        b.humanDone(asked.thread)
         const picked = res.action === 'accept' ? asked.options[Number(res.content?.choice) - 1] : undefined
         const written = res.action === 'accept' && typeof res.content?.other === 'string' ? res.content.other.trim() || undefined : undefined
-        if (!picked && !written) return b.tell({ type: 'decision', thread: asked.thread, peer, closed: true, at: now() })
+        // 사람이 창을 봤지만 답하지 않고 닫았다. 질문은 남겨 두고 다음 알림 때 다시 띄운다. 그사이 AI가 대화로 묻는다.
+        if (!picked && !written) {
+          b.humanClosedWindow(asked.thread, true)
+          return b.tell({ type: 'decision', thread: asked.thread, peer, closed: true, opens_again_at: new Date(Date.now() + REMIND_MS).toISOString(), at: now() })
+        }
+        b.humanDone(asked.thread)
+        stopReminders(asked.thread)
         try {
           const sent = await b.reply(asked.thread, decisionText(picked, written, ko), { human: true })
           b.tell({ type: 'decision', thread: asked.thread, peer, choice: picked, text: written, delivery: sent.delivery, at: now() })
@@ -409,8 +434,49 @@ export function createSession(opts: SessionOptions) {
 
   // 사람이 아직 답하지 않은 질문 창을 다시 띄운다. 세션을 다시 켰거나 되살렸을 때다.
   function reopenWindows(b: Bridge) {
-    if (!canAsk()) return
-    for (const asked of b.humanQuestions()) if (b.threads.has(asked.thread)) openWindow(b, asked)
+    for (const asked of b.humanQuestions()) {
+      if (!b.threads.has(asked.thread)) continue
+      if (canAsk() && !asked.text) openWindow(b, asked)
+      startReminders(b, asked.thread)
+    }
+  }
+
+  // 사람에게 OS 알림을 띄운다. 창이 다른 화면 뒤에 있어도 소리와 함께 보인다.
+  function alert(asked: HumanQuestion, ko: boolean, minutes?: number) {
+    const peer = bridge?.threads.get(asked.thread)?.peerName ?? 'coworker'
+    const title = ko ? `coworker · ${peer} 쪽이 결정을 기다립니다` : `coworker · ${peer} is waiting for your decision`
+    const where = asked.text ? (ko ? 'AI 대화창에서 답해 주세요.' : 'Answer in the AI conversation.') : ko ? '질문 창에서 답해 주세요.' : 'Answer in the question window.'
+    const waited = minutes !== undefined ? (ko ? `${minutes}분째 기다립니다. ` : `Waiting ${minutes} min. `) : ''
+    notify(title, `${waited}${asked.question} — ${where}`)
+  }
+
+  // 사람이 답할 때까지 REMIND_MS 마다 다시 알린다. 사람이 창을 닫았으면 창도 다시 띄운다.
+  const reminders = new Map<string, ReturnType<typeof setInterval>>()
+  function startReminders(b: Bridge, thread: string) {
+    if (reminders.has(thread)) return
+    const timer = setInterval(() => {
+      if (bridge !== b) return stopReminders(thread)
+      const asked = b.remindedHuman(thread)
+      if (!asked || !b.threads.has(thread)) return stopReminders(thread)
+      const ko = KOREAN.test(asked.question + asked.options.join(''))
+      const minutes = Math.round((Date.now() - Date.parse(asked.at)) / 60_000)
+      if (canAsk() && !asked.text && !windows.has(thread)) openWindow(b, asked, undefined, minutes)
+      else alert(asked, ko, minutes)
+    }, REMIND_MS)
+    timer.unref?.()
+    reminders.set(thread, timer)
+  }
+  function stopReminders(thread: string) {
+    clearInterval(reminders.get(thread))
+    reminders.delete(thread)
+  }
+
+  // 사람이 대화 글로 답해 AI가 보냈거나, 그 대화에 다른 답이 나갔다. 묻던 것은 끝났다.
+  function humanAnswered(b: Bridge, thread: string) {
+    b.humanDone(thread)
+    stopReminders(thread)
+    windows.get(thread)?.abort()
+    windows.delete(thread)
   }
 
   // 띄워 둔 창을 닫는다. 사람이 브릿지를 닫으면 물을 것도 끝난 것이다.
@@ -420,6 +486,10 @@ export function createSession(opts: SessionOptions) {
       if (forget) bridge?.humanDone(thread)
     }
     windows.clear()
+    for (const thread of [...reminders.keys()]) {
+      stopReminders(thread)
+      if (forget) bridge?.humanDone(thread)
+    }
   }
 
   // 브라우저로 대화를 보는 화면. 브릿지가 닫혀도 세션이 살아 있는 동안은 지난 대화를 보여 준다.
@@ -667,13 +737,21 @@ export function createSession(opts: SessionOptions) {
         decided_by_human: z
           .boolean()
           .optional()
-          .describe('true when this answer is your human\'s decision that they gave you in the conversation (a question window sends its answer by itself).'),
+          .describe('true when this answer is your human\'s decision that they gave you in the conversation (a question window sends its answer by itself). It also ends an open question for your human on this conversation.'),
       },
     },
-    tool(async ({ thread, text, decided_by_human }: { thread: string; text: string; decided_by_human?: boolean }) => ({
-      ...(await getBridge().reply(thread, text, { human: decided_by_human })),
-      next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${listen()}`,
-    })),
+    tool(async ({ thread, text, decided_by_human }: { thread: string; text: string; decided_by_human?: boolean }) => {
+      const b = getBridge()
+      // 「사람에게 올렸다, 정해지면 알리겠다」만 답 글로 보내면, 상대는 창이 열렸는지 사람이 봤는지 모른 채 기다린다.
+      if (!decided_by_human && defersToHuman(text) && !b.humanQuestions().some(q => q.thread === thread))
+        throw new Error(
+          'Not sent: this answer says you passed the decision to your human, but no question is open for them. Call check_with_human on this conversation instead, with the question, 2 to 6 options and your recommendation (put a one-line notice for the other side in note). It opens a question window with a desktop notification, reminds your human until they answer, and lets the other side see that you are waiting and for how long. If your answer does not leave anything to your human, reword it without saying you will ask them.',
+        )
+      const sent = await b.reply(thread, text, { human: decided_by_human })
+      // 대화 글로 사람의 결정을 보냈거나, 그 대화에 답이 나갔다. 띄워 둔 창과 다시 알리기를 멈춘다.
+      if (decided_by_human || b.humanQuestions().some(q => q.thread === thread)) humanAnswered(b, thread)
+      return { ...sent, next: `Tell your human what you answered and whether it was settled from facts or decided by your human. ${listen()}` }
+    }),
   )
 
   server.registerTool(
@@ -705,14 +783,18 @@ export function createSession(opts: SessionOptions) {
           return { thread, window: 'open', next: `A question window for this conversation is already open on your human's screen; wait for their answer. ${listen()}` }
         const b = getBridge()
         const held = await b.hold(thread, note ?? 'This needs a decision, so I am asking my human. I will answer as soon as they decide.')
-        if (!canAsk()) return { ...held, window: false, next: ASK_IN_TEXT }
-        const asked: HumanQuestion = { thread, question, options, recommend, at: new Date().toISOString() }
+        const asked: HumanQuestion = { thread, question, options, recommend, at: new Date().toISOString(), text: !canAsk() || undefined }
         b.waitForHuman(asked)
+        startReminders(b, thread)
+        if (!canAsk()) {
+          alert(asked, KOREAN.test(question + options.join('')))
+          return { ...held, window: false, next: ASK_IN_TEXT }
+        }
         openWindow(b, asked, extra.requestId)
         return {
           ...held,
           window: 'open',
-          next: `A question window is now open on your human's screen. Tell your human in one line that a decision is waiting for them there, and do not ask the same question in text. When they answer, their decision goes to the other side by itself and you get a decision event. ${listen()}`,
+          next: `A question window is now open on your human's screen, with a desktop notification and sound. Until they answer, they are reminded every ${Math.round(REMIND_MS / 60_000)} minutes and a closed window opens again; the other side sees how long it has waited. Tell your human in one line that a decision is waiting for them there, and do not ask the same question in text. When they answer, their decision goes to the other side by itself and you get a decision event. ${listen()}`,
         }
       },
     ),

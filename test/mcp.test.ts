@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ElicitRequestSchema, type ElicitRequest, type ElicitResult } from '@modelcontextprotocol/sdk/types.js'
@@ -20,7 +20,7 @@ async function session(clientName: string, env: Record<string, string> = {}, cli
       args: [join(import.meta.dir, '..', 'src', 'mcp.ts')],
       // 시험을 채널로 켠 Claude Code 안에서 돌려도 채널로 바뀌지 않게 정해 둔다.
       // Claude Code 안에서 돌려도 그 세션 ID를 물려받지 않게 비운다. 다시 켜기 시험만 따로 준다.
-      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDE_CODE_SESSION_ID: '', COWORKER_AUTO_UPDATE: 'off', ...env } as Record<string, string>,
+      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDE_CODE_SESSION_ID: '', COWORKER_AUTO_UPDATE: 'off', COWORKER_NOTIFY: 'off', ...env } as Record<string, string>,
       stderr: 'inherit',
     }),
   )
@@ -504,6 +504,53 @@ test('closing the question window without answering tells the AI to ask in text'
   const got = (await codex('wait_for_message', { timeout_sec: 2 })).events
   expect(got.map((e: { kind?: string }) => e.kind)).toEqual(['note'])
 })
+
+test('an answer that only says the decision went to a human is not sent; the AI is told to use check_with_human', async () => {
+  const { claude, codex, asked } = await questionFromCodex()
+  await expect(claude('reply', { thread: asked.thread, text: '담당자에게 올렸습니다. 정해지면 알려 드리겠습니다.' })).rejects.toThrow(/Call check_with_human/)
+  expect((await codex('wait_for_message', { timeout_sec: 1 })).events).toEqual([])
+  // 사람이 정한 답이면 보낸다.
+  expect(await claude('reply', { thread: asked.thread, text: '사람이 정했습니다: 확인 후 알려 드리기로 했습니다.', decided_by_human: true })).toMatchObject({ delivery: 'delivered' })
+})
+
+test('until the human answers, the question is announced and repeated on the desktop, a closed window opens again, and the other side sees it', async () => {
+  const log = join(mkdtempSync(join(tmpdir(), 'coworker-notify-')), 'notify.log')
+  let release: (r: ElicitResult) => void = () => {}
+  let calls = 0
+  const { client, shown } = windowClient(() => (++calls === 1 ? { action: 'cancel' } : new Promise<ElicitResult>(r => (release = r))))
+  const claude = await session('claude-code', { COWORKER_NOTIFY_LOG: log, COWORKER_REMIND_MS: '1500' }, client)
+  const codex = await session('codex-mcp-client')
+  await codex('connect', { code: (await claude('open_bridge', {})).code })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  const asked = await codex('send_question', { question: '배포를 언제 할까요?' })
+  await claude('wait_for_message', { timeout_sec: 5 })
+  const held = await claude('check_with_human', { thread: asked.thread, question: '배포를 언제 할까요?', options: ['금요일', '월요일'], recommend: 2 })
+  expect(held.next).toMatch(/desktop notification/)
+
+  // 사람이 창을 답 없이 닫았다. AI는 다시 뜰 때를 듣고, 상대는 사람이 창을 보고 닫았다는 것을 본다.
+  const told = (await claude('wait_for_message', { timeout_sec: 5 })).events
+  expect(told).toEqual([expect.objectContaining({ type: 'decision', closed: true, opens_again_at: expect.any(String) })])
+  const seen = (await codex('list_connections')).peers[0].their_human_deciding
+  expect(seen).toEqual([expect.objectContaining({ thread: asked.thread, window: expect.stringContaining('closed it without answering') })])
+  expect((await codex('inbox')).conversations.find((c: { id: string }) => c.id === asked.thread).their_human).toMatchObject({ since: expect.any(String) })
+
+  // 다음 알림 때 창이 다시 뜨고 OS 알림이 다시 간다. 이번에는 사람이 고른다.
+  for (let i = 0; i < 100 && shown.length < 2; i++) await Bun.sleep(50)
+  expect(shown).toHaveLength(2)
+  const lines = readFileSync(log, 'utf8').trim().split('\n').map(l => JSON.parse(l))
+  expect(lines.length).toBe(2)
+  expect(lines[0].title).toContain('결정을 기다립니다')
+  expect(lines.some((l: { body: string }) => l.body.includes('분째 기다립니다'))).toBe(true)
+  release({ action: 'accept', content: { choice: '2' } })
+  const got: { kind?: string; text?: string }[] = []
+  for (let i = 0; i < 10 && !got.some(e => e.kind === 'answer'); i++) got.push(...(await codex('wait_for_message', { timeout_sec: 2 })).events)
+  expect(got.find(e => e.kind === 'answer')).toMatchObject({ text: '사람이 정했습니다: 월요일' })
+  expect((await claude('inbox')).waiting_for_your_human).toBeUndefined()
+  // 답한 뒤로는 더 알리지 않는다.
+  const after = readFileSync(log, 'utf8')
+  await Bun.sleep(1800)
+  expect(readFileSync(log, 'utf8')).toBe(after)
+}, 30_000)
 
 test('a question window the human has not answered opens again when the same session starts again', async () => {
   const own = mkdtempSync(join(tmpdir(), 'coworker-window-'))

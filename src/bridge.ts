@@ -126,6 +126,26 @@ export type Thread = {
   status: ThreadStatus
   ask?: AskInfo
   messages: ThreadMessage[]
+  // 상대가 자기 사람에게 묻기 시작한 때. 「사람에게 확인 중」 알림을 받았거나, 답에 「사람에게 올렸다」고만 썼을 때다.
+  humanSince?: string
+  // 그 사실을 상대가 알림 없이 답 글로만 알렸다(0.7 이하 판). 질문 창이 열렸는지는 알 수 없다.
+  saidInText?: boolean
+  // 오래 기다린다고 이쪽에 알린 횟수. nudgeMs 마다 하나씩 는다.
+  nudges?: number
+  // 상대가 알려 준 질문 창 상태(0.8 이상 판). 연결 상태를 볼 때와 기다리는 동안 1분마다 새로 받는다.
+  peerWait?: WaitState
+}
+
+// 이쪽 사람에게 띄운 질문 창의 상태. 묻는 쪽이 「상대가 사람에게 묻는 중」을 자세히 볼 수 있게 건넨다.
+// shown: 사람 화면에 창이 떠 있다. closed_without_answer: 사람이 창을 봤지만 답하지 않고 닫았다(다음 알림 때 다시 뜬다).
+// text: 이 앱은 창을 띄울 수 없어서 대화 글로 물었다.
+export type WaitState = {
+  thread: string
+  since: string
+  window: 'shown' | 'closed_without_answer' | 'text'
+  reminders: number
+  last_reminder?: string
+  closed_at?: string
 }
 
 // 여럿에게 보낸 질문에 답이 오면, 몇 명이 답했고 몇 명이 남았는지 함께 알린다.
@@ -156,10 +176,34 @@ export type BridgeEvent =
   // 두 PC의 시계가 너무 달라서 그 상대와 주고받지 못한다. 시계를 맞출 때까지 메시지는 보내지 않고 들고 있다.
   | { type: 'clock'; peer: string; fix: string; at: string }
   // 이쪽 사람이 질문 창에 답했다. 고른 것과 쓴 말은 상대에게 이미 보냈다. closed: 답하지 않고 창을 닫았다. error: 보내지 못한 까닭.
-  | { type: 'decision'; thread: string; peer: string; choice?: string; text?: string; delivery?: 'delivered' | 'queued'; closed?: boolean; error?: string; at: string }
+  | { type: 'decision'; thread: string; peer: string; choice?: string; text?: string; delivery?: 'delivered' | 'queued'; closed?: boolean; opens_again_at?: string; error?: string; at: string }
+  // 상대가 자기 사람에게 묻기 시작한 지 오래됐다(기본 30분, 그 뒤로 30분마다). 이쪽 사람이 전화나 메신저로 재촉할 수 있게 알린다.
+  | { type: 'peer_human_slow'; thread: string; peer: string; subject: string; since: string; minutes: number; their_window?: WaitState; said_in_text?: boolean; at: string }
 
 // 이쪽 사람에게 띄운 질문 창. 사람이 답하거나 창을 닫을 때까지 남고, 세션을 다시 켜면 다시 띄운다.
-export type HumanQuestion = { thread: string; question: string; options: string[]; recommend?: number; at: string }
+// reminders: 다시 알린 횟수. closedAt: 사람이 답하지 않고 창을 닫은 때. text: 창을 띄울 수 없어 글로 물었다.
+export type HumanQuestion = {
+  thread: string
+  question: string
+  options: string[]
+  recommend?: number
+  at: string
+  reminders?: number
+  lastReminder?: string
+  closedAt?: string
+  text?: boolean
+}
+
+// 결정을 사람에게 넘겼다는 말. 이런 말을 답 글로만 보내면 상대는 창이 열렸는지, 사람이 봤는지 모른 채 기다린다.
+// 보내는 쪽은 이런 답을 막고 check_with_human 을 쓰게 한다. 받는 쪽은 옛 판 상대가 이렇게 답하면 「사람에게 묻는 중」으로 본다.
+const DEFERS_TO_HUMAN = [
+  /(사람|담당자?|책임자|팀장|상사|관리자|보안\s*담당|윗선|결재권자|사용자|주인)(에게|께|한테|쪽에|분께)\s*(올렸|올리|넘겼|넘기|전달|여쭤|물어|묻|확인\s*요청|보고)/,
+  /(확인|결정|검토|승인|논의)\s*(후|되면|되는\s*대로|하고\s*나서|받는\s*대로|받으면)[^.\n]{0,20}(알려|알리|회신|답|연락|공유)/,
+  /(정해지면|정해지는\s*대로|결정되면|답이\s*오면|회신이\s*오면|답을\s*받으면)[^.\n]{0,20}(알려|알리|회신|답|연락|공유)/,
+  /\b(ask(ed|ing)?|check(ed|ing)? with|run (it|this) by|escalat\w*|pass(ed|ing)? (it|this) to|forward(ed|ing)? (it|this) to)\b[^.\n]{0,30}\b(my|our|the) (human|owner|user|manager|lead|team|boss|security)/i,
+  /\b(get back to you|let you know)\b[^.\n]{0,30}\b(once|when|after|as soon as)\b/i,
+]
+export const defersToHuman = (text: string) => DEFERS_TO_HUMAN.some(r => r.test(text))
 
 type WireMessage = {
   id: string
@@ -193,7 +237,8 @@ type Payload =
   | { type: 'msg'; msg: WireMessage }
   | { type: 'ok' }
   | { type: 'ping' }
-  | { type: 'pong' }
+  // waiting: 받는 쪽이 이 상대와의 대화에서 자기 사람에게 묻는 중인 것. 0.7 이하 판은 보내지 않는다.
+  | { type: 'pong'; waiting?: WaitState[] }
   | { type: 'bye' }
   | { type: 'poll'; wait: number; ack?: string[] }
   | { type: 'batch'; items: { id: string; payload: Payload }[] }
@@ -235,6 +280,10 @@ export type BridgeOptions = {
   saveTo?: string
   // 받은 봉투의 시각을 견줄 이 PC의 시계. 시험에서 시계가 틀린 PC를 흉내 낼 때만 바꾼다.
   clock?: () => number
+  // 상대가 자기 사람에게 묻는 동안 이 시간마다 이쪽에 「오래 기다린다」고 알린다. 기본 30분.
+  nudgeMs?: number
+  // 이 PC 쪽 일(잠자기, 주소 바뀜, 오래 기다림)을 보는 간격. 시험에서만 줄인다.
+  tickMs?: number
 }
 
 // 사람이 브라우저로 여는 대화 보기 화면의 주소. 세션을 다시 켜도 이 포트와 토큰으로 다시 열어서, 열어 둔 화면이 스스로 다시 붙는다.
@@ -401,6 +450,9 @@ export class Bridge {
   private viewerAddress?: ViewerAddress
   // 이쪽 사람에게 띄운 질문 창. 대화 id 마다 하나.
   private asking = new Map<string, HumanQuestion>()
+  private lastWaitPing = 0
+  // 상대가 오래 답하지 않을 때 부른다. 세션이 이쪽 사람에게 OS 알림을 띄운다.
+  onSlow?: (event: Extract<BridgeEvent, { type: 'peer_human_slow' }>) => void
   private waiting = 0
   private flushing = false
   private lastCode?: string
@@ -438,6 +490,8 @@ export class Bridge {
       connectTimeoutMs: 2000,
       pollWaitMs: 20_000,
       relayTimeoutMs: 15_000,
+      nudgeMs: 30 * 60_000,
+      tickMs: TICK_MS,
       ...options,
       relay: options.relay?.trim().replace(/\/+$/, '') || undefined,
     }
@@ -699,7 +753,8 @@ export class Bridge {
     const human = opts.human ? { human: true } : {}
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, ...human, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, ...human, at: msg.at })
-    if (thread.status !== 'agreed') thread.status = 'waiting_for_peer'
+    // 상대가 자기 사람에게 묻는 중에 이쪽이 재촉해도, 상대는 여전히 사람의 결정을 기다린다.
+    if (thread.status !== 'agreed' && !(thread.status === 'peer_checking_with_their_human' && thread.humanSince)) thread.status = 'waiting_for_peer'
     this.changed()
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
@@ -798,8 +853,16 @@ export class Bridge {
       [...this.peers.values()].map(async peer => {
         let direct = false
         try {
-          direct = (await this.deliver(peer, { type: 'ping' })).type === 'pong'
+          const pong = await this.deliver(peer, { type: 'ping' })
+          direct = pong.type === 'pong'
+          if (pong.type === 'pong') this.takeWaiting(peer, pong.waiting)
         } catch {}
+        const deciding = [...this.threads.values()]
+          .filter(t => t.peer === peer.key)
+          .flatMap(t => {
+            const h = this.theirHuman(t)
+            return h ? [{ thread: t.id, subject: t.subject, ...h }] : []
+          })
         const pulling = this.isPulling(peer)
         const reachable = direct || pulling
         const error = !reachable && peer.lastError
@@ -819,6 +882,7 @@ export class Bridge {
           last_seen: isoOf(peer.lastSeen),
           last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
           next_try: reachable ? undefined : (isoOf(peer.retryAt) ?? 'now'),
+          their_human_deciding: deciding.length ? deciding : undefined,
         }
       }),
     )
@@ -836,6 +900,7 @@ export class Bridge {
         ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
         messages: counted(t),
         last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
+        their_human: this.theirHuman(t),
       }
     })
   }
@@ -1078,7 +1143,7 @@ export class Bridge {
   private process(peer: Peer, payload: Payload): Payload | null {
     switch (payload.type) {
       case 'ping':
-        return { type: 'pong' }
+        return { type: 'pong', waiting: this.waitingFor(peer) }
       case 'msg':
         this.receive(peer, payload.msg)
         return { type: 'ok' }
@@ -1350,8 +1415,14 @@ export class Bridge {
     else if (agreement) thread.status = 'agreed'
     // 합의문을 쓴 뒤에 온 알림이나 답(사람이 정한 것 포함)도 남기기만 한다.
     else if (thread.status === 'agreed') {
-    } else if (msg.kind === 'note') thread.status = 'peer_checking_with_their_human'
-    else thread.status = 'your_turn'
+    } else if (msg.kind === 'note') this.peerAsksHuman(thread, false)
+    // 옛 판 상대가 「사람에게 올렸다」고 답 글로만 알렸다. 사람이 정한 답은 아니다.
+    else if (msg.kind === 'answer' && !msg.human && defersToHuman(text)) this.peerAsksHuman(thread, true)
+    else {
+      thread.status = 'your_turn'
+      this.peerAnswered(thread)
+    }
+    if (agreement || thread.status === 'closed') this.peerAnswered(thread)
     const file = agreement ? this.saveAgreement(thread) : undefined
     let ask: AskInfo | AskProgress | undefined = thread.ask
     if (thread.ask && thread.startedBy === 'me') {
@@ -1359,6 +1430,108 @@ export class Bridge {
       ask = this.askProgress(thread.ask)
     }
     this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, at: now() })
+  }
+
+  private peerAsksHuman(thread: Thread, inText: boolean) {
+    // 이미 묻는 중이면 처음 물은 때를 그대로 둔다. 다시 알린다고 기다린 시간이 줄지 않는다.
+    if (thread.status !== 'peer_checking_with_their_human' || !thread.humanSince) {
+      thread.humanSince = now()
+      thread.nudges = 0
+      thread.peerWait = undefined
+    }
+    thread.status = 'peer_checking_with_their_human'
+    thread.saidInText = inText || undefined
+  }
+
+  private peerAnswered(thread: Thread) {
+    thread.humanSince = undefined
+    thread.saidInText = undefined
+    thread.nudges = undefined
+    thread.peerWait = undefined
+  }
+
+  // 이 상대와의 대화 가운데 이쪽 사람에게 묻는 중인 것. 상대가 ping 하면 함께 건넨다. 질문 내용은 건네지 않는다.
+  private waitingFor(peer: Peer): WaitState[] | undefined {
+    const out: WaitState[] = []
+    for (const q of this.asking.values()) {
+      if (this.threads.get(q.thread)?.peer !== peer.key) continue
+      out.push({
+        thread: q.thread,
+        since: q.at,
+        window: q.text ? 'text' : q.closedAt ? 'closed_without_answer' : 'shown',
+        reminders: q.reminders ?? 0,
+        last_reminder: q.lastReminder,
+        closed_at: q.closedAt,
+      })
+    }
+    return out.length ? out : undefined
+  }
+
+  // 상대가 알려 준 질문 창 상태를 대화에 붙인다. 이미 답이 와서 묻는 중이 아닌 대화에는 붙이지 않는다.
+  private takeWaiting(peer: Peer, waiting: unknown) {
+    if (!Array.isArray(waiting)) return
+    for (const w of waiting as WaitState[]) {
+      if (!w || typeof w.thread !== 'string' || typeof w.since !== 'string') continue
+      const t = this.threads.get(w.thread)
+      if (!t || t.peer !== peer.key || t.status !== 'peer_checking_with_their_human') continue
+      const window = ['shown', 'closed_without_answer', 'text'].includes(w.window) ? w.window : 'shown'
+      const str = (v: unknown) => (typeof v === 'string' ? v.slice(0, 40) : undefined)
+      t.peerWait = { thread: t.id, since: str(w.since)!, window, reminders: Number.isInteger(w.reminders) ? w.reminders : 0, last_reminder: str(w.last_reminder), closed_at: str(w.closed_at) }
+    }
+  }
+
+  // 상대가 자기 사람에게 묻는 중인 대화. 묻는 쪽이 얼마나 기다렸는지, 상대의 창이 어떤지 본다.
+  private theirHuman(t: Thread) {
+    if (t.status !== 'peer_checking_with_their_human' || !t.humanSince) return undefined
+    const w = t.peerWait
+    return {
+      since: t.humanSince,
+      minutes: Math.floor((Date.now() - Date.parse(t.humanSince)) / 60_000),
+      window: w
+        ? w.window === 'shown'
+          ? 'a question window is on their human\'s screen'
+          : w.window === 'closed_without_answer'
+            ? `their human saw the question window and closed it without answering at ${w.closed_at}; it opens again with the next reminder`
+            : 'their app cannot open a question window, so their AI asked their human in text'
+        : t.saidInText
+          ? 'they only wrote that they passed it to their human (an older coworker version); whether a question window is open is unknown'
+          : 'unknown (the other side runs an older coworker version)',
+      reminders: w ? w.reminders : undefined,
+      last_reminder: w?.last_reminder,
+    }
+  }
+
+  // 오래 기다리는 대화가 있으면 알린다. 상대에게 창 상태도 1분마다 새로 묻는다.
+  private checkWaits() {
+    const t0 = Date.now()
+    const asking = [...this.threads.values()].filter(t => t.status === 'peer_checking_with_their_human' && t.humanSince)
+    if (!asking.length) return
+    if (t0 - this.lastWaitPing >= Math.min(60_000, this.opts.nudgeMs)) {
+      this.lastWaitPing = t0
+      for (const key of new Set(asking.map(t => t.peer))) {
+        const peer = this.peers.get(key)
+        if (peer) void this.deliver(peer, { type: 'ping' }).then(r => r.type === 'pong' && this.takeWaiting(peer, r.waiting)).catch(() => {})
+      }
+    }
+    for (const t of asking) {
+      const waited = t0 - Date.parse(t.humanSince!)
+      const due = Math.floor(waited / this.opts.nudgeMs)
+      if (due <= (t.nudges ?? 0)) continue
+      t.nudges = due
+      const slow: Extract<BridgeEvent, { type: 'peer_human_slow' }> = {
+        type: 'peer_human_slow',
+        thread: t.id,
+        peer: t.peerName,
+        subject: t.subject,
+        since: t.humanSince!,
+        minutes: Math.floor(waited / 60_000),
+        their_window: t.peerWait,
+        said_in_text: t.saidInText,
+        at: now(),
+      }
+      this.emit(slow)
+      this.onSlow?.(slow)
+    }
   }
 
   private emit(event: BridgeEvent) {
@@ -1384,9 +1557,27 @@ export class Bridge {
     return [...this.asking.values()]
   }
 
-  // 사람이 질문 창에 답했거나 창을 닫았다. 그 대화의 창은 끝났다.
+  // 사람이 질문 창에 답했다(또는 대화 글로 답해 AI가 보냈다). 그 대화의 질문은 끝났다.
   humanDone(thread: string) {
     if (this.asking.delete(thread)) this.dirty()
+  }
+
+  // 사람에게 다시 알렸다. 묻는 쪽이 몇 번 알렸는지 볼 수 있게 센다.
+  remindedHuman(thread: string) {
+    const q = this.asking.get(thread)
+    if (!q) return undefined
+    q.reminders = (q.reminders ?? 0) + 1
+    q.lastReminder = now()
+    this.dirty()
+    return q
+  }
+
+  // 사람이 창을 봤지만 답하지 않고 닫았다. 질문은 남기고, 다음 알림 때 창을 다시 띄운다. undefined 면 창을 다시 띄웠다.
+  humanClosedWindow(thread: string, closed: boolean) {
+    const q = this.asking.get(thread)
+    if (!q) return
+    q.closedAt = closed ? now() : undefined
+    this.dirty()
   }
 
   // 이 세션 안에서 생긴 일(사람이 질문 창에 답함)을 AI에게 알린다.
@@ -1551,6 +1742,7 @@ export class Bridge {
     let addrs = this.opts.addrs().join()
     let n = 0
     this.ticker = setInterval(() => {
+      this.checkWaits()
       const t = Date.now()
       if (t - last > PAUSE_MS) this.log.write('this_pc_paused', { for_s: Math.round((t - last) / 1000), what: 'this computer was asleep or stopped; nothing could get through meanwhile' })
       last = t
@@ -1560,7 +1752,7 @@ export class Bridge {
         if (now !== addrs) this.log.write('this_pc_moved', { from: addrs.split(','), to: now.split(',') })
         addrs = now
       }
-    }, TICK_MS)
+    }, this.opts.tickMs)
     this.ticker.unref?.()
   }
 

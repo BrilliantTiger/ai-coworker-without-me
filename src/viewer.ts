@@ -210,6 +210,7 @@ const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
   decision: 'decision by your human',
   moved: 'moved to another session',
   clock: 'clocks differ',
+  peer_human_slow: 'their human is slow to decide',
 }
 
 const PAGE = `<!doctype html>
@@ -283,7 +284,7 @@ function render(data) {
     const card = el('section', 'conv')
     const head = el('div', 'head')
     const mine = c.startedBy === 'me'
-    head.append(el('span', 'badge' + (mine ? ' out' : ''), mine ? '보낸 질문' : '받은 질문'), el('span', 'subject', c.subject), el('span', 'status', STATUS[c.status] ?? c.status))
+    head.append(el('span', 'badge' + (mine ? ' out' : ''), mine ? '보낸 질문' : '받은 질문'), el('span', 'subject', c.subject), el('span', 'status', (STATUS[c.status] ?? c.status) + (c.status === 'peer_checking_with_their_human' && c.humanSince ? ' · ' + Math.max(0, Math.floor((Date.now() - Date.parse(c.humanSince)) / 60000)) + '분째' : '')))
     const where = c.peerName + (c.peerAddr ? ' (' + c.peerAddr + ')' : '')
     const first = c.messages[0]
     const group = c.ask ? ' · 함께 받은 사람: ' + c.ask.to.join(', ') + ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
