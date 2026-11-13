@@ -16411,7 +16411,7 @@ class StdioServerTransport {
 
 // src/mcp.ts
 import { homedir as homedir2 } from "os";
-import { basename as basename2, join as join6, resolve as resolve2 } from "path";
+import { basename as basename2, join as join6, resolve as resolve3 } from "path";
 
 // src/autostart.ts
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
@@ -16681,12 +16681,14 @@ var REPLAY_MAX_AGE_MS = 2 * 60 * 60000;
 
 class ReplayGuard {
   maxAgeMs;
+  clock;
   nonces = new Map;
   lastSweep = 0;
-  constructor(maxAgeMs = REPLAY_MAX_AGE_MS) {
+  constructor(maxAgeMs = REPLAY_MAX_AGE_MS, clock = Date.now) {
     this.maxAgeMs = maxAgeMs;
+    this.clock = clock;
   }
-  check(sealed, opened, now = Date.now()) {
+  check(sealed, opened, now = this.clock()) {
     const t = opened?.t;
     if (typeof t === "number" && Math.abs(now - t) > this.maxAgeMs)
       return "stale";
@@ -16819,6 +16821,7 @@ function parsePorts(text) {
 var routeId = (key) => Buffer.from(key, "base64").toString("base64url").slice(0, 16);
 var peerId = (key) => routeId(key).slice(0, 6);
 var labelOf = (p) => `${p.name} [${peerId(p.key)}]`;
+var CLOCK_FIX = "Messages are kept and sent once the clocks agree. Turn on automatic date and time on this PC and ask the coworker to do the same (macOS: System Settings > General > Date & Time; Windows: Settings > Time & language > Date & time > Set time automatically).";
 var isLoopback = (addr) => addr.startsWith("127.") || addr === "::1" || addr === "localhost";
 var isRelayAddr = (addr) => /^https?:\/\//.test(addr);
 var LINK_ERRORS = {
@@ -16826,7 +16829,8 @@ var LINK_ERRORS = {
   refused: "its computer answered, but no bridge is listening on that port: coworker there is restarting or stopped",
   timeout: "no answer in time",
   not_recognized: "its bridge answered but does not know this session; this side keeps offering the code it joined with",
-  bad_answer: "an answer came back that could not be read"
+  bad_answer: "an answer came back that could not be read",
+  clock: "its bridge answered, but the clocks of the two PCs differ by more than two hours, so neither side takes the other's messages. Turn on automatic date and time on both PCs"
 };
 var KINDS = ["question", "answer", "note", "closed", "agreement"];
 var EVERYONE = ["everyone", "all"];
@@ -16899,7 +16903,8 @@ class Bridge {
   invites = new Map;
   closedAsks = new Map;
   seen = new Set;
-  replay = new ReplayGuard;
+  replay;
+  clockOff = new Map;
   outbox = [];
   events = [];
   waiters = [];
@@ -16923,6 +16928,7 @@ class Bridge {
   opts;
   constructor(options) {
     this.keys = options.keys ?? newKeyPair();
+    this.replay = new ReplayGuard(undefined, options.clock);
     this.key = toB64(this.keys.publicKey);
     this.route = routeId(this.key);
     this.name = options.name;
@@ -17090,6 +17096,8 @@ class Bridge {
     } catch (e) {
       if (e instanceof DeliveryError && e.reason === "rejected")
         throw new Error("the other session refused this code; it was already used, expired, or that bridge was reopened. Ask for a new code");
+      if (this.clockOff.has(code.key))
+        throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`);
       throw new Error(`cannot reach ${code.name} at ${code.addrs.join(", ")} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`);
     }
     if (reply.type !== "hello_ack")
@@ -17378,6 +17386,8 @@ ${f.evidence}`).join(`
     if (!payload)
       return { status: 403, body: "forbidden" };
     const fresh = this.replay.check(sealed, payload);
+    if (fresh === "stale")
+      this.clockDiffers(sealed.from);
     if (fresh !== "ok")
       return { status: 409, body: fresh === "stale" ? "stale: the two PCs clocks differ by more than two hours" : "already received" };
     const from = sealed.from;
@@ -17940,18 +17950,36 @@ ${f.evidence}`).join(`
     }
     if (res.status === 403)
       return failed("not_recognized"), "refused";
+    if (res.status === 409) {
+      const stale = (await res.text().catch(() => "")).startsWith("stale");
+      if (stale)
+        this.clockDiffers(peer.key);
+      return failed(stale ? "clock" : "bad_answer");
+    }
     if (!res.ok)
       return failed("bad_answer");
     const sealed = await res.json().catch(() => null);
     if (sealed?.from !== peer.key)
       return failed("bad_answer");
     const reply = open2(sealed, this.keys);
-    if (!reply || this.replay.check(sealed, reply) !== "ok")
+    if (!reply)
       return failed("bad_answer");
+    const fresh = this.replay.check(sealed, reply);
+    if (fresh === "stale")
+      this.clockDiffers(peer.key);
+    if (fresh !== "ok")
+      return failed(fresh === "stale" ? "clock" : "bad_answer");
     peer.lastSeen = Date.now();
     peer.lastError = undefined;
     this.wakeRetry(peer.key);
     return reply;
+  }
+  clockDiffers(key) {
+    const last = this.clockOff.get(key);
+    this.clockOff.set(key, Date.now());
+    const peer = this.peers.get(key);
+    if (peer && (!last || Date.now() - last > 60 * 60000))
+      this.emit({ type: "clock", peer: peer.name, fix: CLOCK_FIX, at: now() });
   }
   async sendOrQueue(peer, payload, thread) {
     const skipDirect = peer.directFailed && this.isPulling(peer);
@@ -18968,11 +18996,13 @@ data:
 }
 
 // src/serve.ts
+import { spawn } from "child_process";
 import { randomUUID as randomUUID3 } from "crypto";
-import { basename } from "path";
+import { platform as platform4 } from "os";
+import { basename, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.5.0";
+var version2 = "0.6.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -26545,12 +26575,14 @@ function waitSeconds(requested, codex) {
 import { rmSync as rmSync5 } from "fs";
 
 // src/update.ts
-import { closeSync, mkdirSync as mkdirSync4, openSync, rmSync as rmSync4, statSync as statSync2 } from "fs";
+import { closeSync, mkdirSync as mkdirSync4, openSync, renameSync as renameSync2, rmSync as rmSync4, statSync as statSync2, writeFileSync as writeFileSync4 } from "fs";
 import { join as join5 } from "path";
 var MARKETPLACE = "ai-coworker-without-me";
 var PLUGIN = `coworker@${MARKETPLACE}`;
 var LATEST_URL = "https://raw.githubusercontent.com/BrilliantTiger/ai-coworker-without-me/release/plugin/.claude-plugin/plugin.json";
 var STALE_LOCK_MS = 10 * 60000;
+var UPDATE_EVERY_MS = Number(process.env.COWORKER_UPDATE_EVERY_MS) || 6 * 60 * 60000;
+var firstCheckMs = () => Number(process.env.COWORKER_UPDATE_FIRST_MS) || 5000 + Math.random() * 25000;
 var run2 = async (cmd) => {
   const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
@@ -26622,6 +26654,45 @@ async function selfUpdate(app, current, home, exec = run2) {
     const after = await installed(app, exec);
     return after && newer(after.version, current) ? { to: after.version } : undefined;
   } finally {
+    release();
+  }
+}
+var releaseAsset = (version) => `${process.env.COWORKER_RELEASE_BASE || "https://github.com/BrilliantTiger/ai-coworker-without-me/releases/download"}/v${version}/coworker.js`;
+var BANNER = "// AI Co-worker Without Me: built from src/";
+var download = async (url) => {
+  const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
+  return res.ok ? res.text() : undefined;
+};
+var versionOfFile = async (file) => {
+  const p = Bun.spawn([process.execPath, "--no-install", file, "version"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+  const timer = setTimeout(() => p.kill(), 15000);
+  const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+  clearTimeout(timer);
+  return code === 0 ? out.trim() : undefined;
+};
+async function appUpdate(script, current, home, deps = {}) {
+  const latest = await (deps.latest ?? latestVersion)();
+  if (!latest || !newer(latest, current))
+    return;
+  const release = lock(home);
+  if (!release)
+    return;
+  const tmp = `${script}.download`;
+  try {
+    const text = await (deps.download ?? download)(releaseAsset(latest)).catch(() => {
+      return;
+    });
+    if (!text?.slice(0, 500).includes(BANNER))
+      return;
+    writeFileSync4(tmp, text);
+    if (await (deps.versionOf ?? versionOfFile)(tmp).catch(() => {
+      return;
+    }) !== latest)
+      return;
+    renameSync2(tmp, script);
+    return { to: latest };
+  } finally {
+    rmSync4(tmp, { force: true });
     release();
   }
 }
@@ -26830,7 +26901,8 @@ var WHAT = {
   peer_closed: "left",
   undelivered: "undelivered",
   decision: "decision by your human",
-  moved: "moved to another session"
+  moved: "moved to another session",
+  clock: "clocks differ"
 };
 var PAGE = `<!doctype html>
 <html lang="ko">
@@ -26968,7 +27040,6 @@ if (!document.hidden) connect()
 // src/session.ts
 var DEFAULT_CODE_MINUTES = 60;
 var MAX_CODE_MINUTES = 365 * 24 * 60;
-var UPDATE_EVERY_MS = Number(process.env.COWORKER_UPDATE_EVERY_MS) || 6 * 60 * 60000;
 var WAIT_FOREVER_MS = 2 ** 31 - 1;
 var KOREAN = /[\u3131-\u318E\uAC00-\uD7A3]/;
 var WINDOW_KO = {
@@ -27228,6 +27299,7 @@ ${text}` : "";
         return { type: event.type, kind: event.kind, from: event.from, thread: event.thread };
       case "connected":
       case "peer_closed":
+      case "clock":
         return { type: event.type, peer: event.peer };
       case "undelivered":
         return { type: event.type, to: event.to, ...event.thread ? { thread: event.thread } : {} };
@@ -27316,7 +27388,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
         const note = updateNote();
         if (note && value && typeof value === "object" && !Array.isArray(value)) {
           const next = value.next;
-          return result({ ...value, update: { running: version2, installed: installedUpdate }, next: typeof next === "string" ? `${next} ${note}` : note });
+          return result({ ...value, update: { running: version2, installed: readyUpdate() }, next: typeof next === "string" ? `${next} ${note}` : note });
         }
         return result(value);
       } catch (e) {
@@ -27585,13 +27657,17 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       if (done && (!installedUpdate || newer(done.to, installedUpdate)))
         installedUpdate = done.to;
     };
-    setTimeout(() => void check(), Number(process.env.COWORKER_UPDATE_FIRST_MS) || 5000 + Math.random() * 25000).unref?.();
+    setTimeout(() => void check(), firstCheckMs()).unref?.();
     setInterval(() => void check(), UPDATE_EVERY_MS).unref?.();
   }
+  const readyUpdate = () => opts.app?.downloaded() ?? installedUpdate;
   const updateNote = () => {
-    if (!installedUpdate || updateTold === installedUpdate)
+    const ready = readyUpdate();
+    if (!ready || updateTold === ready)
       return;
-    updateTold = installedUpdate;
+    updateTold = ready;
+    if (opts.app)
+      return `Also tell your human once: the coworker app downloaded ${ready} (it still runs ${version2}). It restarts into the new version by itself when no session is connected to it. To switch now, your human runs: ${opts.app.restartCommand} . After that, call open_bridge with resume set to this session_id (${identity}) to bring the bridge back.`;
     return isCodex() ? `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version2}). Restarting Codex uses it; after that, call open_bridge with resume set to this session_id (${identity}) to bring the bridge back.` : `Also tell your human once: coworker ${installedUpdate} is installed (this session still runs ${version2}). Typing /reload-plugins, or restarting Claude Code, uses it; the bridge and its conversations come back by themselves.`;
   };
   server.server.oninitialized = () => {
@@ -27619,6 +27695,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
 
 // src/serve.ts
 var APP_PORT = 7690;
+var MAX_SESSIONS = Number(process.env.COWORKER_APP_MAX_SESSIONS) || 100;
 var jsonError = (status, message) => new Response(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message }, id: null }), {
   status,
   headers: { "content-type": "application/json" }
@@ -27641,6 +27718,10 @@ async function serve({ home }) {
   const sessions = new Map;
   pruneSaved(home);
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
+  const script = resolve2(process.argv[1] ?? "");
+  const restartCommand = `bun "${script}" autostart on`;
+  const updating = appUpdates(script);
+  let downloaded;
   const close = (id) => {
     const entry = sessions.get(id);
     if (!entry)
@@ -27672,6 +27753,8 @@ async function serve({ home }) {
     }
     if (req.method !== "POST" || !await isInitialize(req))
       return jsonError(400, "Bad Request: No valid session ID provided");
+    if (sessions.size >= MAX_SESSIONS)
+      return jsonError(503, `the coworker app already has ${MAX_SESSIONS} sessions. Close sessions you no longer use, or restart the app: ${restartCommand}`);
     const session = createSession({
       channel: false,
       hint: false,
@@ -27679,7 +27762,8 @@ async function serve({ home }) {
       portsText: process.env.COWORKER_PORTS,
       relay: process.env.COWORKER_RELAY || undefined,
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
-      folder: rootsFolder
+      folder: rootsFolder,
+      app: updating ? { downloaded: () => downloaded, restartCommand } : undefined
     });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID3(),
@@ -27693,7 +27777,7 @@ async function serve({ home }) {
   };
   let server;
   try {
-    server = Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 0, fetch: handle });
+    server = await listen(port, handle);
   } catch (e) {
     const running = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) }).then((r) => r.text()).catch(() => "");
     if (running.startsWith("coworker app")) {
@@ -27712,6 +27796,57 @@ async function serve({ home }) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   console.log(`coworker app ${version2} listening at http://127.0.0.1:${server.port}/mcp`);
+  if (!updating)
+    return;
+  const check = async () => {
+    const done = await appUpdate(script, downloaded ?? version2, home).catch(() => {
+      return;
+    });
+    if (done) {
+      downloaded = done.to;
+      console.log(`coworker app ${done.to} downloaded; restarting into it when no session is connected`);
+    }
+  };
+  setTimeout(() => void check(), firstCheckMs());
+  setInterval(() => void check(), UPDATE_EVERY_MS);
+  setInterval(() => {
+    if (!downloaded || sessions.size > 0)
+      return;
+    server.stop(true);
+    restartApp(script);
+  }, Number(process.env.COWORKER_APP_RESTART_CHECK_MS) || 60000);
+}
+async function listen(port, fetch2) {
+  for (let i = 0;; i++) {
+    try {
+      return Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 0, fetch: fetch2 });
+    } catch (e) {
+      if (i >= 10)
+        throw e;
+      await Bun.sleep(300);
+    }
+  }
+}
+function appUpdates(script) {
+  if (/^(off|false|0|no)$/i.test(process.env.COWORKER_AUTO_UPDATE ?? ""))
+    return false;
+  return basename(script) === "coworker.js" && !process.env.CLAUDE_PLUGIN_ROOT && !/[\\/]plugins[\\/]/.test(script);
+}
+function restartApp(script) {
+  if (process.env.XPC_SERVICE_NAME === LABEL)
+    process.exit(0);
+  const bun = process.execPath;
+  if (platform4() === "win32") {
+    const ps = (s) => s.replace(/'/g, "''");
+    const command = `Start-Process -FilePath '${ps(bun)}' -ArgumentList '"${ps(script)}"', 'serve' -WindowStyle Minimized`;
+    spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    }).unref();
+  } else
+    spawn(bun, [script, "serve"], { detached: true, stdio: "ignore" }).unref();
+  setTimeout(() => process.exit(0), 500);
 }
 
 // src/wake.ts
@@ -27759,6 +27894,8 @@ else if (command2 === "autostart")
   process.exit(await autostart(process.argv[3], home));
 else if (command2 === "wake")
   process.exit(await wake(home, await Bun.stdin.text()));
+else if (command2 === "version")
+  console.log(version2);
 else
   await stdio();
 async function stdio() {
@@ -27800,7 +27937,7 @@ function installedAsPlugin() {
   if (basename2(script) !== "coworker.js")
     return false;
   const root = process.env.CLAUDE_PLUGIN_ROOT;
-  return root ? resolve2(script).startsWith(resolve2(root)) : true;
+  return root ? resolve3(script).startsWith(resolve3(root)) : true;
 }
 function projectFolder() {
   const given = process.env.COWORKER_PROJECT_DIR;
