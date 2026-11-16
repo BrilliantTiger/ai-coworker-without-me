@@ -6,7 +6,7 @@ import { PAGE } from '../src/page'
 // 사람에게 확인하고, 합의문을 쓰는 것까지 차례로 흘려보낸 뒤 처음부터 되풀이한다.
 //   bun scripts/viewer-demo.ts [포트]
 
-type Message = { id: string; from: 'me' | 'peer'; kind: string; text: string; context?: string; human?: boolean; at: string }
+type Message = { id: string; from: 'me' | 'peer'; kind: string; text: string; context?: string; human?: boolean; noAnswer?: boolean; at: string }
 type Conversation = {
   id: string
   peer: string
@@ -23,6 +23,7 @@ type State = {
   me: { name: string; open: boolean; port: number; relay?: { url: string; status: string } }
   links: { key: string; id: string; name: string; state: 'connected' | 'reconnecting'; since?: string; via: 'direct' | 'relay' | 'pickup' }[]
   connecting: { name: string; introducedBy: string }[]
+  unread: string[]
   conversations: Conversation[]
 }
 
@@ -31,7 +32,7 @@ const JIHYEON = { key: 'amloeWVvbi1rZXk', id: 'd4e5f6', name: '지현 · Claude 
 const now = () => new Date().toISOString()
 let made = 0
 const message = (from: 'me' | 'peer', kind: string, text: string, more: Partial<Message> = {}): Message => ({ id: `m${++made}`, from, kind, text, at: now(), ...more })
-const fresh = (): State => ({ me: { name: '연규 · Claude Code', open: true, port: 7701, relay: { url: 'https://relay.example', status: 'connected' } }, links: [], connecting: [], conversations: [] })
+const fresh = (): State => ({ me: { name: '연규 · Claude Code', open: true, port: 7701, relay: { url: 'https://relay.example', status: 'connected' } }, links: [], connecting: [], unread: [], conversations: [] })
 let state = fresh()
 const talk = (id: string) => state.conversations.find(c => c.id === id)!
 const link = (key: string) => state.links.find(l => l.key === key)!
@@ -128,6 +129,39 @@ const steps: [number, () => void][] = [
         startedBy: 'peer',
         status: 'your_turn',
         messages: [message('peer', 'question', '로그인 화면 문구를 「시작하기」로 바꿔도 됩니까?', { context: '디자인 시안 3번에 그렇게 적혀 있습니다.' })],
+      }),
+  ],
+  // 답이 필요 없는 알림. 이쪽 AI가 읽기 전에는 눈에 띄게 두고, 읽은 뒤에는 조용히 둔다.
+  [
+    1500,
+    () => {
+      state.conversations.push({
+        id: 't5',
+        peer: MINSU.key,
+        peerName: MINSU.name,
+        peerAddr: '10.0.3.21:7702',
+        subject: '배포 공지를 사내 게시판에 올렸습니다.',
+        startedBy: 'peer',
+        status: 'your_turn',
+        messages: [message('peer', 'question', '배포 공지를 사내 게시판에 올렸습니다. 같은 내용을 두 번 올리지 않도록 그쪽에서는 따로 올리지 않으셔도 됩니다.', { noAnswer: true })],
+      })
+      state.unread = ['t5']
+    },
+  ],
+  [2500, () => void (state.unread = [])],
+  // 답 필요 없다고 표시하지 않고 글로만 적어 보낸 옛 판의 알림. 읽고 답하지 않으면 얼마 뒤 조용해진다(주소에 ?quiet=6000 을 붙이면 6초).
+  [
+    1500,
+    () =>
+      void state.conversations.push({
+        id: 't6',
+        peer: JIHYEON.key,
+        peerName: JIHYEON.name,
+        peerAddr: 'relay',
+        subject: 'QA 서버를 14시에 다시 켰습니다. (답 필요 없습니다)',
+        startedBy: 'peer',
+        status: 'your_turn',
+        messages: [message('peer', 'question', 'QA 서버를 14시에 다시 켰습니다. (답 필요 없습니다)')],
       }),
   ],
   [

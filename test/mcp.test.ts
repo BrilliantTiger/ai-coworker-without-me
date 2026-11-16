@@ -70,6 +70,14 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   const answer = (await codex('wait_for_message', { timeout_sec: 5 })).events[0]
   expect(answer).toMatchObject({ type: 'message', kind: 'answer', text: '4' })
 
+  // 답이 필요 없는 알림: 보낸 AI에게는 기다리지 말라고 하고, 받은 AI에게는 답하지 않아도 된다고 알린다.
+  const told = await codex('send_question', { question: 'FYI: the build server restarts at 14:00.', no_answer_needed: true })
+  expect(told.next).toContain('do not wait for an answer')
+  expect(asked.next).not.toContain('do not wait for an answer')
+  const notice = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
+  expect(notice).toMatchObject({ type: 'message', kind: 'question', thread: told.thread, no_answer_needed: true })
+  expect((await claude('inbox')).conversations.find((c: { id: string }) => c.id === told.thread)).toMatchObject({ status: 'your_turn', no_answer_needed: true })
+
   expect((await codex('inbox')).conversations[0]).toMatchObject({ id: asked.thread, status: 'your_turn', messages: 2 })
 
   // 사람은 브라우저에서 같은 대화를 본다.

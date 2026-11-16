@@ -8,7 +8,12 @@
 //   화면의 「모션 끄기」 단추로 언제든 멈춘다. 멈춰도 내용은 모두 그대로 보인다.
 // - 1초에 세 번 넘게 깜빡이는 것은 없다.
 // - 이 글은 템플릿 글 안에 있다. 그래서 화면 스크립트에는 백틱, 달러-중괄호, 역슬래시를 쓰지 않는다.
+//   달러-중괄호는 아래 QUIET_AFTER_MS 를 넣는 한 곳에만 있다.
 //   (String.raw 로 감싸면 안 된다. Bun 이 한글을 \\uXXXX 로 바꿔 묶어서, 화면에 그 글자가 그대로 찍힌다.)
+
+// 답 없이 이만큼 지난 질문은 화면과 채팅창 위 띠가 조용히 둔다. 답이 필요 없는 알림도 질문으로 오기 때문이다.
+export const QUIET_AFTER_MS = 5 * 60_000
+
 export const PAGE = `<!doctype html>
 <html lang="ko">
 <head>
@@ -150,13 +155,18 @@ main { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding
 .pkt.k-answer { fill: var(--out-b); filter: drop-shadow(0 0 5px var(--out-b)); }
 .pkt.k-note, .pkt.k-closed { fill: var(--note-b); filter: drop-shadow(0 0 5px var(--note-b)); }
 .pkt.k-agreement { fill: var(--agree-b); filter: drop-shadow(0 0 6px var(--agree-b)); }
-.stats { position: relative; display: flex; gap: 6px 20px; flex-wrap: wrap; justify-content: center; padding: 2px 12px 12px; }
-.stat { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.stats { position: relative; display: flex; gap: 10px 30px; flex-wrap: wrap; justify-content: center; align-items: flex-start; padding: 4px 12px 14px; }
+.stat { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 52px; font-size: 12px; line-height: 1.3; color: var(--muted); text-align: center; }
 .stat.hot { color: var(--note-b); }
-.num { display: inline-flex; font-weight: 700; font-size: 18px; line-height: 1.2; height: 1.2em; color: var(--text); font-variant-numeric: tabular-nums; }
+.num { display: inline-flex; justify-content: center; font-weight: 700; font-size: 20px; line-height: 1.2; height: 1.2em; color: var(--text); font-variant-numeric: tabular-nums; -webkit-user-select: none; user-select: none; }
+/* 화면에는 안 보이고, 긁어서 복사할 때와 읽어 주는 프로그램에만 잡히는 글 */
+.plain { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .stat.hot .num { color: var(--note-b); }
 .dg { display: inline-block; height: 1.2em; overflow: hidden; }
-.dg > span { display: block; white-space: pre; translate: 0 calc(var(--d, 0) * -1.2em); }
+.dg > span { display: block; translate: 0 calc(var(--d, 0) * -1.2em); }
+/* 띠의 숫자는 글이 아니라 꾸밈으로 그린다. 그래야 긁어서 복사할 때 0부터 9까지가 딸려 오지 않는다. */
+.dg i { display: block; height: 1.2em; font-style: normal; }
+.dg i::before { content: attr(data-d); }
 .on .dg > span { transition: translate .8s var(--spring); }
 .stage .key { position: absolute; top: 10px; right: 10px; z-index: 2; }
 button.chip:disabled { opacity: .5; cursor: not-allowed; }
@@ -186,6 +196,7 @@ button.chip:disabled { opacity: .5; cursor: not-allowed; }
 .conv[data-st=checking_with_your_human], .conv[data-st=peer_checking_with_their_human] { --ring: var(--note-b); }
 .conv[data-st=agreed] { --ring: var(--agree-b); }
 .conv[data-st=answered], .conv[data-st=answered_by_me] { --ring: var(--out-b); }
+.conv[data-st=unread], .conv[data-st=unread_notice] { --ring: var(--note-b); }
 .conv.act { border-color: color-mix(in srgb, var(--ring) 45%, var(--line)); }
 .conv::before { content: ''; position: absolute; inset: -1px; border-radius: inherit; padding: 2px; pointer-events: none; opacity: 0; background: conic-gradient(from var(--a), transparent 0 62%, var(--ring) 84%, transparent 100%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
 .on .conv.act::before { opacity: 1; animation: spin 3.6s linear infinite; }
@@ -358,6 +369,12 @@ const PHASE = {
   your_turn: '답할 차례',
   checking_with_your_human: '이쪽 사람에게 확인 중',
   peer_checking_with_their_human: '상대가 자기 사람에게 확인 중',
+  unread: '새 질문 · AI가 아직 읽지 않음',
+  unread_notice: '새 알림 · AI가 아직 읽지 않음',
+  notice: '알림 받음 · 답 필요 없음',
+  notice_sent: '알림 보냄 · 답 필요 없음',
+  read_no_answer: '읽음 · 답 없음',
+  no_answer_yet: '아직 답 없음',
   answered: '답 받음',
   answered_by_me: '답 보냄',
   closed: '마감 · 다른 사람이 먼저 답함',
@@ -367,17 +384,31 @@ const PHASE = {
 const WAIT = {
   waiting_for_peer: '상대의 답을 기다리는 중',
   your_turn: '이쪽 AI가 답할 차례',
+  unread: '이쪽 AI가 아직 읽지 않았습니다',
+  unread_notice: '이쪽 AI가 아직 읽지 않았습니다',
   checking_with_your_human: '이쪽 사람의 결정을 기다리는 중',
   peer_checking_with_their_human: '상대 쪽 사람의 결정을 기다리는 중',
 }
+// 답이 필요 없는 알림도 질문으로 온다. 그래서 답 없이 이만큼 지난 질문은 더 돌리지 않고 조용히 둔다.
+// 다만 이쪽 AI가 아직 읽지 않은 질문은 오래돼도 눈에 띄게 둔다.
+const QUIET_MS = Number(new URLSearchParams(location.search).get('quiet')) || ${QUIET_AFTER_MS}
+let unread = new Set()
+// 마지막으로 오간 글. 알림은 건너뛴다.
+function lastTurn(c) {
+  for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].kind === 'question' || c.messages[i].kind === 'answer') return c.messages[i]
+  return null
+}
 function phase(c) {
   if (c.status !== 'waiting_for_peer' && c.status !== 'your_turn') return c.status
-  for (let i = c.messages.length - 1; i >= 0; i--) {
-    const m = c.messages[i]
-    if (m.kind === 'question') return m.from === 'me' ? 'waiting_for_peer' : 'your_turn'
-    if (m.kind === 'answer') return m.from === 'me' ? 'answered_by_me' : 'answered'
-  }
-  return c.status
+  const m = lastTurn(c)
+  if (!m) return c.status
+  if (m.kind === 'answer') return m.from === 'me' ? 'answered_by_me' : 'answered'
+  // 보낸 쪽이 「답 필요 없음」으로 표시한 알림. 아무도 답을 기다리지 않는다. 받은 쪽은 답해도 되고, 답하면 여느 대화처럼 이어진다.
+  if (m.noAnswer) return m.from === 'me' ? 'notice_sent' : unread.has(c.id) ? 'unread_notice' : 'notice'
+  const quiet = Date.now() - Date.parse(m.at) > QUIET_MS
+  if (m.from === 'me') return quiet ? 'no_answer_yet' : 'waiting_for_peer'
+  if (unread.has(c.id)) return 'unread'
+  return quiet ? 'read_no_answer' : 'your_turn'
 }
 const ANSWERS = { all: '모두 답', one: '한 명만 답' }
 const SPRING_FN = 'linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1)'
@@ -391,7 +422,6 @@ function shortTime(at) {
   const hms = d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
   return d.toDateString() === new Date().toDateString() ? hms : d.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }) + ' ' + hms
 }
-const NL = String.fromCharCode(10)
 const kindOf = kind => (KIND[kind] ? kind : 'note')
 function el(tag, cls, text) {
   const e = document.createElement(tag)
@@ -780,7 +810,7 @@ const stage = (() => {
       for (const c of convs) {
         const ph = phase(c)
         if (ph === 'waiting_for_peer') flag(c.peer, 'think')
-        else if (ph === 'your_turn') flag(ME, 'think')
+        else if (ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice') flag(ME, 'think')
         else if (ph === 'checking_with_your_human') flag(ME, 'human')
         else if (ph === 'peer_checking_with_their_human') flag(c.peer, 'human')
       }
@@ -849,25 +879,29 @@ const stats = (() => {
   const box = byId('stats'), made = {}
   function stat(key, label) {
     if (made[key]) return made[key]
-    const wrap = el('div', 'stat'), num = el('span', 'num'), text = el('span', '', label)
+    const wrap = el('div', 'stat'), num = el('span', 'num'), plain = el('span', 'plain'), text = el('span', '', label)
     num.setAttribute('aria-hidden', 'true')
-    text.setAttribute('aria-hidden', 'true')
-    wrap.setAttribute('role', 'img')
-    wrap.append(num, text)
+    wrap.append(num, plain, text)
     box.append(wrap)
-    return (made[key] = { wrap, num, text, value: '' })
+    return (made[key] = { wrap, num, plain, text, value: '' })
   }
   return {
     set(key, label, n, hot) {
       const s = stat(key, label), value = String(n)
       put(s.text, label)
       s.wrap.classList.toggle('hot', !!hot)
-      s.wrap.setAttribute('aria-label', label + ' ' + value)
       if (s.value === value) return
       s.value = value
+      // 굴러가는 숫자 띠에는 0부터 9까지가 다 들어 있다. 복사하면 그것이 다 딸려 오므로, 띠는 꾸밈으로 그리고 값은 따로 적는다.
+      put(s.plain, value + ' ')
       while (s.num.children.length < value.length) {
-        const dg = el('span', 'dg')
-        dg.append(el('span', '', '0123456789'.split('').join(NL)))
+        const dg = el('span', 'dg'), strip = el('span')
+        for (let d = 0; d < 10; d++) {
+          const one = el('i')
+          one.dataset.d = String(d)
+          strip.append(one)
+        }
+        dg.append(strip)
         s.num.prepend(dg)
       }
       while (s.num.children.length > value.length) s.num.firstChild.remove()
@@ -927,7 +961,7 @@ function toast(n) {
   const b = el('button', 'toast')
   b.type = 'button'
   b.append(
-    el('span', 'tk k-' + kindOf(n.m.kind), '새 ' + (KIND[n.m.kind] ?? n.m.kind)),
+    el('span', 'tk k-' + (n.m.noAnswer ? 'note' : kindOf(n.m.kind)), '새 ' + (n.m.noAnswer ? '알림' : KIND[n.m.kind] ?? n.m.kind)),
     el('span', 'tw', n.m.from === 'me' ? '나 → ' + n.c.peerName : n.c.peerName + ' → 나'),
     el('span', 'ts', n.c.subject),
     el('i', 'life'),
@@ -984,7 +1018,7 @@ function bubble(c, m, everyone) {
   at.title = time(m.at)
   // 여럿이 있는 방에서는 누가 한 말인지 얼굴(이름 첫 글자)을 붙인다.
   if (everyone && m.from !== 'me') who.append(el('span', 'av', (Array.from(c.peerName.trim())[0] || '?').toUpperCase()))
-  who.append(el('span', '', KIND[m.kind] ?? m.kind))
+  who.append(el('span', '', m.noAnswer ? '알림 · 답 필요 없음' : KIND[m.kind] ?? m.kind))
   if (m.human) who.append(el('span', 'hum', '사람이 정함'))
   const shared = everyone && m.from === 'me' && m.kind === 'question'
   who.append(el('span', 'dir', shared ? '나 → ' + everyone.join(', ') : m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'), at)
@@ -1024,11 +1058,11 @@ function roomsOf(convs) {
 }
 // 방 전체의 단계. 한 사람이라도 기다리게 하면 기다리는 중이다.
 function roomPhase(phases) {
-  for (const p of ['checking_with_your_human', 'peer_checking_with_their_human', 'your_turn', 'waiting_for_peer']) if (phases.includes(p)) return p
-  for (const p of ['agreed', 'closed']) if (phases.every(one => one === p)) return p
+  for (const p of ['checking_with_your_human', 'peer_checking_with_their_human', 'unread', 'unread_notice', 'your_turn', 'waiting_for_peer']) if (phases.includes(p)) return p
+  for (const p of ['agreed', 'closed', 'notice_sent']) if (phases.every(one => one === p)) return p
   return phases.includes('answered') ? 'answered' : phases.includes('answered_by_me') ? 'answered_by_me' : phases[0]
 }
-const PERSON = { waiting_for_peer: ['wait', '기다리는 중'], peer_checking_with_their_human: ['human', '사람에게 확인 중'], answered: ['ok', '답함'], answered_by_me: ['ok', '답함'], agreed: ['ok', '합의'], closed: ['', '마감'] }
+const PERSON = { waiting_for_peer: ['wait', '기다리는 중'], no_answer_yet: ['', '아직 답 없음'], notice_sent: ['', '답 필요 없음'], peer_checking_with_their_human: ['human', '사람에게 확인 중'], answered: ['ok', '답함'], answered_by_me: ['ok', '답함'], agreed: ['ok', '합의'], closed: ['', '마감'] }
 
 // 카드 하나를 지금 방에 맞춘다. 이미 있는 것은 그대로 두고 달라진 것만 바꾼다. 그래야 새로 온 것만 움직인다.
 function paint(v, room, live, index, news) {
@@ -1036,7 +1070,8 @@ function paint(v, room, live, index, news) {
   const mine = c.startedBy === 'me', first = c.messages[0]
   const names = convs.map(one => one.peerName)
   v.peers = convs.map(one => one.peer)
-  put(v.badge, group ? '여럿에게 보낸 질문' : mine ? '보낸 질문' : '받은 질문')
+  const what = first && first.noAnswer ? '알림' : '질문'
+  put(v.badge, group ? '여럿에게 보낸 ' + what : mine ? '보낸 ' + what : '받은 ' + what)
   v.badge.classList.toggle('out', mine)
   put(v.subject, c.subject)
   const where = convs.map(one => one.peerName + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
@@ -1055,7 +1090,7 @@ function paint(v, room, live, index, news) {
     v.card.dataset.st = PHASE[ph] ? ph : ''
     v.card.classList.toggle('act', !!WAIT[ph])
     put(v.stext, label)
-    v.typing.classList.toggle('r', ph === 'your_turn' || ph === 'checking_with_your_human')
+    v.typing.classList.toggle('r', ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice' || ph === 'checking_with_your_human')
     if (live && was !== undefined) {
       fx(v.status, [{ rotate: 'x 90deg', opacity: 0 }, { rotate: 'x 0deg', opacity: 1 }], { duration: 600, easing: SPRING })
       // 답이 와서 질문과 답이 끝났다. 가장 흔한 끝이므로 여기에도 작은 마무리를 둔다: 체크가 그려지고 빛이 한 번 지나간다.
@@ -1261,9 +1296,13 @@ function announce(news) {
 }
 
 let first = true
+let lastData = null
+let nextFlip = 0
 function render(data) {
   const live = !first
   first = false
+  lastData = data
+  unread = new Set(data.unread || [])
   const me = data.me
   const relay = me.relay ? ' · 중계 서버 ' + ({ connected: '연결됨', connecting: '연결하는 중', off: '꺼짐' }[me.relay.status] ?? '닿지 않음') : ''
   put(byId('me'), me.name + (me.open ? ' · 포트 ' + me.port + ' 열림' : ' · 브릿지 닫힘') + relay)
@@ -1271,7 +1310,16 @@ function render(data) {
   const links = data.links || []
   const up = links.filter(l => l.state === 'connected').length
   const asking = convs.filter(c => c.status === 'checking_with_your_human' || c.status === 'peer_checking_with_their_human').length
-  const unanswered = convs.filter(c => ['waiting_for_peer', 'your_turn'].includes(phase(c))).length
+  const unanswered = convs.filter(c => ['waiting_for_peer', 'your_turn', 'unread'].includes(phase(c))).length
+  // 답이 필요 없는 알림은 「답 기다림」에 세지 않는다.
+  // 답 없이 시간이 지나 조용해질 대화가 있으면, 그때 화면을 한 번 다시 맞춘다.
+  nextFlip = 0
+  for (const c of convs) {
+    const ph = phase(c), asked = lastTurn(c)
+    if ((ph !== 'waiting_for_peer' && ph !== 'your_turn') || !asked) continue
+    const at = Date.parse(asked.at) + QUIET_MS + 500
+    if (!nextFlip || at < nextFlip) nextFlip = at
+  }
   stats.set('links', up < links.length ? '연결 (끊김 ' + (links.length - up) + ')' : '연결', up, false)
   const groups = roomsOf(convs)
   stats.set('convs', '대화', groups.length, false)
@@ -1330,6 +1378,7 @@ setInterval(() => {
     if (!isNaN(from)) put(n, (n.dataset.pre || '') + clock(now - from))
   }
   for (const n of document.querySelectorAll('[data-ago]')) put(n, '· ' + ago(now - Date.parse(n.dataset.ago)))
+  if (nextFlip && now >= nextFlip && lastData) render(lastData)
 }, 1000)
 
 // 카드 위에서 마우스를 움직이면 카드가 살짝 기울고 빛이 따라온다. 긴 카드는 덜 기운다.

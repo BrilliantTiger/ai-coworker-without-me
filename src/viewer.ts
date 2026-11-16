@@ -1,7 +1,8 @@
 import type { Server } from 'bun'
-import type { Bridge, BridgeEvent, Thread, ViewerAddress } from './bridge'
+import { openQuestion } from './bridge'
+import type { Bridge, BridgeEvent, ViewerAddress } from './bridge'
 import { randomToken } from './crypto'
-import { PAGE } from './page'
+import { PAGE, QUIET_AFTER_MS } from './page'
 
 // 사람이 브라우저로 대화를 지켜보는 화면. 이 PC 안(127.0.0.1)에서만 열리고, 주소에 든 토큰을 알아야 볼 수 있다.
 // 상대가 보낸 글은 화면에 글자로만 넣는다. HTML 로 해석하지 않는다.
@@ -21,7 +22,7 @@ export class Viewer {
   // pushes: 채널로 켠 세션이라 소식이 세션에 바로 들어간다. 그때는 기다릴 것이 없다.
   constructor(
     private readonly bridge: Bridge,
-    private readonly options: { pushes?: boolean } = {},
+    private readonly options: { pushes?: boolean; quietAfterMs?: number } = {},
   ) {
     this.token = bridge.viewerAt?.token ?? randomToken()
   }
@@ -58,20 +59,32 @@ export class Viewer {
   }
 
   // links: 연결된 세션마다 지금 닿는지. 화면의 연결 그림과 Claude Code 의 채팅창 위 띠가 본다.
+  // unread: 이쪽 AI가 아직 읽어 가지 않은 글이 있는 대화. 화면이 「아직 읽지 않은 질문」을 계속 눈에 띄게 둔다.
   data() {
-    return { me: this.bridge.describe(), links: this.bridge.links(), connecting: this.bridge.connecting(), conversations: [...this.bridge.threads.values()] }
+    return { me: this.bridge.describe(), links: this.bridge.links(), connecting: this.bridge.connecting(), unread: this.bridge.unreadThreads(), conversations: [...this.bridge.threads.values()] }
   }
 
   // Claude Code 의 채팅창 위 띠(plugin/claude/band.tsx)가 몇 초마다 읽는 짧은 요약. 대화 글은 넣지 않는다.
   // 대화는 대개 합의문 없이 질문과 답으로 끝난다(2026-11-16, 사람이 정함). 그래서 「차례」가 아니라 답을 빚진 대화만 센다.
   // yours: 상대가 물었고 이쪽이 아직 답하지 않았다. theirs: 이쪽이 물었고 상대가 아직 답하지 않았다.
+  // 답이 필요 없는 알림도 질문으로 온다(2026-11-16, 사람이 지적함: 「답할 필요 없다는데 이쪽 AI가 답할 차례 이게 계속 뜨냐」).
+  // 그래서 답 없이 시간이 지난 질문은 더 세지 않는다. 다만 이쪽 AI가 아직 읽지 않은 질문은 오래돼도 센다.
+  // 보내는 쪽이 「답 필요 없음」으로 표시한 알림은 처음부터 세지 않는다.
   status() {
     const waiting = { yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 }
+    const quiet = this.options.quietAfterMs ?? QUIET_AFTER_MS
+    const unread = new Set(this.bridge.unreadThreads())
     for (const t of this.bridge.threads.values()) {
       if (t.status === 'checking_with_your_human') waiting.yourHuman++
       else if (t.status === 'peer_checking_with_their_human') waiting.theirHuman++
-      else if (t.status === 'your_turn' && owes(t) === 'me') waiting.yours++
-      else if (t.status === 'waiting_for_peer' && owes(t) === 'peer') waiting.theirs++
+      else {
+        const asked = openQuestion(t)
+        // 답이 필요 없는 알림은 아무도 기다리지 않는다.
+        if (!asked || asked.noAnswer) continue
+        const fresh = Date.now() - Date.parse(asked.at) <= quiet
+        if (t.status === 'your_turn' && asked.from === 'peer' && (fresh || unread.has(t.id))) waiting.yours++
+        else if (t.status === 'waiting_for_peer' && asked.from === 'me' && fresh) waiting.theirs++
+      }
     }
     const me = this.bridge.describe()
     return { name: me.name, open: me.open, links: this.bridge.links().map(l => ({ name: l.name, state: l.state })), connecting: this.bridge.connecting().length, waiting }
@@ -223,16 +236,6 @@ export class Viewer {
 // 화면에서 만든 접근키를 쓸 수 있는 시간과, 다시 만들 수 있는 간격.
 const ISSUE_TTL_MS = 60 * 60_000
 const ISSUE_GAP_MS = 1000
-
-// 누가 답을 빚졌는지. 마지막으로 오간 글이 질문이면 받은 쪽이 빚졌고, 답이면 아무도 빚지지 않았다. 알림은 건너뛴다.
-export function owes(thread: Thread): 'me' | 'peer' | undefined {
-  for (let i = thread.messages.length - 1; i >= 0; i--) {
-    const m = thread.messages[i]!
-    if (m.kind === 'question') return m.from === 'me' ? 'peer' : 'me'
-    if (m.kind === 'answer') return undefined
-  }
-  return undefined
-}
 
 // 백그라운드 명령이 찍는 한 줄. 무엇이 몇 건 왔는지만 알린다. 상대가 정한 이름이나 보낸 글은 넣지 않는다.
 // 내용은 AI가 inbox 로 읽는다. 아무 일도 없으면 아무것도 돌려주지 않아 명령이 계속 기다린다.

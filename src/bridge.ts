@@ -112,6 +112,8 @@ export type ThreadMessage = {
   agreement?: Agreement
   // 사람이 질문 창에서 고르거나 직접 써서 정한 답.
   human?: boolean
+  // 답이 필요 없는 알림으로 보낸 질문(2026-11-16). 받은 쪽은 답하지 않아도 되고, 답해도 된다.
+  noAnswer?: boolean
   at: string
 }
 
@@ -167,6 +169,8 @@ export type BridgeEvent =
       file?: string
       // 상대 쪽 사람이 정한 답이다.
       human?: boolean
+      // 답이 필요 없는 알림이다. 답하지 않아도 되고, 덧붙일 것이 있으면 답해도 된다.
+      no_answer_needed?: boolean
       at: string
     }
   | { type: 'peer_closed'; peer: string; at: string }
@@ -215,7 +219,19 @@ type WireMessage = {
   ask?: AskInfo
   agreement?: Agreement
   human?: boolean
+  // 답이 필요 없는 알림. 이 항목을 모르는 옛 판은 그냥 질문으로 받는다.
+  noAnswer?: boolean
   at: string
+}
+
+// 아직 답이 없는 질문. 마지막으로 오간 글이 질문이면 그 글이고, 답이면 없다. 알림(note)은 건너뛴다.
+export function openQuestion(thread: Thread) {
+  for (let i = thread.messages.length - 1; i >= 0; i--) {
+    const m = thread.messages[i]!
+    if (m.kind === 'question') return m
+    if (m.kind === 'answer') return undefined
+  }
+  return undefined
 }
 
 // 합의문 쓰기 도구로 받는 것. checkedBy 는 이쪽(me)이 확인했는지, 상대(them)가 알려 주기만 했는지다.
@@ -718,14 +734,15 @@ export class Bridge {
   }
 
   // to 가 여러 명이나 everyone 이면 받는 사람마다 대화를 하나씩 만들고 같은 ask 로 묶는다. 한 명이면 ask 와 같다.
-  async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all') {
+  // noAnswer: 답이 필요 없는 알림으로 보낸다. 받은 쪽은 답하지 않아도 되고, 답해도 된다.
+  async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all', noAnswer = false) {
     const peers = await this.resolvePeers(to)
-    if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context)
+    if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context, undefined, noAnswer)
     const ask: AskInfo = { id: randomUUID().slice(0, 8), to: peers.map(p => p.name), answers }
     const sent = await Promise.all(
       peers.map(peer =>
         // 한 곳이 거절해도 나머지는 보낸다.
-        this.sendQuestion(peer, question, context, ask).catch(e => ({
+        this.sendQuestion(peer, question, context, ask, noAnswer).catch(e => ({
           thread: undefined,
           to: peer.name,
           delivery: 'refused' as const,
@@ -736,7 +753,7 @@ export class Bridge {
     return { ask: ask.id, answers, to: ask.to, sent }
   }
 
-  private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo) {
+  private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false) {
     assertNoSecrets({ question, context })
     const thread: Thread = {
       id: randomUUID().slice(0, 8),
@@ -750,8 +767,9 @@ export class Bridge {
       messages: [],
     }
     this.threads.set(thread.id, thread)
-    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, at: now() }
-    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, at: msg.at })
+    const notice = noAnswer ? { noAnswer: true } : {}
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, ...notice, at: now() }
+    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, ...notice, at: msg.at })
     this.changed()
     try {
       return { thread: thread.id, to: peer.name, delivery: await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) }
@@ -835,6 +853,11 @@ export class Bridge {
     return this.events
   }
 
+  // AI가 아직 읽어 가지 않은 글이 있는 대화들. 화면이 「이쪽 AI가 아직 읽지 않은 질문」을 가려 보인다.
+  unreadThreads(): string[] {
+    return [...new Set(this.events.flatMap(e => (e.type === 'message' ? [e.thread] : [])))]
+  }
+
   // 새 소식이 올 때까지 기다린다. 이미 쌓여 있으면 바로 돌려준다.
   // 기다림은 마지막 하나만 산다. 사람이 끊었거나 아무도 결과를 읽지 않는 기다림이 소식을 가져가면
   // 그 소식은 사라진다. 그래서 새 기다림이 시작되거나 호출이 취소되면 앞의 기다림은 빈손으로 끝난다.
@@ -864,7 +887,8 @@ export class Bridge {
   // AI가 읽어 간 소식은 줄에서 빼고, 저장한 상태에서도 뺀다.
   private take() {
     const taken = this.events.splice(0)
-    if (taken.length) this.dirty()
+    // AI가 읽어 갔다는 것을 화면도 알아야 한다(「아직 읽지 않음」 표시가 풀린다). 그래서 저장만 하지 않고 지켜보는 쪽에도 알린다.
+    if (taken.length) this.changed()
     return taken
   }
 
@@ -920,6 +944,8 @@ export class Bridge {
         ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
         messages: counted(t),
         last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
+        // 답이 필요 없는 알림이 마지막이다. 「차례」는 남아 있지만 아무도 답을 기다리지 않는다.
+        no_answer_needed: openQuestion(t)?.noAnswer || undefined,
         their_human: this.theirHuman(t),
       }
     })
@@ -1429,7 +1455,8 @@ export class Bridge {
     if (msg.kind === 'agreement' && !agreement) return
     const text = agreement ? renderAgreement(agreement) : msg.text
     const human = msg.human === true ? { human: true } : {}
-    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, ...human, at: now() })
+    const notice = msg.kind === 'question' && msg.noAnswer === true
+    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, ...human, ...(notice ? { noAnswer: true } : {}), at: now() })
     // 이미 마감한 질문에 늦게 온 답은 남기기만 하고, 마감 상태는 그대로 둔다.
     if (thread.status === 'closed' || msg.kind === 'closed') thread.status = 'closed'
     else if (agreement) thread.status = 'agreed'
@@ -1449,7 +1476,7 @@ export class Bridge {
       if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer.name, thread.id)
       ask = this.askProgress(thread.ask)
     }
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, at: now() })
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, ...(notice ? { no_answer_needed: true } : {}), at: now() })
   }
 
   private peerAsksHuman(thread: Thread, inText: boolean) {

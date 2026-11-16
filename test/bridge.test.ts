@@ -791,6 +791,67 @@ describe('viewer', () => {
     }
   })
 
+  test('a notice needs no answer: both sides know it, nothing waits for it, and the receiver may still answer', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const sent = (await b.askMany(undefined, 'The deploy notice is posted.', undefined, 'all', true)) as { thread: string }
+    const got = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    // 받은 AI에게 답이 필요 없다고 알린다. 차례는 여느 질문처럼 남아서, 답하고 싶으면 답할 수 있다.
+    expect(got).toMatchObject({ kind: 'question', text: 'The deploy notice is posted.', no_answer_needed: true, status: 'your_turn' })
+    expect(a.threads.get(got.thread)!.messages[0]).toMatchObject({ from: 'peer', noAnswer: true })
+    expect(b.threads.get(sent.thread)!.messages[0]).toMatchObject({ from: 'me', noAnswer: true })
+    expect(a.threadSummaries()[0]).toMatchObject({ status: 'your_turn', no_answer_needed: true })
+    expect(b.threadSummaries()[0]).toMatchObject({ status: 'waiting_for_peer', no_answer_needed: true })
+    // 화면과 채팅창 위 띠는 아무것도 기다리는 것으로 세지 않는다.
+    expect(new Viewer(a).status().waiting).toEqual({ yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 })
+    expect(new Viewer(b).status().waiting).toEqual({ yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 })
+    // 여느 질문은 표시가 없다.
+    await b.ask(undefined, 'And a real question?')
+    const asked = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    expect(asked.no_answer_needed).toBeUndefined()
+    expect(new Viewer(a).status().waiting.yours).toBe(1)
+
+    // 답이 필요 없어도 답해도 된다. 답하면 여느 대화처럼 이어진다.
+    await a.reply(got.thread, 'Thanks, we will not post it again.')
+    expect(await next(b, 'message')).toMatchObject({ kind: 'answer', text: 'Thanks, we will not post it again.', status: 'your_turn' })
+    expect(a.threadSummaries().find(t => t.id === got.thread)!.no_answer_needed).toBeUndefined()
+  })
+
+  test('a question that gets no answer stops counting after a while, unless the AI has not read it yet', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    // 답이 필요 없는 알림도 질문으로 온다.
+    const notice = await b.ask(undefined, 'FYI: the notice is posted. No answer needed.')
+    const mine = new Viewer(a, { quietAfterMs: 150 })
+    const theirs = new Viewer(b, { quietAfterMs: 150 })
+    try {
+      const [here, there] = [mine.start(), theirs.start()]
+      const read = async (url: string) => ({ ...((await (await fetch(`${url}/status`)).json()) as ReturnType<Viewer['status']>).waiting, unread: ((await (await fetch(`${url}/data`)).json()) as ReturnType<Viewer['data']>).unread })
+      expect(await read(here)).toMatchObject({ yours: 1, unread: [notice.thread] })
+      expect(await read(there)).toMatchObject({ theirs: 1, unread: [] })
+      await Bun.sleep(250)
+      // 시간이 지났다. 보낸 쪽은 더 기다리는 것으로 세지 않는다. 받은 쪽은 AI가 아직 읽지 않았으므로 계속 센다.
+      expect(await read(there)).toMatchObject({ theirs: 0 })
+      expect(await read(here)).toMatchObject({ yours: 1, unread: [notice.thread] })
+      // AI가 읽어 갔다. 읽고도 답하지 않은 오래된 질문은 더 세지 않는다. 화면에도 바로 알린다.
+      const pushed = fetch(`${here}/events`).then(async res => {
+        const reader = res.body!.getReader()
+        const decoder = new TextDecoder()
+        let text = ''
+        while ((text.match(/\n\n/g) ?? []).length < 2) text += decoder.decode((await reader.read()).value, { stream: true })
+        await reader.cancel()
+        return text.split('\n\n').slice(0, 2).map(chunk => (JSON.parse(chunk.slice(6)) as ReturnType<Viewer['data']>).unread)
+      })
+      await Bun.sleep(50)
+      expect(await a.wait(0)).toEqual([expect.objectContaining({ type: 'message', thread: notice.thread })])
+      expect(await pushed).toEqual([[notice.thread], []])
+      expect(await read(here)).toMatchObject({ yours: 0, unread: [] })
+    } finally {
+      mine.stop()
+      theirs.stop()
+    }
+  })
+
   test('pushes each change to the browser as it happens, without the page asking again', async () => {
     const { a, b } = await pair()
     await next(a, 'connected')

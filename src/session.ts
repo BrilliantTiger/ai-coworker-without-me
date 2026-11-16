@@ -132,6 +132,8 @@ export function createSession(opts: SessionOptions) {
 
   Answer what is settled, ask your human what needs deciding
   - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
+  - A message with no_answer_needed: true is a notice. Tell your human what it says. You do not have to answer it; reply only when you have something to add or correct.
+  - To tell the other side something that needs no answer, call send_question with no_answer_needed: true. Do not write "no answer needed" only in the text: the other side then cannot tell, and it keeps showing as a question that waits. Do not wait for an answer to a notice and do not write an agreement for it.
   - If the question needs a decision nobody has made yet (choosing between options, priorities, scope, schedule, anything your human would want a say in), do not decide it yourself. Call check_with_human with the question for your human, 2 to 6 options in their language, and the one you recommend. It tells the other side you are asking and opens a question window on your human's screen, where they pick a number or write their own answer. Their decision then goes to the other side by itself, marked as your human's decision, and you get a decision event; tell your human in one line what was sent. Do not leave a decision as plain text only.
   - Never answer the other side with only "I passed it to my human" or "I will let you know after checking"; reply refuses such an answer. Use check_with_human: it shows a desktop notification with sound, reminds your human every few minutes until they answer, opens a closed window again, and lets the other side see that you are asking, since when, and whether the window was seen.
   - When the other side is checking with its human, list_connections and inbox show it under their_human (since when, for how many minutes, and the state of their question window). If it takes long, you get a peer_human_slow event (after 30 minutes, then every 30 minutes) and your human gets a desktop notification: tell your human, so they can reach the other person by phone or messenger.
@@ -359,7 +361,7 @@ export function createSession(opts: SessionOptions) {
   function channelMeta(event: BridgeEvent): Record<string, string> {
     switch (event.type) {
       case 'message':
-        return { type: event.type, kind: event.kind, from: event.from, thread: event.thread }
+        return { type: event.type, kind: event.kind, from: event.from, thread: event.thread, ...(event.no_answer_needed ? { no_answer_needed: 'true' } : {}) }
       case 'connected':
       case 'peer_closed':
       case 'clock':
@@ -705,7 +707,7 @@ export function createSession(opts: SessionOptions) {
       title: 'Send question',
       annotations: { readOnlyHint: false, openWorldHint: true },
       description:
-        'Send a question to one connected session, to several, or to everyone. Each recipient gets its own conversation. Answers arrive later through wait_for_message or inbox.',
+        'Send a question to one connected session, to several, or to everyone. Each recipient gets its own conversation. Answers arrive later through wait_for_message or inbox. With no_answer_needed it is a notice that needs no answer.',
       inputSchema: {
         question: z.string().min(1).max(20000).describe('The question, self-contained.'),
         context: z.string().max(20000).optional().describe('What you already know or tried, so the other AI does not repeat it.'),
@@ -717,11 +719,17 @@ export function createSession(opts: SessionOptions) {
           .enum(['all', 'one'])
           .optional()
           .describe('Only when asking several: "all" (default) to get an answer from each, or "one" when the first answer is enough; the others are then told they need not answer.'),
+        no_answer_needed: z
+          .boolean()
+          .optional()
+          .describe('true when this is a notice: something the other side should know that needs no answer. They do not have to answer, though they may. Do not wait for an answer to it.'),
       },
     },
-    tool(async ({ question, context, to, answers }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one' }) => ({
-      ...(await getBridge().askMany(to, question, context, answers)),
-      next: `Tell your human what you asked and whom. ${listen()}`,
+    tool(async ({ question, context, to, answers, no_answer_needed }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one'; no_answer_needed?: boolean }) => ({
+      ...(await getBridge().askMany(to, question, context, answers, no_answer_needed === true)),
+      next: no_answer_needed
+        ? `Tell your human what you told whom. It is a notice: do not wait for an answer to it and do not write an agreement for it. ${listen()}`
+        : `Tell your human what you asked and whom. ${listen()}`,
     })),
   )
 
