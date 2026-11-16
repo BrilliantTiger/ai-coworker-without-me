@@ -16892,6 +16892,16 @@ var DEFERS_TO_HUMAN = [
   /\b(get back to you|let you know)\b[^.\n]{0,30}\b(once|when|after|as soon as)\b/i
 ];
 var defersToHuman = (text) => DEFERS_TO_HUMAN.some((r) => r.test(text));
+function openQuestion(thread) {
+  for (let i = thread.messages.length - 1;i >= 0; i--) {
+    const m = thread.messages[i];
+    if (m.kind === "question")
+      return m;
+    if (m.kind === "answer")
+      return;
+  }
+  return;
+}
 
 class DeliveryError extends Error {
   reason;
@@ -17227,12 +17237,12 @@ class Bridge {
     const peer = await this.resolvePeer(to);
     return this.sendQuestion(peer, question, context);
   }
-  async askMany(to, question, context, answers = "all") {
+  async askMany(to, question, context, answers = "all", noAnswer = false) {
     const peers = await this.resolvePeers(to);
     if (peers.length === 1)
-      return this.sendQuestion(peers[0], question, context);
+      return this.sendQuestion(peers[0], question, context, undefined, noAnswer);
     const ask = { id: randomUUID().slice(0, 8), to: peers.map((p) => p.name), answers };
-    const sent = await Promise.all(peers.map((peer) => this.sendQuestion(peer, question, context, ask).catch((e) => ({
+    const sent = await Promise.all(peers.map((peer) => this.sendQuestion(peer, question, context, ask, noAnswer).catch((e) => ({
       thread: undefined,
       to: peer.name,
       delivery: "refused",
@@ -17240,7 +17250,7 @@ class Bridge {
     }))));
     return { ask: ask.id, answers, to: ask.to, sent };
   }
-  async sendQuestion(peer, question, context, ask) {
+  async sendQuestion(peer, question, context, ask, noAnswer = false) {
     assertNoSecrets({ question, context });
     const thread = {
       id: randomUUID().slice(0, 8),
@@ -17254,8 +17264,9 @@ class Bridge {
       messages: []
     };
     this.threads.set(thread.id, thread);
-    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ask, at: now() };
-    thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text: msg.text, context: msg.context, at: msg.at });
+    const notice = noAnswer ? { noAnswer: true } : {};
+    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ask, ...notice, at: now() };
+    thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text: msg.text, context: msg.context, ...notice, at: msg.at });
     this.changed();
     try {
       return { thread: thread.id, to: peer.name, delivery: await this.sendOrQueue(peer, { type: "msg", msg }, thread.id) };
@@ -17343,6 +17354,9 @@ ${f.evidence}`).join(`
   unread() {
     return this.events;
   }
+  unreadThreads() {
+    return [...new Set(this.events.flatMap((e) => e.type === "message" ? [e.thread] : []))];
+  }
   async wait(timeoutMs, signal) {
     if (timeoutMs <= 0)
       return this.take();
@@ -17369,7 +17383,7 @@ ${f.evidence}`).join(`
   take() {
     const taken = this.events.splice(0);
     if (taken.length)
-      this.dirty();
+      this.changed();
     return taken;
   }
   async connections() {
@@ -17415,6 +17429,7 @@ ${f.evidence}`).join(`
         ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
         messages: counted(t),
         last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
+        no_answer_needed: openQuestion(t)?.noAnswer || undefined,
         their_human: this.theirHuman(t)
       };
     });
@@ -17908,7 +17923,8 @@ ${f.evidence}`).join(`
       return;
     const text = agreement ? renderAgreement(agreement) : msg.text;
     const human = msg.human === true ? { human: true } : {};
-    thread.messages.push({ id: msg.id, from: "peer", kind: msg.kind, text, context, agreement, ...human, at: now() });
+    const notice = msg.kind === "question" && msg.noAnswer === true;
+    thread.messages.push({ id: msg.id, from: "peer", kind: msg.kind, text, context, agreement, ...human, ...notice ? { noAnswer: true } : {}, at: now() });
     if (thread.status === "closed" || msg.kind === "closed")
       thread.status = "closed";
     else if (agreement)
@@ -17930,7 +17946,7 @@ ${f.evidence}`).join(`
         this.closeSiblings(thread.ask, peer.name, thread.id);
       ask = this.askProgress(thread.ask);
     }
-    this.emit({ type: "message", thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, at: now() });
+    this.emit({ type: "message", thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, ...notice ? { no_answer_needed: true } : {}, at: now() });
   }
   peerAsksHuman(thread, inText) {
     if (thread.status !== "peer_checking_with_their_human" || !thread.humanSince) {
@@ -19403,7 +19419,7 @@ import { platform as platform4 } from "os";
 import { basename, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.9.0";
+var version2 = "0.10.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -27159,6 +27175,7 @@ function lock(home) {
 }
 
 // src/page.ts
+var QUIET_AFTER_MS = 5 * 60000;
 var PAGE = `<!doctype html>
 <html lang="ko">
 <head>
@@ -27300,13 +27317,18 @@ main { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding
 .pkt.k-answer { fill: var(--out-b); filter: drop-shadow(0 0 5px var(--out-b)); }
 .pkt.k-note, .pkt.k-closed { fill: var(--note-b); filter: drop-shadow(0 0 5px var(--note-b)); }
 .pkt.k-agreement { fill: var(--agree-b); filter: drop-shadow(0 0 6px var(--agree-b)); }
-.stats { position: relative; display: flex; gap: 6px 20px; flex-wrap: wrap; justify-content: center; padding: 2px 12px 12px; }
-.stat { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.stats { position: relative; display: flex; gap: 10px 30px; flex-wrap: wrap; justify-content: center; align-items: flex-start; padding: 4px 12px 14px; }
+.stat { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 52px; font-size: 12px; line-height: 1.3; color: var(--muted); text-align: center; }
 .stat.hot { color: var(--note-b); }
-.num { display: inline-flex; font-weight: 700; font-size: 18px; line-height: 1.2; height: 1.2em; color: var(--text); font-variant-numeric: tabular-nums; }
+.num { display: inline-flex; justify-content: center; font-weight: 700; font-size: 20px; line-height: 1.2; height: 1.2em; color: var(--text); font-variant-numeric: tabular-nums; -webkit-user-select: none; user-select: none; }
+/* \uD654\uBA74\uC5D0\uB294 \uC548 \uBCF4\uC774\uACE0, \uAE01\uC5B4\uC11C \uBCF5\uC0AC\uD560 \uB54C\uC640 \uC77D\uC5B4 \uC8FC\uB294 \uD504\uB85C\uADF8\uB7A8\uC5D0\uB9CC \uC7A1\uD788\uB294 \uAE00 */
+.plain { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .stat.hot .num { color: var(--note-b); }
 .dg { display: inline-block; height: 1.2em; overflow: hidden; }
-.dg > span { display: block; white-space: pre; translate: 0 calc(var(--d, 0) * -1.2em); }
+.dg > span { display: block; translate: 0 calc(var(--d, 0) * -1.2em); }
+/* \uB760\uC758 \uC22B\uC790\uB294 \uAE00\uC774 \uC544\uB2C8\uB77C \uAFB8\uBC08\uC73C\uB85C \uADF8\uB9B0\uB2E4. \uADF8\uB798\uC57C \uAE01\uC5B4\uC11C \uBCF5\uC0AC\uD560 \uB54C 0\uBD80\uD130 9\uAE4C\uC9C0\uAC00 \uB538\uB824 \uC624\uC9C0 \uC54A\uB294\uB2E4. */
+.dg i { display: block; height: 1.2em; font-style: normal; }
+.dg i::before { content: attr(data-d); }
 .on .dg > span { transition: translate .8s var(--spring); }
 .stage .key { position: absolute; top: 10px; right: 10px; z-index: 2; }
 button.chip:disabled { opacity: .5; cursor: not-allowed; }
@@ -27336,6 +27358,7 @@ button.chip:disabled { opacity: .5; cursor: not-allowed; }
 .conv[data-st=checking_with_your_human], .conv[data-st=peer_checking_with_their_human] { --ring: var(--note-b); }
 .conv[data-st=agreed] { --ring: var(--agree-b); }
 .conv[data-st=answered], .conv[data-st=answered_by_me] { --ring: var(--out-b); }
+.conv[data-st=unread], .conv[data-st=unread_notice] { --ring: var(--note-b); }
 .conv.act { border-color: color-mix(in srgb, var(--ring) 45%, var(--line)); }
 .conv::before { content: ''; position: absolute; inset: -1px; border-radius: inherit; padding: 2px; pointer-events: none; opacity: 0; background: conic-gradient(from var(--a), transparent 0 62%, var(--ring) 84%, transparent 100%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
 .on .conv.act::before { opacity: 1; animation: spin 3.6s linear infinite; }
@@ -27508,6 +27531,12 @@ const PHASE = {
   your_turn: '\uB2F5\uD560 \uCC28\uB840',
   checking_with_your_human: '\uC774\uCABD \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911',
   peer_checking_with_their_human: '\uC0C1\uB300\uAC00 \uC790\uAE30 \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911',
+  unread: '\uC0C8 \uC9C8\uBB38 \xB7 AI\uAC00 \uC544\uC9C1 \uC77D\uC9C0 \uC54A\uC74C',
+  unread_notice: '\uC0C8 \uC54C\uB9BC \xB7 AI\uAC00 \uC544\uC9C1 \uC77D\uC9C0 \uC54A\uC74C',
+  notice: '\uC54C\uB9BC \uBC1B\uC74C \xB7 \uB2F5 \uD544\uC694 \uC5C6\uC74C',
+  notice_sent: '\uC54C\uB9BC \uBCF4\uB0C4 \xB7 \uB2F5 \uD544\uC694 \uC5C6\uC74C',
+  read_no_answer: '\uC77D\uC74C \xB7 \uB2F5 \uC5C6\uC74C',
+  no_answer_yet: '\uC544\uC9C1 \uB2F5 \uC5C6\uC74C',
   answered: '\uB2F5 \uBC1B\uC74C',
   answered_by_me: '\uB2F5 \uBCF4\uB0C4',
   closed: '\uB9C8\uAC10 \xB7 \uB2E4\uB978 \uC0AC\uB78C\uC774 \uBA3C\uC800 \uB2F5\uD568',
@@ -27517,17 +27546,31 @@ const PHASE = {
 const WAIT = {
   waiting_for_peer: '\uC0C1\uB300\uC758 \uB2F5\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911',
   your_turn: '\uC774\uCABD AI\uAC00 \uB2F5\uD560 \uCC28\uB840',
+  unread: '\uC774\uCABD AI\uAC00 \uC544\uC9C1 \uC77D\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4',
+  unread_notice: '\uC774\uCABD AI\uAC00 \uC544\uC9C1 \uC77D\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4',
   checking_with_your_human: '\uC774\uCABD \uC0AC\uB78C\uC758 \uACB0\uC815\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911',
   peer_checking_with_their_human: '\uC0C1\uB300 \uCABD \uC0AC\uB78C\uC758 \uACB0\uC815\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911',
 }
+// \uB2F5\uC774 \uD544\uC694 \uC5C6\uB294 \uC54C\uB9BC\uB3C4 \uC9C8\uBB38\uC73C\uB85C \uC628\uB2E4. \uADF8\uB798\uC11C \uB2F5 \uC5C6\uC774 \uC774\uB9CC\uD07C \uC9C0\uB09C \uC9C8\uBB38\uC740 \uB354 \uB3CC\uB9AC\uC9C0 \uC54A\uACE0 \uC870\uC6A9\uD788 \uB454\uB2E4.
+// \uB2E4\uB9CC \uC774\uCABD AI\uAC00 \uC544\uC9C1 \uC77D\uC9C0 \uC54A\uC740 \uC9C8\uBB38\uC740 \uC624\uB798\uB3FC\uB3C4 \uB208\uC5D0 \uB744\uAC8C \uB454\uB2E4.
+const QUIET_MS = Number(new URLSearchParams(location.search).get('quiet')) || ${QUIET_AFTER_MS}
+let unread = new Set()
+// \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC624\uAC04 \uAE00. \uC54C\uB9BC\uC740 \uAC74\uB108\uB6F4\uB2E4.
+function lastTurn(c) {
+  for (let i = c.messages.length - 1; i >= 0; i--) if (c.messages[i].kind === 'question' || c.messages[i].kind === 'answer') return c.messages[i]
+  return null
+}
 function phase(c) {
   if (c.status !== 'waiting_for_peer' && c.status !== 'your_turn') return c.status
-  for (let i = c.messages.length - 1; i >= 0; i--) {
-    const m = c.messages[i]
-    if (m.kind === 'question') return m.from === 'me' ? 'waiting_for_peer' : 'your_turn'
-    if (m.kind === 'answer') return m.from === 'me' ? 'answered_by_me' : 'answered'
-  }
-  return c.status
+  const m = lastTurn(c)
+  if (!m) return c.status
+  if (m.kind === 'answer') return m.from === 'me' ? 'answered_by_me' : 'answered'
+  // \uBCF4\uB0B8 \uCABD\uC774 \u300C\uB2F5 \uD544\uC694 \uC5C6\uC74C\u300D\uC73C\uB85C \uD45C\uC2DC\uD55C \uC54C\uB9BC. \uC544\uBB34\uB3C4 \uB2F5\uC744 \uAE30\uB2E4\uB9AC\uC9C0 \uC54A\uB294\uB2E4. \uBC1B\uC740 \uCABD\uC740 \uB2F5\uD574\uB3C4 \uB418\uACE0, \uB2F5\uD558\uBA74 \uC5EC\uB290 \uB300\uD654\uCC98\uB7FC \uC774\uC5B4\uC9C4\uB2E4.
+  if (m.noAnswer) return m.from === 'me' ? 'notice_sent' : unread.has(c.id) ? 'unread_notice' : 'notice'
+  const quiet = Date.now() - Date.parse(m.at) > QUIET_MS
+  if (m.from === 'me') return quiet ? 'no_answer_yet' : 'waiting_for_peer'
+  if (unread.has(c.id)) return 'unread'
+  return quiet ? 'read_no_answer' : 'your_turn'
 }
 const ANSWERS = { all: '\uBAA8\uB450 \uB2F5', one: '\uD55C \uBA85\uB9CC \uB2F5' }
 const SPRING_FN = 'linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1)'
@@ -27541,7 +27584,6 @@ function shortTime(at) {
   const hms = d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
   return d.toDateString() === new Date().toDateString() ? hms : d.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }) + ' ' + hms
 }
-const NL = String.fromCharCode(10)
 const kindOf = kind => (KIND[kind] ? kind : 'note')
 function el(tag, cls, text) {
   const e = document.createElement(tag)
@@ -27930,7 +27972,7 @@ const stage = (() => {
       for (const c of convs) {
         const ph = phase(c)
         if (ph === 'waiting_for_peer') flag(c.peer, 'think')
-        else if (ph === 'your_turn') flag(ME, 'think')
+        else if (ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice') flag(ME, 'think')
         else if (ph === 'checking_with_your_human') flag(ME, 'human')
         else if (ph === 'peer_checking_with_their_human') flag(c.peer, 'human')
       }
@@ -27999,25 +28041,29 @@ const stats = (() => {
   const box = byId('stats'), made = {}
   function stat(key, label) {
     if (made[key]) return made[key]
-    const wrap = el('div', 'stat'), num = el('span', 'num'), text = el('span', '', label)
+    const wrap = el('div', 'stat'), num = el('span', 'num'), plain = el('span', 'plain'), text = el('span', '', label)
     num.setAttribute('aria-hidden', 'true')
-    text.setAttribute('aria-hidden', 'true')
-    wrap.setAttribute('role', 'img')
-    wrap.append(num, text)
+    wrap.append(num, plain, text)
     box.append(wrap)
-    return (made[key] = { wrap, num, text, value: '' })
+    return (made[key] = { wrap, num, plain, text, value: '' })
   }
   return {
     set(key, label, n, hot) {
       const s = stat(key, label), value = String(n)
       put(s.text, label)
       s.wrap.classList.toggle('hot', !!hot)
-      s.wrap.setAttribute('aria-label', label + ' ' + value)
       if (s.value === value) return
       s.value = value
+      // \uAD74\uB7EC\uAC00\uB294 \uC22B\uC790 \uB760\uC5D0\uB294 0\uBD80\uD130 9\uAE4C\uC9C0\uAC00 \uB2E4 \uB4E4\uC5B4 \uC788\uB2E4. \uBCF5\uC0AC\uD558\uBA74 \uADF8\uAC83\uC774 \uB2E4 \uB538\uB824 \uC624\uBBC0\uB85C, \uB760\uB294 \uAFB8\uBC08\uC73C\uB85C \uADF8\uB9AC\uACE0 \uAC12\uC740 \uB530\uB85C \uC801\uB294\uB2E4.
+      put(s.plain, value + ' ')
       while (s.num.children.length < value.length) {
-        const dg = el('span', 'dg')
-        dg.append(el('span', '', '0123456789'.split('').join(NL)))
+        const dg = el('span', 'dg'), strip = el('span')
+        for (let d = 0; d < 10; d++) {
+          const one = el('i')
+          one.dataset.d = String(d)
+          strip.append(one)
+        }
+        dg.append(strip)
         s.num.prepend(dg)
       }
       while (s.num.children.length > value.length) s.num.firstChild.remove()
@@ -28077,7 +28123,7 @@ function toast(n) {
   const b = el('button', 'toast')
   b.type = 'button'
   b.append(
-    el('span', 'tk k-' + kindOf(n.m.kind), '\uC0C8 ' + (KIND[n.m.kind] ?? n.m.kind)),
+    el('span', 'tk k-' + (n.m.noAnswer ? 'note' : kindOf(n.m.kind)), '\uC0C8 ' + (n.m.noAnswer ? '\uC54C\uB9BC' : KIND[n.m.kind] ?? n.m.kind)),
     el('span', 'tw', n.m.from === 'me' ? '\uB098 \u2192 ' + n.c.peerName : n.c.peerName + ' \u2192 \uB098'),
     el('span', 'ts', n.c.subject),
     el('i', 'life'),
@@ -28134,7 +28180,7 @@ function bubble(c, m, everyone) {
   at.title = time(m.at)
   // \uC5EC\uB7FF\uC774 \uC788\uB294 \uBC29\uC5D0\uC11C\uB294 \uB204\uAC00 \uD55C \uB9D0\uC778\uC9C0 \uC5BC\uAD74(\uC774\uB984 \uCCAB \uAE00\uC790)\uC744 \uBD99\uC778\uB2E4.
   if (everyone && m.from !== 'me') who.append(el('span', 'av', (Array.from(c.peerName.trim())[0] || '?').toUpperCase()))
-  who.append(el('span', '', KIND[m.kind] ?? m.kind))
+  who.append(el('span', '', m.noAnswer ? '\uC54C\uB9BC \xB7 \uB2F5 \uD544\uC694 \uC5C6\uC74C' : KIND[m.kind] ?? m.kind))
   if (m.human) who.append(el('span', 'hum', '\uC0AC\uB78C\uC774 \uC815\uD568'))
   const shared = everyone && m.from === 'me' && m.kind === 'question'
   who.append(el('span', 'dir', shared ? '\uB098 \u2192 ' + everyone.join(', ') : m.from === 'me' ? '\uB098 \u2192 ' + c.peerName : c.peerName + ' \u2192 \uB098'), at)
@@ -28174,11 +28220,11 @@ function roomsOf(convs) {
 }
 // \uBC29 \uC804\uCCB4\uC758 \uB2E8\uACC4. \uD55C \uC0AC\uB78C\uC774\uB77C\uB3C4 \uAE30\uB2E4\uB9AC\uAC8C \uD558\uBA74 \uAE30\uB2E4\uB9AC\uB294 \uC911\uC774\uB2E4.
 function roomPhase(phases) {
-  for (const p of ['checking_with_your_human', 'peer_checking_with_their_human', 'your_turn', 'waiting_for_peer']) if (phases.includes(p)) return p
-  for (const p of ['agreed', 'closed']) if (phases.every(one => one === p)) return p
+  for (const p of ['checking_with_your_human', 'peer_checking_with_their_human', 'unread', 'unread_notice', 'your_turn', 'waiting_for_peer']) if (phases.includes(p)) return p
+  for (const p of ['agreed', 'closed', 'notice_sent']) if (phases.every(one => one === p)) return p
   return phases.includes('answered') ? 'answered' : phases.includes('answered_by_me') ? 'answered_by_me' : phases[0]
 }
-const PERSON = { waiting_for_peer: ['wait', '\uAE30\uB2E4\uB9AC\uB294 \uC911'], peer_checking_with_their_human: ['human', '\uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911'], answered: ['ok', '\uB2F5\uD568'], answered_by_me: ['ok', '\uB2F5\uD568'], agreed: ['ok', '\uD569\uC758'], closed: ['', '\uB9C8\uAC10'] }
+const PERSON = { waiting_for_peer: ['wait', '\uAE30\uB2E4\uB9AC\uB294 \uC911'], no_answer_yet: ['', '\uC544\uC9C1 \uB2F5 \uC5C6\uC74C'], notice_sent: ['', '\uB2F5 \uD544\uC694 \uC5C6\uC74C'], peer_checking_with_their_human: ['human', '\uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911'], answered: ['ok', '\uB2F5\uD568'], answered_by_me: ['ok', '\uB2F5\uD568'], agreed: ['ok', '\uD569\uC758'], closed: ['', '\uB9C8\uAC10'] }
 
 // \uCE74\uB4DC \uD558\uB098\uB97C \uC9C0\uAE08 \uBC29\uC5D0 \uB9DE\uCD98\uB2E4. \uC774\uBBF8 \uC788\uB294 \uAC83\uC740 \uADF8\uB300\uB85C \uB450\uACE0 \uB2EC\uB77C\uC9C4 \uAC83\uB9CC \uBC14\uAFBC\uB2E4. \uADF8\uB798\uC57C \uC0C8\uB85C \uC628 \uAC83\uB9CC \uC6C0\uC9C1\uC778\uB2E4.
 function paint(v, room, live, index, news) {
@@ -28186,7 +28232,8 @@ function paint(v, room, live, index, news) {
   const mine = c.startedBy === 'me', first = c.messages[0]
   const names = convs.map(one => one.peerName)
   v.peers = convs.map(one => one.peer)
-  put(v.badge, group ? '\uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 \uC9C8\uBB38' : mine ? '\uBCF4\uB0B8 \uC9C8\uBB38' : '\uBC1B\uC740 \uC9C8\uBB38')
+  const what = first && first.noAnswer ? '\uC54C\uB9BC' : '\uC9C8\uBB38'
+  put(v.badge, group ? '\uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 ' + what : mine ? '\uBCF4\uB0B8 ' + what : '\uBC1B\uC740 ' + what)
   v.badge.classList.toggle('out', mine)
   put(v.subject, c.subject)
   const where = convs.map(one => one.peerName + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
@@ -28205,7 +28252,7 @@ function paint(v, room, live, index, news) {
     v.card.dataset.st = PHASE[ph] ? ph : ''
     v.card.classList.toggle('act', !!WAIT[ph])
     put(v.stext, label)
-    v.typing.classList.toggle('r', ph === 'your_turn' || ph === 'checking_with_your_human')
+    v.typing.classList.toggle('r', ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice' || ph === 'checking_with_your_human')
     if (live && was !== undefined) {
       fx(v.status, [{ rotate: 'x 90deg', opacity: 0 }, { rotate: 'x 0deg', opacity: 1 }], { duration: 600, easing: SPRING })
       // \uB2F5\uC774 \uC640\uC11C \uC9C8\uBB38\uACFC \uB2F5\uC774 \uB05D\uB0AC\uB2E4. \uAC00\uC7A5 \uD754\uD55C \uB05D\uC774\uBBC0\uB85C \uC5EC\uAE30\uC5D0\uB3C4 \uC791\uC740 \uB9C8\uBB34\uB9AC\uB97C \uB454\uB2E4: \uCCB4\uD06C\uAC00 \uADF8\uB824\uC9C0\uACE0 \uBE5B\uC774 \uD55C \uBC88 \uC9C0\uB098\uAC04\uB2E4.
@@ -28411,9 +28458,13 @@ function announce(news) {
 }
 
 let first = true
+let lastData = null
+let nextFlip = 0
 function render(data) {
   const live = !first
   first = false
+  lastData = data
+  unread = new Set(data.unread || [])
   const me = data.me
   const relay = me.relay ? ' \xB7 \uC911\uACC4 \uC11C\uBC84 ' + ({ connected: '\uC5F0\uACB0\uB428', connecting: '\uC5F0\uACB0\uD558\uB294 \uC911', off: '\uAEBC\uC9D0' }[me.relay.status] ?? '\uB2FF\uC9C0 \uC54A\uC74C') : ''
   put(byId('me'), me.name + (me.open ? ' \xB7 \uD3EC\uD2B8 ' + me.port + ' \uC5F4\uB9BC' : ' \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798') + relay)
@@ -28421,7 +28472,16 @@ function render(data) {
   const links = data.links || []
   const up = links.filter(l => l.state === 'connected').length
   const asking = convs.filter(c => c.status === 'checking_with_your_human' || c.status === 'peer_checking_with_their_human').length
-  const unanswered = convs.filter(c => ['waiting_for_peer', 'your_turn'].includes(phase(c))).length
+  const unanswered = convs.filter(c => ['waiting_for_peer', 'your_turn', 'unread'].includes(phase(c))).length
+  // \uB2F5\uC774 \uD544\uC694 \uC5C6\uB294 \uC54C\uB9BC\uC740 \u300C\uB2F5 \uAE30\uB2E4\uB9BC\u300D\uC5D0 \uC138\uC9C0 \uC54A\uB294\uB2E4.
+  // \uB2F5 \uC5C6\uC774 \uC2DC\uAC04\uC774 \uC9C0\uB098 \uC870\uC6A9\uD574\uC9C8 \uB300\uD654\uAC00 \uC788\uC73C\uBA74, \uADF8\uB54C \uD654\uBA74\uC744 \uD55C \uBC88 \uB2E4\uC2DC \uB9DE\uCD98\uB2E4.
+  nextFlip = 0
+  for (const c of convs) {
+    const ph = phase(c), asked = lastTurn(c)
+    if ((ph !== 'waiting_for_peer' && ph !== 'your_turn') || !asked) continue
+    const at = Date.parse(asked.at) + QUIET_MS + 500
+    if (!nextFlip || at < nextFlip) nextFlip = at
+  }
   stats.set('links', up < links.length ? '\uC5F0\uACB0 (\uB04A\uAE40 ' + (links.length - up) + ')' : '\uC5F0\uACB0', up, false)
   const groups = roomsOf(convs)
   stats.set('convs', '\uB300\uD654', groups.length, false)
@@ -28480,6 +28540,7 @@ setInterval(() => {
     if (!isNaN(from)) put(n, (n.dataset.pre || '') + clock(now - from))
   }
   for (const n of document.querySelectorAll('[data-ago]')) put(n, '\xB7 ' + ago(now - Date.parse(n.dataset.ago)))
+  if (nextFlip && now >= nextFlip && lastData) render(lastData)
 }, 1000)
 
 // \uCE74\uB4DC \uC704\uC5D0\uC11C \uB9C8\uC6B0\uC2A4\uB97C \uC6C0\uC9C1\uC774\uBA74 \uCE74\uB4DC\uAC00 \uC0B4\uC9DD \uAE30\uC6B8\uACE0 \uBE5B\uC774 \uB530\uB77C\uC628\uB2E4. \uAE34 \uCE74\uB4DC\uB294 \uB35C \uAE30\uC6B4\uB2E4.
@@ -28627,19 +28688,27 @@ class Viewer {
     this.server = undefined;
   }
   data() {
-    return { me: this.bridge.describe(), links: this.bridge.links(), connecting: this.bridge.connecting(), conversations: [...this.bridge.threads.values()] };
+    return { me: this.bridge.describe(), links: this.bridge.links(), connecting: this.bridge.connecting(), unread: this.bridge.unreadThreads(), conversations: [...this.bridge.threads.values()] };
   }
   status() {
     const waiting = { yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 };
+    const quiet = this.options.quietAfterMs ?? QUIET_AFTER_MS;
+    const unread = new Set(this.bridge.unreadThreads());
     for (const t of this.bridge.threads.values()) {
       if (t.status === "checking_with_your_human")
         waiting.yourHuman++;
       else if (t.status === "peer_checking_with_their_human")
         waiting.theirHuman++;
-      else if (t.status === "your_turn" && owes(t) === "me")
-        waiting.yours++;
-      else if (t.status === "waiting_for_peer" && owes(t) === "peer")
-        waiting.theirs++;
+      else {
+        const asked = openQuestion(t);
+        if (!asked || asked.noAnswer)
+          continue;
+        const fresh = Date.now() - Date.parse(asked.at) <= quiet;
+        if (t.status === "your_turn" && asked.from === "peer" && (fresh || unread.has(t.id)))
+          waiting.yours++;
+        else if (t.status === "waiting_for_peer" && asked.from === "me" && fresh)
+          waiting.theirs++;
+      }
     }
     const me = this.bridge.describe();
     return { name: me.name, open: me.open, links: this.bridge.links().map((l) => ({ name: l.name, state: l.state })), connecting: this.bridge.connecting().length, waiting };
@@ -28783,16 +28852,6 @@ class Viewer {
 }
 var ISSUE_TTL_MS = 60 * 60000;
 var ISSUE_GAP_MS = 1000;
-function owes(thread) {
-  for (let i = thread.messages.length - 1;i >= 0; i--) {
-    const m = thread.messages[i];
-    if (m.kind === "question")
-      return m.from === "me" ? "peer" : "me";
-    if (m.kind === "answer")
-      return;
-  }
-  return;
-}
 var LISTENING_ITSELF = "coworker: this session is listening by itself now. Nothing to do.";
 var AFTER_RESTART = "coworker: not an error.";
 function newsLine(events, open, when = "listening") {
@@ -28896,6 +28955,8 @@ function createSession(opts) {
 
   Answer what is settled, ask your human what needs deciding
   - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
+  - A message with no_answer_needed: true is a notice. Tell your human what it says. You do not have to answer it; reply only when you have something to add or correct.
+  - To tell the other side something that needs no answer, call send_question with no_answer_needed: true. Do not write "no answer needed" only in the text: the other side then cannot tell, and it keeps showing as a question that waits. Do not wait for an answer to a notice and do not write an agreement for it.
   - If the question needs a decision nobody has made yet (choosing between options, priorities, scope, schedule, anything your human would want a say in), do not decide it yourself. Call check_with_human with the question for your human, 2 to 6 options in their language, and the one you recommend. It tells the other side you are asking and opens a question window on your human's screen, where they pick a number or write their own answer. Their decision then goes to the other side by itself, marked as your human's decision, and you get a decision event; tell your human in one line what was sent. Do not leave a decision as plain text only.
   - Never answer the other side with only "I passed it to my human" or "I will let you know after checking"; reply refuses such an answer. Use check_with_human: it shows a desktop notification with sound, reminds your human every few minutes until they answer, opens a closed window again, and lets the other side see that you are asking, since when, and whether the window was seen.
   - When the other side is checking with its human, list_connections and inbox show it under their_human (since when, for how many minutes, and the state of their question window). If it takes long, you get a peer_human_slow event (after 30 minutes, then every 30 minutes) and your human gets a desktop notification: tell your human, so they can reach the other person by phone or messenger.
@@ -29088,7 +29149,7 @@ ${text}` : "";
   function channelMeta(event) {
     switch (event.type) {
       case "message":
-        return { type: event.type, kind: event.kind, from: event.from, thread: event.thread };
+        return { type: event.type, kind: event.kind, from: event.from, thread: event.thread, ...event.no_answer_needed ? { no_answer_needed: "true" } : {} };
       case "connected":
       case "peer_closed":
       case "clock":
@@ -29363,16 +29424,17 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("send_question", {
     title: "Send question",
     annotations: { readOnlyHint: false, openWorldHint: true },
-    description: "Send a question to one connected session, to several, or to everyone. Each recipient gets its own conversation. Answers arrive later through wait_for_message or inbox.",
+    description: "Send a question to one connected session, to several, or to everyone. Each recipient gets its own conversation. Answers arrive later through wait_for_message or inbox. With no_answer_needed it is a notice that needs no answer.",
     inputSchema: {
       question: string2().min(1).max(20000).describe("The question, self-contained."),
       context: string2().max(20000).optional().describe("What you already know or tried, so the other AI does not repeat it."),
       to: union([string2(), array(string2()).min(1)]).optional().describe('Who to ask: a session name, a list of names, or "everyone". Leave it out when only one session is connected.'),
-      answers: _enum(["all", "one"]).optional().describe('Only when asking several: "all" (default) to get an answer from each, or "one" when the first answer is enough; the others are then told they need not answer.')
+      answers: _enum(["all", "one"]).optional().describe('Only when asking several: "all" (default) to get an answer from each, or "one" when the first answer is enough; the others are then told they need not answer.'),
+      no_answer_needed: boolean2().optional().describe("true when this is a notice: something the other side should know that needs no answer. They do not have to answer, though they may. Do not wait for an answer to it.")
     }
-  }, tool(async ({ question, context, to, answers }) => ({
-    ...await getBridge().askMany(to, question, context, answers),
-    next: `Tell your human what you asked and whom. ${listen()}`
+  }, tool(async ({ question, context, to, answers, no_answer_needed }) => ({
+    ...await getBridge().askMany(to, question, context, answers, no_answer_needed === true),
+    next: no_answer_needed ? `Tell your human what you told whom. It is a notice: do not wait for an answer to it and do not write an agreement for it. ${listen()}` : `Tell your human what you asked and whom. ${listen()}`
   })));
   server.registerTool("reply", {
     title: "Reply",
