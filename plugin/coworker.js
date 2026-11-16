@@ -17209,6 +17209,20 @@ class Bridge {
   connecting() {
     return [...this.invites.values()].map((i) => ({ name: i.name, introducedBy: i.by }));
   }
+  links() {
+    return [...this.peers.values()].map((peer) => {
+      const pulling = this.isPulling(peer);
+      const down = pulling ? undefined : this.down.get(peer.key);
+      return {
+        key: peer.key,
+        id: peerId(peer.key),
+        name: peer.name,
+        state: down ? "reconnecting" : "connected",
+        since: isoOf(down?.since),
+        via: peer.lastAddr ? isRelayAddr(peer.lastAddr) ? "relay" : "direct" : pulling ? "pickup" : "direct"
+      };
+    });
+  }
   async ask(to, question, context) {
     const peer = await this.resolvePeer(to);
     return this.sendQuestion(peer, question, context);
@@ -19389,7 +19403,7 @@ import { platform as platform4 } from "os";
 import { basename, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.8.0";
+var version2 = "0.9.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -27144,6 +27158,1432 @@ function lock(home) {
   }
 }
 
+// src/page.ts
+var PAGE = `<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Coworker \uB300\uD654</title>
+<style>
+@property --a { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+:root {
+  color-scheme: light dark;
+  --bg: #f3f2ee; --card: #ffffff; --text: #1c1b19; --muted: #63615b; --line: #dcdad2;
+  --in: #e7eefe; --in-b: #2f5bd3; --out: #e3f4e7; --out-b: #17703c; --note: #fcf2d7; --note-b: #8f5c0e; --agree: #f0e8ff; --agree-b: #6f42c9;
+  --accent: #2f5bd3; --accent2: #7c4ddb; --warn: #b3261e;
+  --shadow: 0 1px 2px rgba(20, 20, 30, .06), 0 8px 24px rgba(20, 20, 30, .07);
+  --aur1: #9db8ff; --aur2: #c9b3ff; --aur3: #9fe3c0; --aur-o: .55;
+  --spring: cubic-bezier(.34, 1.56, .64, 1); --bounce: cubic-bezier(.34, 1.56, .64, 1);
+  --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+}
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    --spring: linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1);
+    --bounce: linear(0, 0.214 14.7%, 0.386 23.7%, 0.598 31.9%, 0.999 44.7%, 0.807 52.6%, 0.762 56%, 0.747 59.4%, 0.758 62.4%, 0.793 65.6%, 0.999 77.4%, 0.961 81.2%, 0.949 84.8%, 0.956 88%, 0.993 95.5%, 1);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0c11; --card: #171924; --text: #ecebe6; --muted: #9b9ba6; --line: #2a2d3b;
+    --in: #162242; --in-b: #8aa8ff; --out: #12301e; --out-b: #62d28d; --note: #32280e; --note-b: #f0b84a; --agree: #281d47; --agree-b: #b9a0ff;
+    --accent: #8aa8ff; --accent2: #b9a0ff; --warn: #ff8a80;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .35);
+    --aur1: #2b4fb8; --aur2: #5a36b0; --aur3: #17694a; --aur-o: .42;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.55 var(--font); overflow-x: hidden; }
+button { font: inherit; color: inherit; }
+button:focus-visible, .node:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* \uBC30\uACBD: \uB5A0\uB2E4\uB2C8\uB294 \uBE5B\uACFC \uBCC4\uC790\uB9AC */
+#sky, .aurora, #fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#sky, .aurora { z-index: 0; }
+#fx { z-index: 40; }
+.aurora { overflow: hidden; opacity: var(--aur-o); }
+.aurora i { position: absolute; width: 46vmax; height: 46vmax; border-radius: 50%; filter: blur(70px); }
+.aurora i:nth-child(1) { left: -12vmax; top: -16vmax; background: radial-gradient(circle, var(--aur1), transparent 65%); }
+.aurora i:nth-child(2) { right: -14vmax; top: 4vmax; background: radial-gradient(circle, var(--aur2), transparent 65%); }
+.aurora i:nth-child(3) { left: 22vmax; bottom: -26vmax; background: radial-gradient(circle, var(--aur3), transparent 65%); }
+.on .aurora i:nth-child(1) { animation: drift1 26s ease-in-out infinite alternate; }
+.on .aurora i:nth-child(2) { animation: drift2 32s ease-in-out infinite alternate; }
+.on .aurora i:nth-child(3) { animation: drift3 38s ease-in-out infinite alternate; }
+@keyframes drift1 { to { translate: 14vmax 10vmax; scale: 1.25; } }
+@keyframes drift2 { to { translate: -16vmax 12vmax; scale: .85; } }
+@keyframes drift3 { to { translate: -10vmax -14vmax; scale: 1.3; } }
+
+/* \uB9E8 \uC704: \uC774\uB984, \uC2E4\uC2DC\uAC04 \uD45C\uC2DC, \uB2E8\uCD94 */
+.bar { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 20; background: linear-gradient(90deg, var(--accent), var(--accent2)); transform-origin: 0 50%; scale: 0 1; }
+.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; padding: 12px max(16px, calc((100vw - 900px) / 2 + 16px)); background: color-mix(in srgb, var(--bg) 72%, transparent); -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4); border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
+.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+.logo { width: 30px; height: 30px; overflow: visible; flex: none; }
+.logo .lo { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 3 5; opacity: .6; }
+.logo .l1 { fill: var(--accent); } .logo .l2 { fill: var(--accent2); }
+.logo .ll { stroke: var(--muted); stroke-width: 2; stroke-linecap: round; }
+.on .logo .lg { animation: rot 9s linear infinite; }
+.on .logo .lo { animation: rot 30s linear infinite reverse; }
+@keyframes rot { to { rotate: 360deg; } }
+h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; white-space: nowrap; }
+h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2), var(--accent)); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; }
+.on h1 span { animation: shimmer 5s linear infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1; padding: 7px 11px; border-radius: 99px; border: 1px solid var(--line); background: color-mix(in srgb, var(--card) 80%, transparent); white-space: nowrap; }
+button.chip { cursor: pointer; transition: scale .5s var(--spring), border-color .2s; }
+button.chip:hover { border-color: var(--accent); }
+.on button.chip:hover { scale: 1.06; }
+.on button.chip:active { scale: .94; }
+.live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--out-b); position: relative; flex: none; }
+.on .live .dot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: ping 1.8s ease-out infinite; }
+@keyframes ping { from { scale: 1; opacity: .7; } to { scale: 3.2; opacity: 0; } }
+.live.off { color: var(--warn); border-color: var(--warn); }
+.live.off .dot { background: var(--warn); }
+@supports ((animation-timeline: scroll()) and (animation-range: entry)) {
+  .on .bar { animation: grow auto linear both; animation-timeline: scroll(root); }
+  .on .top { animation: tuck auto linear both; animation-timeline: scroll(root); animation-range: 0px 140px; }
+  @keyframes grow { to { scale: 1 1; } }
+  @keyframes tuck { from { padding-block: 20px; } to { padding-block: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .14); } }
+}
+
+main { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 16px 16px 90px; transition: filter .6s ease; }
+.offline main { filter: grayscale(.85); }
+.me, .refresh { color: var(--muted); font-size: 13px; margin: 0; }
+.refresh { margin: 2px 0 16px; }
+.offline .refresh { color: var(--warn); font-weight: 600; }
+
+/* \uC5F0\uACB0 \uADF8\uB9BC */
+.stage { position: relative; border: 1px solid var(--line); border-radius: 18px; background: color-mix(in srgb, var(--card) 62%, transparent); box-shadow: var(--shadow); overflow: hidden; margin-bottom: 12px; }
+.stage::before { content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .4; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 28px 28px; -webkit-mask-image: radial-gradient(ellipse at center, #000 15%, transparent 72%); mask-image: radial-gradient(ellipse at center, #000 15%, transparent 72%); }
+.on .stage::before { animation: grid 14s linear infinite; }
+@keyframes grid { to { background-position: 28px 28px, 28px 28px; } }
+#net { display: block; width: 100%; position: relative; }
+#net text { font: 600 12px/1 var(--font); fill: var(--text); text-anchor: middle; paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; }
+#net .sub { font-weight: 400; font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+#net .ini { fill: #fff; stroke: none; font-size: 15px; font-weight: 700; }
+.link { fill: none; stroke: var(--line); stroke-width: 2; }
+.flow { fill: none; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 1 15; opacity: .9; }
+.flow.a { stroke: var(--out-b); } .flow.b { stroke: var(--in-b); }
+.on .flow.a { animation: dash-a 1.8s linear infinite; }
+.on .flow.b { animation: dash-b 2.6s linear infinite; }
+@keyframes dash-a { to { stroke-dashoffset: -16; } }
+@keyframes dash-b { to { stroke-dashoffset: 16; } }
+.lk.down .link { stroke: var(--warn); stroke-dasharray: 6 8; }
+.lk.down .flow, .lk.ghost .flow { display: none; }
+.on .lk.down .link { animation: blink 1.8s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .3; } }
+.lk.ghost .link { stroke-dasharray: 3 7; opacity: .7; }
+.node { cursor: pointer; outline-offset: 6px; }
+.node.me { cursor: default; }
+.node .core { fill: var(--in-b); stroke: var(--card); stroke-width: 2; }
+.node.me .core { fill: url(#gme); }
+.node.ghost .core { fill: var(--muted); stroke-dasharray: 3 3; opacity: .7; }
+.node.down .core, .node.closed .core { fill: var(--muted); }
+.node .halo { fill: var(--in-b); opacity: .14; }
+.node.me .halo { fill: var(--accent2); }
+.node.down .halo { fill: var(--warn); }
+.on .node .halo { animation: halo 3.2s ease-in-out infinite; }
+@keyframes halo { 50% { scale: 1.28; opacity: .04; } }
+.on .node .fl { animation: float var(--fd, 5s) ease-in-out var(--fo, 0s) infinite alternate; }
+@keyframes float { from { translate: 0 -3px; } to { translate: 0 4px; } }
+.orbit, .hb { display: none; }
+.orbit circle { fill: var(--out-b); }
+.node.think .orbit { display: inline; }
+.on .node.think .orbit { animation: rot 1.4s linear infinite; }
+.node.human .hb { display: inline; }
+.hb circle { fill: var(--note-b); stroke: var(--card); stroke-width: 2; }
+#net .hb text { fill: var(--card); stroke: none; font-size: 11px; font-weight: 800; }
+.on .node.human .hb circle { animation: beat 1.4s ease-in-out infinite; }
+.rip { fill: none; stroke: var(--accent); stroke-width: 2; }
+.pkt { fill: var(--in-b); filter: drop-shadow(0 0 5px var(--in-b)); }
+.pkt.k-answer { fill: var(--out-b); filter: drop-shadow(0 0 5px var(--out-b)); }
+.pkt.k-note, .pkt.k-closed { fill: var(--note-b); filter: drop-shadow(0 0 5px var(--note-b)); }
+.pkt.k-agreement { fill: var(--agree-b); filter: drop-shadow(0 0 6px var(--agree-b)); }
+.stats { position: relative; display: flex; gap: 6px 20px; flex-wrap: wrap; justify-content: center; padding: 2px 12px 12px; }
+.stat { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.stat.hot { color: var(--note-b); }
+.num { display: inline-flex; font-weight: 700; font-size: 18px; line-height: 1.2; height: 1.2em; color: var(--text); font-variant-numeric: tabular-nums; }
+.stat.hot .num { color: var(--note-b); }
+.dg { display: inline-block; height: 1.2em; overflow: hidden; }
+.dg > span { display: block; white-space: pre; translate: 0 calc(var(--d, 0) * -1.2em); }
+.on .dg > span { transition: translate .8s var(--spring); }
+.stage .key { position: absolute; top: 10px; right: 10px; z-index: 2; }
+button.chip:disabled { opacity: .5; cursor: not-allowed; }
+.downs { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 0 12px 12px; }
+.downs:empty { display: none; }
+.downrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; color: var(--warn); padding: 7px 10px; border-radius: 10px; background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.downrow > span { flex: 1 1 220px; }
+.node.sel .core { stroke: var(--accent2); stroke-width: 4; }
+
+/* \uC138\uC158\uC744 \uACE8\uB77C \uADF8 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uB9CC \uBCF8\uB2E4 */
+.filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+.filters[hidden], .wrap[hidden] { display: none; }
+.chip b { font-weight: 600; opacity: .75; font-variant-numeric: tabular-nums; }
+.chip.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--card)); font-weight: 600; }
+
+/* \uB300\uD654 \uCE74\uB4DC */
+#list { display: flex; flex-direction: column; gap: 16px; }
+.wrap { position: relative; }
+@supports ((animation-timeline: view()) and (animation-range: entry)) {
+  .on .wrap { animation: rise auto linear backwards, sink auto linear forwards; animation-timeline: view(), view(); animation-range: entry 0px entry 180px, exit calc(100% - 160px) exit 100%; }
+  @keyframes rise { from { opacity: 0; scale: .95; } }
+  @keyframes sink { to { opacity: .2; scale: .97; } }
+}
+.conv { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px 12px; box-shadow: var(--shadow); transform: perspective(1100px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)); --ring: var(--muted); }
+.conv[data-st=waiting_for_peer] { --ring: var(--in-b); }
+.conv[data-st=your_turn] { --ring: var(--out-b); }
+.conv[data-st=checking_with_your_human], .conv[data-st=peer_checking_with_their_human] { --ring: var(--note-b); }
+.conv[data-st=agreed] { --ring: var(--agree-b); }
+.conv[data-st=answered], .conv[data-st=answered_by_me] { --ring: var(--out-b); }
+.conv.act { border-color: color-mix(in srgb, var(--ring) 45%, var(--line)); }
+.conv::before { content: ''; position: absolute; inset: -1px; border-radius: inherit; padding: 2px; pointer-events: none; opacity: 0; background: conic-gradient(from var(--a), transparent 0 62%, var(--ring) 84%, transparent 100%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
+.on .conv.act::before { opacity: 1; animation: spin 3.6s linear infinite; }
+@keyframes spin { to { --a: 360deg; } }
+.conv::after { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity .3s; background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 0%), color-mix(in srgb, var(--accent) 13%, transparent), transparent 60%); }
+.on .conv:hover::after { opacity: 1; }
+.on .conv { transition-property: opacity, translate, scale, filter, transform, border-color; transition-duration: .6s, .9s, .9s, .6s, .4s, .3s; transition-timing-function: ease-out, var(--spring), var(--spring), ease-out, ease-out, ease; --d: calc(var(--i, 0) * 70ms); transition-delay: var(--d), var(--d), var(--d), var(--d), 0s, 0s; }
+.on .wrap.gone .conv { opacity: 0; scale: .92; filter: blur(6px); }
+.head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.badge { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 99px; background: var(--in); color: var(--in-b); white-space: nowrap; }
+.badge.out { background: var(--out); color: var(--out-b); }
+.subject { font-size: 15px; font-weight: 650; margin: 0; overflow-wrap: anywhere; flex: 1 1 220px; min-width: 0; }
+.status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; color: var(--ring); background: color-mix(in srgb, var(--ring) 12%, transparent); }
+.sdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.on .act .sdot { animation: beat 1.4s ease-in-out infinite; }
+/* \uB2F5\uC774 \uC624\uAC04 \uB300\uD654\uC640 \uD569\uC758\uD55C \uB300\uD654\uB294 \uC810 \uB300\uC2E0 \uCCB4\uD06C\uB85C \uB05D\uB0AC\uC74C\uC744 \uBCF4\uC778\uB2E4 */
+.ck { display: none; width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 16; }
+.conv[data-st^=answered] .ck, .conv[data-st=agreed] .ck { display: inline; }
+.conv[data-st^=answered] .sdot, .conv[data-st=agreed] .sdot { display: none; }
+.fxl { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; }
+.shine { position: absolute; top: 0; bottom: 0; left: 0; width: 45%; translate: -130% 0; background: linear-gradient(100deg, transparent, color-mix(in srgb, var(--ring) 30%, transparent), transparent); }
+@keyframes beat { 50% { scale: 1.6; opacity: .5; } }
+.ago { font-weight: 400; opacity: .85; font-variant-numeric: tabular-nums; }
+.meta { color: var(--muted); font-size: 12.5px; margin: 6px 0 2px; overflow-wrap: anywhere; }
+/* \uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 \uC9C8\uBB38: \uBC1B\uC740 \uC0AC\uB78C\uB9C8\uB2E4 \uB2F5\uD588\uB294\uC9C0 */
+.people { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
+.people:empty { display: none; }
+.pp { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.pp::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pp.ok { color: var(--out-b); border-color: color-mix(in srgb, var(--out-b) 40%, var(--line)); }
+.pp.wait { color: var(--in-b); border-color: color-mix(in srgb, var(--in-b) 40%, var(--line)); }
+.pp.human { color: var(--note-b); border-color: color-mix(in srgb, var(--note-b) 40%, var(--line)); }
+.on .pp.wait::before, .on .pp.human::before { animation: beat 1.4s ease-in-out infinite; }
+.av { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--b); color: var(--card); font-size: 11px; font-weight: 700; flex: none; }
+
+/* \uC8FC\uACE0\uBC1B\uC740 \uAE00 */
+.msgs { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.msg { max-width: min(88%, 660px); min-width: 0; }
+.msg.peer { align-self: flex-start; }
+.msg.mine { align-self: flex-end; }
+.msg.note { align-self: center; max-width: 92%; }
+.msg.agreement { align-self: stretch; max-width: none; margin-top: 8px; }
+.bubble { position: relative; padding: 9px 13px 10px; border-radius: 16px; background: var(--in); --b: var(--in-b); border: 1px solid color-mix(in srgb, var(--b) 22%, transparent); }
+.peer .bubble { border-bottom-left-radius: 5px; }
+.mine .bubble { background: var(--out); --b: var(--out-b); border-bottom-right-radius: 5px; }
+.note .bubble { background: var(--note); --b: var(--note-b); border-radius: 12px; font-size: 13.5px; }
+.agreement .bubble { background: var(--agree); --b: var(--agree-b); border-width: 1.5px; border-color: color-mix(in srgb, var(--b) 55%, transparent); border-radius: 14px; padding: 14px 16px; }
+.who { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center; font-size: 12.5px; font-weight: 650; color: var(--b); }
+.hum { font-size: 11.5px; padding: 1px 7px; border-radius: 99px; background: color-mix(in srgb, var(--note-b) 18%, transparent); color: var(--note-b); }
+.dir { font-weight: 500; color: var(--muted); }
+.time { color: var(--muted); font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; margin-left: auto; }
+.text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 3px; }
+.rest { visibility: hidden; }
+.caret { display: inline-block; width: 0; position: relative; }
+.caret::after { content: ''; position: absolute; left: 1px; bottom: -.2em; width: 2px; height: 1.15em; border-radius: 1px; background: var(--b); }
+.on .caret::after { animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+.stamp { position: absolute; right: 12px; top: -13px; padding: 3px 10px; border: 2px solid var(--agree-b); color: var(--agree-b); background: var(--card); border-radius: 8px; font-weight: 800; font-size: 12px; letter-spacing: .08em; rotate: -6deg; }
+details { margin-top: 6px; font-size: 13px; color: var(--muted); }
+summary { cursor: pointer; width: fit-content; }
+details .text { color: var(--text); }
+@supports (interpolate-size: allow-keywords) {
+  :root { interpolate-size: allow-keywords; }
+  .on details::details-content { block-size: 0; overflow: clip; transition: block-size .45s ease, content-visibility .45s; transition-behavior: allow-discrete; }
+  .on details[open]::details-content { block-size: auto; }
+}
+.on .msg { transition: opacity .5s ease-out, translate .8s var(--spring), scale .8s var(--spring), filter .5s ease-out; transition-delay: calc(var(--i, 0) * 45ms); }
+.typing { display: none; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--ring); }
+.conv.act .typing { display: flex; }
+.typing.r { flex-direction: row-reverse; }
+.dots { display: inline-flex; gap: 4px; padding: 7px 10px; border-radius: 12px; background: color-mix(in srgb, var(--ring) 14%, transparent); }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .6; }
+.on .dots i { animation: hop 1.2s ease-in-out infinite; }
+.on .dots i:nth-child(2) { animation-delay: .15s; }
+.on .dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes hop { 0%, 60%, 100% { translate: 0 0; opacity: .45; } 30% { translate: 0 -5px; opacity: 1; } }
+.timer { font-variant-numeric: tabular-nums; font-weight: 650; }
+
+/* \uC544\uC9C1 \uB300\uD654\uAC00 \uC5C6\uC744 \uB54C */
+.empty { display: grid; place-items: center; gap: 12px; padding: 30px 16px 40px; color: var(--muted); text-align: center; }
+.empty[hidden] { display: none; }
+.radar { width: 88px; height: 88px; border-radius: 50%; position: relative; border: 1px solid var(--line); background: radial-gradient(circle, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%); }
+.radar::before { content: ''; position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(color-mix(in srgb, var(--accent) 55%, transparent), transparent 28%); }
+.radar::after { content: ''; position: absolute; inset: 38px; border-radius: 50%; background: var(--accent); }
+.on .radar::before { animation: rot 2.6s linear infinite; }
+.on .radar::after { animation: beat 1.6s ease-in-out infinite; }
+
+/* \uC0C8 \uC18C\uC2DD \uC54C\uB9BC */
+#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; flex-direction: column; gap: 8px; width: min(360px, calc(100vw - 32px)); }
+.toast { position: relative; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; text-align: left; padding: 10px 12px 12px; border-radius: 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--card) 88%, transparent); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); box-shadow: var(--shadow); cursor: pointer; overflow: hidden; }
+.toast .tk { font-size: 12px; font-weight: 700; color: var(--in-b); }
+.toast .tk.k-answer { color: var(--out-b); } .toast .tk.k-note, .toast .tk.k-closed { color: var(--note-b); } .toast .tk.k-agreement { color: var(--agree-b); }
+.toast .tw { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast .ts { grid-column: 1 / -1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast .life { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); transform-origin: 0 50%; }
+.on .toast { transition: opacity .3s ease, translate .7s var(--spring); }
+.on .toast .life { animation: life 5.2s linear forwards; }
+@keyframes life { to { scale: 0 1; } }
+.on .toast.out { opacity: 0; translate: 48px 0; }
+
+/* \uC811\uADFC\uD0A4 \uCC3D */
+dialog { border: 1px solid var(--line); border-radius: 16px; padding: 18px 18px 14px; width: min(540px, calc(100vw - 32px)); background: var(--card); color: var(--text); box-shadow: 0 20px 60px rgba(0, 0, 0, .35); }
+dialog::backdrop { background: rgba(8, 9, 14, .5); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+.on dialog[open] { animation: pop .5s var(--spring); }
+@keyframes pop { from { opacity: 0; scale: .9; translate: 0 12px; } }
+dialog h2 { margin: 0 0 6px; font-size: 16px; }
+dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
+.code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 3em; max-height: 180px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px dashed var(--line); background: color-mix(in srgb, var(--accent) 7%, transparent); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+.row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.chip.main { background: var(--accent); border-color: var(--accent); color: var(--card); font-weight: 600; }
+
+/* \uCC98\uC74C \uB098\uD0C0\uB0A0 \uB54C\uC758 \uCD9C\uBC1C \uBAA8\uC2B5. \uB9E8 \uBC14\uAE65\uC5D0 \uB46C\uC57C \uBE0C\uB77C\uC6B0\uC800\uAC00 \uC77D\uB294\uB2E4. */
+@starting-style {
+  .on .conv { opacity: 0; translate: 0 26px; scale: .96; filter: blur(8px); }
+  .on .msg { opacity: 0; scale: .92; filter: blur(6px); }
+  .on .msg.peer { translate: -28px 8px; }
+  .on .msg.mine { translate: 28px 8px; }
+  .on .msg.note, .on .msg.agreement { translate: 0 14px; }
+  .on .toast { opacity: 0; translate: 48px 0; }
+}
+</style>
+</head>
+<body>
+<canvas id="sky" aria-hidden="true"></canvas>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="bar" aria-hidden="true"></div>
+<header class="top">
+  <div class="brand">
+    <svg class="logo" viewBox="-24 -24 48 48" aria-hidden="true"><circle class="lo" r="21"/><g class="lg"><path class="ll" d="M-7 0H7"/><circle class="l1" cx="-13" r="6"/><circle class="l2" cx="13" r="6"/></g></svg>
+    <h1>Coworker <span>\uB300\uD654</span></h1>
+  </div>
+  <div class="chips">
+    <span class="chip live" id="live"><i class="dot"></i><span id="liveText">\uC5F0\uACB0\uD558\uB294 \uC911</span></span>
+    <button class="chip" id="follow" type="button">\uC0C8 \uAE00 \uB530\uB77C\uAC00\uAE30 \uB044\uAE30</button>
+    <button class="chip" id="motion" type="button">\uBAA8\uC158 \uB044\uAE30</button>
+  </div>
+</header>
+<main>
+  <section class="stage" id="stage" aria-label="\uC5F0\uACB0 \uC0C1\uD0DC">
+    <button class="chip key" id="issue" type="button">\uC811\uADFC\uD0A4 \uBC1C\uAE09</button>
+    <svg id="net" role="img" aria-label="\uC138\uC158 \uC5F0\uACB0 \uADF8\uB9BC"></svg>
+    <div class="stats" id="stats"></div>
+    <div class="downs" id="downs"></div>
+  </section>
+  <p class="me" id="me"></p>
+  <p class="refresh" id="refresh" role="status"></p>
+  <div class="filters" id="filters" role="group" aria-label="\uC138\uC158\uC744 \uACE8\uB77C \uBCF4\uAE30" hidden></div>
+  <div id="list"></div>
+  <div class="empty" id="empty" hidden><div class="radar" aria-hidden="true"></div><div id="emptyText">\uC544\uC9C1 \uC8FC\uACE0\uBC1B\uC740 \uC9C8\uBB38\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.</div></div>
+</main>
+<dialog id="keybox" aria-labelledby="keytitle">
+  <h2 id="keytitle">\uC811\uADFC\uD0A4 (\uC5F0\uACB0 \uCF54\uB4DC)</h2>
+  <p id="keyhelp"></p>
+  <div class="code" id="keycode" tabindex="0"></div>
+  <p id="keyinfo" role="status"></p>
+  <div class="row">
+    <button class="chip main" id="keycopy" type="button">\uBCF5\uC0AC</button>
+    <button class="chip" id="keyagain" type="button">\uC0C8\uB85C \uB9CC\uB4E4\uAE30</button>
+    <button class="chip" id="keyclose" type="button">\uB2EB\uAE30</button>
+  </div>
+</dialog>
+<div id="toasts" role="log" aria-live="polite"></div>
+<canvas id="fx" aria-hidden="true"></canvas>
+<script>
+const KIND = { question: '\uC9C8\uBB38', answer: '\uB2F5', note: '\uC54C\uB9BC', closed: '\uB9C8\uAC10', agreement: '\uD569\uC758\uBB38' }
+// \uB300\uD654\uAC00 \uC9C0\uAE08 \uC5B4\uB514\uC5D0 \uC640 \uC788\uB294\uC9C0. \uB300\uD654\uB294 \uB300\uAC1C \uD569\uC758\uBB38 \uC5C6\uC774 \uC9C8\uBB38\uACFC \uB2F5\uC73C\uB85C \uB05D\uB09C\uB2E4. \uADF8\uB798\uC11C \uC138\uC158\uC774 \uC54C\uB824 \uC8FC\uB294 \u300C\uCC28\uB840\u300D\uB97C
+// \uADF8\uB300\uB85C \uC4F0\uC9C0 \uC54A\uACE0, \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC624\uAC04 \uAE00\uC744 \uBCF8\uB2E4: \uC9C8\uBB38\uC774\uBA74 \uB2F5\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911\uC774\uACE0, \uB2F5\uC774\uBA74 \uB05D\uB09C \uAC83\uC73C\uB85C \uCC28\uBD84\uD558\uAC8C \uBCF4\uC778\uB2E4.
+const PHASE = {
+  waiting_for_peer: '\uB2F5 \uAE30\uB2E4\uB9AC\uB294 \uC911',
+  your_turn: '\uB2F5\uD560 \uCC28\uB840',
+  checking_with_your_human: '\uC774\uCABD \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911',
+  peer_checking_with_their_human: '\uC0C1\uB300\uAC00 \uC790\uAE30 \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911',
+  answered: '\uB2F5 \uBC1B\uC74C',
+  answered_by_me: '\uB2F5 \uBCF4\uB0C4',
+  closed: '\uB9C8\uAC10 \xB7 \uB2E4\uB978 \uC0AC\uB78C\uC774 \uBA3C\uC800 \uB2F5\uD568',
+  agreed: '\uD569\uC758\uBB38 \uC791\uC131\uB428',
+}
+// \uB204\uAD70\uAC00\uB97C \uAE30\uB2E4\uB9AC\uB294 \uB2E8\uACC4. \uCE74\uB4DC \uD14C\uB450\uB9AC\uAC00 \uB3CC\uACE0, \uAE30\uB2E4\uB9AC\uB294 \uCABD\uC5D0 \uC810 \uC138 \uAC1C\uAC00 \uB6F4\uB2E4.
+const WAIT = {
+  waiting_for_peer: '\uC0C1\uB300\uC758 \uB2F5\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911',
+  your_turn: '\uC774\uCABD AI\uAC00 \uB2F5\uD560 \uCC28\uB840',
+  checking_with_your_human: '\uC774\uCABD \uC0AC\uB78C\uC758 \uACB0\uC815\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911',
+  peer_checking_with_their_human: '\uC0C1\uB300 \uCABD \uC0AC\uB78C\uC758 \uACB0\uC815\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911',
+}
+function phase(c) {
+  if (c.status !== 'waiting_for_peer' && c.status !== 'your_turn') return c.status
+  for (let i = c.messages.length - 1; i >= 0; i--) {
+    const m = c.messages[i]
+    if (m.kind === 'question') return m.from === 'me' ? 'waiting_for_peer' : 'your_turn'
+    if (m.kind === 'answer') return m.from === 'me' ? 'answered_by_me' : 'answered'
+  }
+  return c.status
+}
+const ANSWERS = { all: '\uBAA8\uB450 \uB2F5', one: '\uD55C \uBA85\uB9CC \uB2F5' }
+const SPRING_FN = 'linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1)'
+const SPRING = window.CSS && CSS.supports('transition-timing-function', 'linear(0, 1)') ? SPRING_FN : 'cubic-bezier(.34, 1.56, .64, 1)'
+const root = document.documentElement
+const byId = id => document.getElementById(id)
+const time = at => new Date(at).toLocaleString('ko-KR', { hour12: false })
+// \uAE00\uB9C8\uB2E4 \uBD99\uB294 \uC9E7\uC740 \uC2DC\uAC01. \uC624\uB298 \uAC83\uC774 \uC544\uB2C8\uBA74 \uB0A0\uC9DC\uB97C \uC55E\uC5D0 \uBD99\uC778\uB2E4.
+function shortTime(at) {
+  const d = new Date(at)
+  const hms = d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+  return d.toDateString() === new Date().toDateString() ? hms : d.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }) + ' ' + hms
+}
+const NL = String.fromCharCode(10)
+const kindOf = kind => (KIND[kind] ? kind : 'note')
+function el(tag, cls, text) {
+  const e = document.createElement(tag)
+  if (cls) e.className = cls
+  if (text !== undefined) e.textContent = text
+  return e
+}
+function put(node, text) {
+  if (node.textContent !== text) node.textContent = text
+}
+function clock(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000) || 0)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s % 60).padStart(2, '0')
+}
+function ago(ms) {
+  const s = Math.floor(ms / 1000) || 0
+  if (s < 5) return '\uBC29\uAE08'
+  if (s < 60) return s + '\uCD08 \uC804'
+  if (s < 3600) return Math.floor(s / 60) + '\uBD84 \uC804'
+  if (s < 86400) return Math.floor(s / 3600) + '\uC2DC\uAC04 \uC804'
+  return Math.floor(s / 86400) + '\uC77C \uC804'
+}
+
+// \uC6C0\uC9C1\uC784\uC744 \uCF24\uC9C0. \uC0AC\uB78C\uC774 \uB2E8\uCD94\uB85C \uC815\uD55C \uAC83\uC774 \uBA3C\uC800\uACE0, \uC5C6\uC73C\uBA74 PC\uC758 \u300C\uB3D9\uC791 \uC904\uC774\uAE30\u300D \uC124\uC815\uC744 \uB530\uB978\uB2E4.
+const saved = {
+  get(key) { try { return localStorage.getItem(key) } catch (e) { return null } },
+  set(key, value) { try { localStorage.setItem(key, value) } catch (e) {} },
+}
+const reduce = matchMedia('(prefers-reduced-motion: reduce)')
+let motionPref = saved.get('coworker.motion')
+const moving = () => (motionPref ? motionPref === 'on' : !reduce.matches)
+// \uD55C \uBC88 \uD558\uACE0 \uB05D\uB098\uB294 \uC6C0\uC9C1\uC784. \uC6C0\uC9C1\uC784\uC744 \uAED0\uC73C\uBA74 \uC544\uBB34\uAC83\uB3C4 \uD558\uC9C0 \uC54A\uB294\uB2E4.
+function fx(node, frames, options) {
+  if (!moving() || !node.animate) return null
+  try { return node.animate(frames, options) } catch (e) { return null }
+}
+
+// \uBC30\uACBD\uC758 \uBCC4\uC790\uB9AC. \uC810\uC774 \uCC9C\uCC9C\uD788 \uB5A0\uB2E4\uB2C8\uACE0 \uAC00\uAE4C\uC6B4 \uC810\uB07C\uB9AC \uC120\uC774 \uC774\uC5B4\uC9C4\uB2E4. \uC0C8 \uAE00\uC774 \uC624\uBA74 \uBB3C\uACB0\uC774 \uD55C \uBC88 \uD37C\uC9C4\uB2E4.
+const sky = (() => {
+  const canvas = byId('sky')
+  const ctx = canvas.getContext('2d')
+  let w = 0, h = 0, points = [], waves = [], raf = 0, px = -1e4, py = -1e4, rgb = '120,150,255'
+  const make = () => ({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - .5) * .28, vy: (Math.random() - .5) * .28, r: Math.random() * 1.5 + .6, p: Math.random() * 6.28 })
+  function tone() {
+    const m = /^#([0-9a-f]{6})$/i.exec(getComputedStyle(root).getPropertyValue('--accent').trim())
+    if (m) rgb = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)).join(',')
+  }
+  function size() {
+    const dpr = Math.min(devicePixelRatio || 1, 2)
+    w = innerWidth
+    h = innerHeight
+    canvas.width = Math.round(w * dpr)
+    canvas.height = Math.round(h * dpr)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    const n = Math.round(Math.min(90, Math.max(26, (w * h) / 17000)))
+    while (points.length < n) points.push(make())
+    points.length = n
+    tone()
+    paint(performance.now(), false)
+  }
+  function paint(now, step) {
+    ctx.clearRect(0, 0, w, h)
+    for (const p of points) {
+      if (step) {
+        p.x += p.vx
+        p.y += p.vy
+        const dx = p.x - px, dy = p.y - py, d2 = dx * dx + dy * dy
+        if (d2 < 16000 && d2 > 1) {
+          const f = ((16000 - d2) / 16000) * .7, d = Math.sqrt(d2)
+          p.x += (dx / d) * f
+          p.y += (dy / d) * f
+        }
+        if (p.x < -20) p.x = w + 20
+        else if (p.x > w + 20) p.x = -20
+        if (p.y < -20) p.y = h + 20
+        else if (p.y > h + 20) p.y = -20
+      }
+      ctx.fillStyle = 'rgba(' + rgb + ',' + (.3 + .25 * Math.sin(now / 900 + p.p)).toFixed(3) + ')'
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, p.r, 0, 6.2832)
+      ctx.fill()
+    }
+    ctx.lineWidth = 1
+    for (let i = 0; i < points.length; i++)
+      for (let j = i + 1; j < points.length; j++) {
+        const a = points[i], b = points[j], dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy
+        if (d2 > 16900) continue
+        ctx.strokeStyle = 'rgba(' + rgb + ',' + ((1 - Math.sqrt(d2) / 130) * .2).toFixed(3) + ')'
+        ctx.beginPath()
+        ctx.moveTo(a.x, a.y)
+        ctx.lineTo(b.x, b.y)
+        ctx.stroke()
+      }
+    waves = waves.filter(v => v.r < v.max)
+    for (const v of waves) {
+      if (step) v.r += 7
+      ctx.strokeStyle = 'rgba(' + rgb + ',' + ((1 - v.r / v.max) * .35).toFixed(3) + ')'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.arc(v.x, v.y, v.r, 0, 6.2832)
+      ctx.stroke()
+    }
+  }
+  function frame(now) {
+    raf = 0
+    if (!moving() || document.hidden) return
+    paint(now, true)
+    raf = requestAnimationFrame(frame)
+  }
+  function run() {
+    if (!raf && moving() && !document.hidden) raf = requestAnimationFrame(frame)
+    if (!moving()) {
+      waves = []
+      paint(0, false)
+    }
+  }
+  addEventListener('resize', size)
+  addEventListener('pointermove', e => { px = e.clientX; py = e.clientY }, { passive: true })
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { tone(); run() })
+  size()
+  return { run, wave(x, y) { if (moving()) waves.push({ x, y, r: 10, max: Math.max(w, h) * .6 }) } }
+})()
+
+// \uD569\uC758\uBB38\uC774 \uC624\uBA74 \uC0C9\uC885\uC774\uAC00 \uD130\uC9C4\uB2E4.
+const confetti = (() => {
+  const canvas = byId('fx')
+  const ctx = canvas.getContext('2d')
+  const colors = ['#8aa8ff', '#b9a0ff', '#62d28d', '#f0b84a', '#ff8a80', '#5fd3e6']
+  let parts = [], raf = 0, w = 0, h = 0, seen = 0
+  // \uC2DC\uAC04\uC73C\uB85C \uC6C0\uC9C1\uC778\uB2E4. \uD0ED\uC774 \uAC00\uB824\uC838 \uADF8\uB9AC\uAE30\uAC00 \uBA48\uCDC4\uB2E4\uAC00 \uB3CC\uC544\uC624\uBA74, \uC9C0\uB09C \uC870\uAC01\uC740 \uB0A8\uAE30\uC9C0 \uC54A\uACE0 \uBC14\uB85C \uCE58\uC6B4\uB2E4.
+  function frame(now) {
+    raf = 0
+    const dt = Math.min(3, (now - seen) / 16.7)
+    seen = now
+    ctx.clearRect(0, 0, w, h)
+    parts = parts.filter(p => now - p.born < 2400 && p.y < h + 40)
+    for (const p of parts) {
+      const age = now - p.born
+      p.vy += .3 * dt
+      p.vx *= Math.pow(.99, dt)
+      p.x += p.vx * dt
+      p.y += p.vy * dt
+      p.rot += p.vr * dt
+      ctx.save()
+      ctx.globalAlpha = age > 1600 ? Math.max(0, 1 - (age - 1600) / 800) : 1
+      ctx.translate(p.x, p.y)
+      ctx.rotate(p.rot)
+      ctx.fillStyle = p.color
+      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.abs(Math.cos(age / 150 + p.rot)))
+      ctx.restore()
+    }
+    if (parts.length && moving()) raf = requestAnimationFrame(frame)
+    else {
+      parts = []
+      ctx.clearRect(0, 0, w, h)
+    }
+  }
+  return {
+    burst(x, y) {
+      if (!moving()) return
+      const dpr = Math.min(devicePixelRatio || 1, 2)
+      w = innerWidth
+      h = innerHeight
+      canvas.width = Math.round(w * dpr)
+      canvas.height = Math.round(h * dpr)
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      for (let i = 0; i < 120; i++) {
+        const a = -Math.PI / 2 + (Math.random() - .5) * 2.4, v = 4 + Math.random() * 10
+        parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, w: 5 + Math.random() * 6, h: 8 + Math.random() * 6, rot: Math.random() * 6.28, vr: (Math.random() - .5) * .4, color: colors[i % colors.length], born: performance.now() })
+      }
+      if (!raf) {
+        seen = performance.now()
+        raf = requestAnimationFrame(frame)
+      }
+    },
+  }
+})()
+
+const list = byId('list')
+const empty = byId('empty')
+const toasts = byId('toasts')
+const cards = new Map()
+
+function reveal(node) {
+  node.scrollIntoView({ block: 'center', behavior: moving() ? 'smooth' : 'auto' })
+  fx(node, [{ scale: 1.03, filter: 'brightness(1.2)' }, { scale: 1, filter: 'brightness(1)' }], { duration: 800, easing: 'ease-out' })
+}
+
+// \uC5F0\uACB0 \uADF8\uB9BC. \uAC00\uC6B4\uB370\uAC00 \uC774 \uC138\uC158\uC774\uACE0 \uB458\uB808\uAC00 \uC5F0\uACB0\uB41C \uC138\uC158\uC774\uB2E4. \uAE00\uC774 \uC624\uAC00\uBA74 \uADF8 \uC120\uC744 \uB530\uB77C \uBE5B\uC774 \uB0A0\uC544\uAC04\uB2E4.
+const ME = ':me'
+const stage = (() => {
+  const box = byId('stage'), net = byId('net'), NS = 'http://www.w3.org/2000/svg'
+  const mk = (tag, cls, attrs) => {
+    const e = document.createElementNS(NS, tag)
+    if (cls) e.setAttribute('class', cls)
+    for (const k in attrs || {}) e.setAttribute(k, attrs[k])
+    return e
+  }
+  const defs = mk('defs'), grad = mk('radialGradient', '', { id: 'gme', cx: '35%', cy: '30%', r: '80%' })
+  const s1 = mk('stop', '', { offset: '0' }), s2 = mk('stop', '', { offset: '1' })
+  s1.style.stopColor = 'var(--accent2)'
+  s2.style.stopColor = 'var(--accent)'
+  grad.append(s1, s2)
+  defs.append(grad)
+  const linkLayer = mk('g'), packetLayer = mk('g'), nodeLayer = mk('g')
+  net.append(defs, linkLayer, packetLayer, nodeLayer)
+  const nodes = new Map()
+  let W = 0, H = 190, raf = 0, packets = [], shown = []
+
+  // \uC138\uC158\uC744 \uB204\uB974\uBA74 \uADF8 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uB9CC \uBCF4\uC778\uB2E4. \uB2E4\uC2DC \uB204\uB974\uBA74 \uBAA8\uB450 \uBCF4\uC778\uB2E4.
+  function open(key) {
+    setFilter(key)
+    byId('filters').scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
+  }
+  function node(key, kind) {
+    let n = nodes.get(key)
+    if (n) return n
+    const r = kind === 'me' ? 26 : kind === 'ghost' ? 15 : 20
+    const g = mk('g', 'node ' + kind), fl = mk('g', 'fl'), tip = mk('title')
+    const core = mk('circle', 'core', { r }), ini = mk('text', 'ini', { dy: '.35em' })
+    const orbit = mk('g', 'orbit')
+    orbit.append(mk('circle', '', { cx: r + 8, r: 3.2 }), mk('circle', '', { cx: -(r + 8), r: 2.2 }))
+    const hb = mk('g', 'hb', { transform: 'translate(' + (r * .78).toFixed(1) + ' ' + (-r * .78).toFixed(1) + ')' })
+    const mark = mk('text', '', { dy: '.35em' })
+    mark.textContent = '?'
+    hb.append(mk('circle', '', { r: 9 }), mark)
+    const nm = mk('text', 'nm', { y: r + 20 }), sub = mk('text', 'sub', { y: r + 35 })
+    fl.append(mk('circle', 'halo', { r: r + 9 }), orbit, core, ini, hb)
+    g.append(tip, fl, nm, sub)
+    fl.style.setProperty('--fd', (4 + Math.random() * 3).toFixed(1) + 's')
+    fl.style.setProperty('--fo', (-Math.random() * 5).toFixed(1) + 's')
+    nodeLayer.append(g)
+    n = { key, kind, g, fl, core, ini, nm, sub, tip, r, x: NaN, y: NaN, tx: 0, ty: 0, sign: 1, lk: null }
+    if (kind !== 'me') {
+      const lg = mk('g', 'lk' + (kind === 'ghost' ? ' ghost' : '')), paths = [mk('path', 'link'), mk('path', 'flow a'), mk('path', 'flow b')]
+      lg.append(...paths)
+      linkLayer.append(lg)
+      n.lk = { g: lg, paths }
+      g.setAttribute('tabindex', '0')
+      g.setAttribute('role', 'button')
+      g.addEventListener('click', () => open(key))
+      g.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return
+        e.preventDefault()
+        open(key)
+      })
+    }
+    nodes.set(key, n)
+    fx(fl, [{ scale: 0 }, { scale: 1 }], { duration: 800, easing: SPRING })
+    return n
+  }
+  function drop(n) {
+    nodes.delete(n.key)
+    if (n.lk) n.lk.g.remove()
+    const a = fx(n.g, [{ opacity: 1 }, { opacity: 0 }], { duration: 400, easing: 'ease-in' })
+    if (a) a.finished.then(() => n.g.remove(), () => n.g.remove())
+    else n.g.remove()
+  }
+  function label(n, name, sub, since) {
+    const chars = Array.from(name)
+    put(n.nm, chars.length > 18 ? chars.slice(0, 17).join('') + '\u2026' : name)
+    put(n.ini, (Array.from(name.trim())[0] || '?').toUpperCase())
+    put(n.tip, name + ' \xB7 ' + sub)
+    n.g.setAttribute('aria-label', name + ', ' + sub)
+    if (since) {
+      n.sub.dataset.pre = sub + ' '
+      if (n.sub.dataset.since !== since) {
+        n.sub.dataset.since = since
+        n.sub.textContent = sub + ' ' + clock(Date.now() - Date.parse(since))
+      }
+    } else {
+      delete n.sub.dataset.since
+      put(n.sub, sub)
+    }
+  }
+  function layout() {
+    const me = nodes.get(ME)
+    if (!me) return
+    const peers = shown, n = peers.length
+    W = Math.max(280, box.clientWidth)
+    H = n > 6 ? 340 : n > 2 ? 290 : 190
+    net.setAttribute('viewBox', '0 0 ' + W + ' ' + H)
+    net.setAttribute('height', H)
+    const cy = H / 2 - 14
+    me.tx = n === 1 ? W * .28 : W / 2
+    me.ty = cy
+    if (n === 1) {
+      peers[0].tx = W * .72
+      peers[0].ty = cy
+      peers[0].sign = -1
+    } else {
+      const rx = Math.min(W * .38, 340), ry = H * .3
+      peers.forEach((p, i) => {
+        const a = (n === 2 ? Math.PI : -Math.PI / 2) + (i * 2 * Math.PI) / n
+        p.tx = W / 2 + Math.cos(a) * rx
+        p.ty = cy + Math.sin(a) * ry
+        p.sign = i % 2 ? 1 : -1
+      })
+    }
+    // \uC0C8\uB85C \uC0DD\uAE34 \uC138\uC158\uC740 \uC774 \uC138\uC158 \uC790\uB9AC\uC5D0\uC11C \uD280\uC5B4\uB098\uC628\uB2E4.
+    const still = !moving()
+    for (const p of [me].concat(peers))
+      if (isNaN(p.x) || still) {
+        const from = p === me || still || isNaN(me.x) ? p : me
+        p.x = from === p ? p.tx : me.x
+        p.y = from === p ? p.ty : me.y
+      }
+    kick()
+  }
+  function ctrl(a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y
+    return { x: (a.x + b.x) / 2 - dy * .16 * b.sign, y: (a.y + b.y) / 2 + dx * .16 * b.sign }
+  }
+  function draw() {
+    const me = nodes.get(ME)
+    for (const n of nodes.values()) {
+      n.g.style.transform = 'translate(' + n.x.toFixed(1) + 'px,' + n.y.toFixed(1) + 'px)'
+      if (!n.lk || !me) continue
+      const c = ctrl(me, n)
+      const d = 'M' + me.x.toFixed(1) + ' ' + me.y.toFixed(1) + 'Q' + c.x.toFixed(1) + ' ' + c.y.toFixed(1) + ' ' + n.x.toFixed(1) + ' ' + n.y.toFixed(1)
+      for (const p of n.lk.paths) p.setAttribute('d', d)
+    }
+  }
+  function pulse(n) {
+    const rip = mk('circle', 'rip', { r: n.r })
+    n.g.insertBefore(rip, n.g.children[1])
+    const a = fx(rip, [{ scale: 1, opacity: .8 }, { scale: 2.6, opacity: 0 }], { duration: 750, easing: 'ease-out' })
+    if (a) a.finished.then(() => rip.remove(), () => rip.remove())
+    else rip.remove()
+    fx(n.core, [{ scale: 1 }, { scale: 1.28 }, { scale: 1 }], { duration: 520, easing: 'ease-out' })
+  }
+  function fly(p, now) {
+    const me = nodes.get(ME), raw = (now - p.t0) / 900
+    if (raw < 0) return true
+    if (raw >= 1.2 || !me || !nodes.has(p.peer.key)) {
+      for (const d of p.dots) d.remove()
+      if (!p.hit) pulse(p.to)
+      return false
+    }
+    const c = ctrl(me, p.peer)
+    p.dots.forEach((d, i) => {
+      let t = Math.min(1, Math.max(0, raw - i * .035))
+      t = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+      if (!p.out) t = 1 - t
+      const u = 1 - t
+      d.setAttribute('cx', (u * u * me.x + 2 * u * t * c.x + t * t * p.peer.x).toFixed(1))
+      d.setAttribute('cy', (u * u * me.y + 2 * u * t * c.y + t * t * p.peer.y).toFixed(1))
+      d.style.display = ''
+    })
+    if (raw >= 1 && !p.hit) {
+      p.hit = true
+      pulse(p.to)
+    }
+    return true
+  }
+  function tick(now) {
+    raf = 0
+    let busy = false
+    const glide = moving()
+    for (const n of nodes.values()) {
+      const dx = n.tx - n.x, dy = n.ty - n.y
+      if (glide && (Math.abs(dx) > .4 || Math.abs(dy) > .4)) {
+        n.x += dx * .13
+        n.y += dy * .13
+        busy = true
+      } else {
+        n.x = n.tx
+        n.y = n.ty
+      }
+    }
+    draw()
+    packets = packets.filter(p => fly(p, now))
+    if (busy || packets.length) raf = requestAnimationFrame(tick)
+  }
+  function kick() {
+    if (!raf) raf = requestAnimationFrame(tick)
+  }
+  new ResizeObserver(layout).observe(box)
+
+  return {
+    update(data, convs) {
+      const me = node(ME, 'me'), want = new Set([ME]), act = new Map()
+      const flag = (key, what) => act.set(key, Object.assign(act.get(key) || {}, { [what]: true }))
+      for (const c of convs) {
+        const ph = phase(c)
+        if (ph === 'waiting_for_peer') flag(c.peer, 'think')
+        else if (ph === 'your_turn') flag(ME, 'think')
+        else if (ph === 'checking_with_your_human') flag(ME, 'human')
+        else if (ph === 'peer_checking_with_their_human') flag(c.peer, 'human')
+      }
+      label(me, data.me.name, data.me.open ? '\uC774 \uC138\uC158 \xB7 \uD3EC\uD2B8 ' + data.me.port : '\uC774 \uC138\uC158 \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798')
+      me.g.classList.toggle('closed', !data.me.open)
+      shown = []
+      const said = []
+      for (const l of (data.links || []).slice(0, 12)) {
+        const n = node(l.key, 'peer'), down = l.state !== 'connected'
+        want.add(l.key)
+        shown.push(n)
+        n.g.classList.toggle('down', down)
+        n.lk.g.classList.toggle('down', down)
+        const sub = down ? '\uB2E4\uC2DC \uBD99\uB294 \uC911' : l.via === 'relay' ? '\uC911\uACC4\uB85C \uC5F0\uACB0\uB428' : l.via === 'pickup' ? '\uC0C1\uB300\uAC00 \uAC00\uC838\uAC00\uB294 \uC911' : '\uC5F0\uACB0\uB428'
+        label(n, l.name, sub, down ? l.since : '')
+        said.push(l.name + ' ' + sub)
+      }
+      for (const c of (data.connecting || []).slice(0, 4)) {
+        const key = ':in:' + c.name, n = node(key, 'ghost')
+        want.add(key)
+        shown.push(n)
+        label(n, c.name, '\uC18C\uAC1C\uBC1B\uB294 \uC911')
+        said.push(c.name + ' \uC18C\uAC1C\uBC1B\uB294 \uC911')
+      }
+      for (const n of [...nodes.values()]) {
+        const a = act.get(n.key) || {}
+        n.g.classList.toggle('think', !!a.think)
+        n.g.classList.toggle('human', !!a.human)
+        if (!want.has(n.key)) drop(n)
+      }
+      net.setAttribute('aria-label', said.length ? '\uC5F0\uACB0\uB41C \uC138\uC158 ' + said.length + '\uAC1C: ' + said.join(', ') : '\uC5F0\uACB0\uB41C \uC138\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4')
+      layout()
+    },
+    // \uAE00 \uD558\uB098\uAC00 from \uC5D0\uC11C to \uB85C \uB0A0\uC544\uAC04\uB2E4.
+    send(from, to, kind, delay) {
+      const a = nodes.get(from), b = nodes.get(to), me = nodes.get(ME)
+      if (!a || !b || !me || a === b) return
+      if (!moving()) return
+      const dots = []
+      for (let i = 0; i < 6; i++) {
+        const c = mk('circle', 'pkt k-' + kindOf(kind), { r: (5.5 - i * .8).toFixed(1) })
+        c.style.opacity = String(1 - i * .16)
+        c.style.display = 'none'
+        packetLayer.append(c)
+        dots.push(c)
+      }
+      packets.push({ peer: a === me ? b : a, out: a === me, to: b, t0: performance.now() + (delay || 0), dots })
+      kick()
+    },
+    center() {
+      const r = box.getBoundingClientRect()
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+    },
+    // \uACE8\uB77C \uB454 \uC138\uC158\uC5D0 \uD14C\uB450\uB9AC\uB97C \uB450\uB978\uB2E4.
+    select(key) {
+      for (const n of nodes.values()) {
+        n.g.classList.toggle('sel', !!key && n.key === key)
+        if (n.kind === 'peer') n.g.setAttribute('aria-pressed', String(!!key && n.key === key))
+      }
+    },
+  }
+})()
+
+// \uC22B\uC790\uAC00 \uBC14\uB00C\uBA74 \uC790\uB9AC\uB9C8\uB2E4 \uAD74\uB7EC\uC11C \uBC14\uB010\uB2E4.
+const stats = (() => {
+  const box = byId('stats'), made = {}
+  function stat(key, label) {
+    if (made[key]) return made[key]
+    const wrap = el('div', 'stat'), num = el('span', 'num'), text = el('span', '', label)
+    num.setAttribute('aria-hidden', 'true')
+    text.setAttribute('aria-hidden', 'true')
+    wrap.setAttribute('role', 'img')
+    wrap.append(num, text)
+    box.append(wrap)
+    return (made[key] = { wrap, num, text, value: '' })
+  }
+  return {
+    set(key, label, n, hot) {
+      const s = stat(key, label), value = String(n)
+      put(s.text, label)
+      s.wrap.classList.toggle('hot', !!hot)
+      s.wrap.setAttribute('aria-label', label + ' ' + value)
+      if (s.value === value) return
+      s.value = value
+      while (s.num.children.length < value.length) {
+        const dg = el('span', 'dg')
+        dg.append(el('span', '', '0123456789'.split('').join(NL)))
+        s.num.prepend(dg)
+      }
+      while (s.num.children.length > value.length) s.num.firstChild.remove()
+      // \uC790\uB9AC\uAC00 \uC0C8\uB85C \uC0DD\uACBC\uC73C\uBA74 0 \uC5D0\uC11C \uAD74\uB7EC \uC62C\uB77C\uC624\uAC8C \uD55C \uBC15\uC790 \uB4A4\uC5D0 \uAC12\uC744 \uB123\uB294\uB2E4.
+      requestAnimationFrame(() => {
+        for (let i = 0; i < value.length; i++) if (s.num.children[i]) s.num.children[i].firstChild.style.setProperty('--d', value[i])
+      })
+    },
+  }
+})()
+
+// \uC0C8 \uAE00\uC740 \uD55C \uB0B1\uB9D0\uC529 \uC368 \uB0B4\uB824\uAC04\uB2E4. \uC790\uB9AC\uB294 \uBBF8\uB9AC \uC7A1\uC544 \uB450\uC5B4\uC11C \uC4F0\uB294 \uB3D9\uC548 \uD654\uBA74\uC774 \uBC00\uB9AC\uC9C0 \uC54A\uB294\uB2E4.
+function cuts(text) {
+  const out = []
+  if (window.Intl && Intl.Segmenter) for (const s of new Intl.Segmenter('ko', { granularity: 'word' }).segment(text)) out.push(s.index + s.segment.length)
+  else {
+    // \uB0B1\uB9D0 \uB098\uB204\uAE30\uAC00 \uC5C6\uB294 \uBE0C\uB77C\uC6B0\uC800: \uBE48\uCE78\uACFC \uAE00\uC790\uAC00 \uBC14\uB00C\uB294 \uC790\uB9AC\uC5D0\uC11C \uB04A\uB294\uB2E4.
+    let gap = text.slice(0, 1).trim() === ''
+    for (let i = 1; i < text.length; i++) {
+      const g = text[i].trim() === ''
+      if (g !== gap) out.push(i)
+      gap = g
+    }
+    out.push(text.length)
+  }
+  if (!out.length) out.push(text.length)
+  return out
+}
+function typeIn(node, text) {
+  if (!moving() || document.hidden || text.length < 2 || text.length > 6000) return
+  const at = cuts(text), typed = document.createTextNode(''), rest = el('span', 'rest', text)
+  node.replaceChildren(typed, el('span', 'caret'), rest)
+  const length = Math.min(2800, Math.max(450, text.length * 14)), t0 = performance.now()
+  let last = -1
+  const finish = () => {
+    if (node.typing !== finish) return
+    node.typing = null
+    node.textContent = text
+  }
+  const step = now => {
+    if (node.typing !== finish) return
+    if (!node.isConnected || !moving()) return finish()
+    const p = Math.min(1, (now - t0) / length), i = Math.min(at.length - 1, Math.floor(p * at.length))
+    if (i !== last) {
+      last = i
+      typed.data = text.slice(0, at[i])
+      rest.textContent = text.slice(at[i])
+    }
+    if (p < 1) requestAnimationFrame(step)
+    else finish()
+  }
+  node.typing = finish
+  requestAnimationFrame(step)
+}
+
+function toast(n) {
+  const b = el('button', 'toast')
+  b.type = 'button'
+  b.append(
+    el('span', 'tk k-' + kindOf(n.m.kind), '\uC0C8 ' + (KIND[n.m.kind] ?? n.m.kind)),
+    el('span', 'tw', n.m.from === 'me' ? '\uB098 \u2192 ' + n.c.peerName : n.c.peerName + ' \u2192 \uB098'),
+    el('span', 'ts', n.c.subject),
+    el('i', 'life'),
+  )
+  b.addEventListener('click', () => {
+    reveal(n.node)
+    dismiss(b)
+  })
+  toasts.append(b)
+  while (toasts.children.length > 4) toasts.firstChild.remove()
+  setTimeout(() => dismiss(b), 5200)
+}
+// \uC0AC\uB77C\uC9C0\uB294 \uC6C0\uC9C1\uC784\uC774 \uB05D\uB09C \uB4A4\uC5D0 \uC9C0\uC6B4\uB2E4. \uC6C0\uC9C1\uC784\uC774 \uC5C6\uC73C\uBA74 \uBC14\uB85C \uC9C0\uC6B4\uB2E4.
+async function dismiss(b) {
+  if (!b.isConnected || b.classList.contains('out')) return
+  b.classList.add('out')
+  const running = (b.getAnimations ? b.getAnimations() : []).filter(a => a.transitionProperty)
+  if (running.length) await Promise.race([Promise.allSettled(running.map(a => a.finished)), new Promise(r => setTimeout(r, 900))])
+  b.remove()
+}
+async function leave(wrap) {
+  wrap.classList.add('gone')
+  const running = wrap.firstChild.getAnimations ? wrap.firstChild.getAnimations() : []
+  if (moving() && running.length) await Promise.race([Promise.allSettled(running.map(a => a.finished)), new Promise(r => setTimeout(r, 900))])
+  wrap.remove()
+}
+
+function makeCard() {
+  const wrap = el('div', 'wrap'), card = el('section', 'conv'), head = el('div', 'head')
+  const badge = el('span', 'badge'), subject = el('h2', 'subject'), status = el('span', 'status'), stext = el('span'), agoEl = el('span', 'ago')
+  const SVG = 'http://www.w3.org/2000/svg', ck = document.createElementNS(SVG, 'svg'), tick = document.createElementNS(SVG, 'path')
+  ck.setAttribute('class', 'ck')
+  ck.setAttribute('viewBox', '0 0 16 16')
+  ck.setAttribute('aria-hidden', 'true')
+  tick.setAttribute('d', 'M3 8.5l3.2 3L13 4.5')
+  ck.append(tick)
+  status.append(el('i', 'sdot'), ck, stext, agoEl)
+  head.append(badge, subject, status)
+  const meta = el('div', 'meta'), msgs = el('ol', 'msgs'), typing = el('div', 'typing'), dots = el('span', 'dots'), tlabel = el('span'), timer = el('span', 'timer')
+  dots.append(el('i'), el('i'), el('i'))
+  dots.setAttribute('aria-hidden', 'true')
+  typing.append(dots, tlabel, timer)
+  const glow = el('div', 'fxl'), shine = el('i', 'shine'), people = el('div', 'people')
+  glow.setAttribute('aria-hidden', 'true')
+  glow.append(shine)
+  card.append(glow, head, meta, people, msgs, typing)
+  wrap.append(card)
+  return { wrap, card, badge, subject, status, stext, tick, shine, ago: agoEl, meta, people, msgs, typing, tlabel, timer, seen: new Map(), st: undefined, label: '', peers: [] }
+}
+function bubble(c, m, everyone) {
+  const cls = m.kind === 'agreement' ? 'agreement' : m.kind === 'note' || m.kind === 'closed' ? 'note' : m.from === 'me' ? 'mine' : 'peer'
+  const li = el('li', 'msg ' + cls), b = el('div', 'bubble'), who = el('div', 'who'), at = el('time', 'time', shortTime(m.at))
+  at.dateTime = m.at
+  at.title = time(m.at)
+  // \uC5EC\uB7FF\uC774 \uC788\uB294 \uBC29\uC5D0\uC11C\uB294 \uB204\uAC00 \uD55C \uB9D0\uC778\uC9C0 \uC5BC\uAD74(\uC774\uB984 \uCCAB \uAE00\uC790)\uC744 \uBD99\uC778\uB2E4.
+  if (everyone && m.from !== 'me') who.append(el('span', 'av', (Array.from(c.peerName.trim())[0] || '?').toUpperCase()))
+  who.append(el('span', '', KIND[m.kind] ?? m.kind))
+  if (m.human) who.append(el('span', 'hum', '\uC0AC\uB78C\uC774 \uC815\uD568'))
+  const shared = everyone && m.from === 'me' && m.kind === 'question'
+  who.append(el('span', 'dir', shared ? '\uB098 \u2192 ' + everyone.join(', ') : m.from === 'me' ? '\uB098 \u2192 ' + c.peerName : c.peerName + ' \u2192 \uB098'), at)
+  const text = el('div', 'text', m.text)
+  b.append(who, text)
+  if (m.kind === 'agreement') b.append(el('span', 'stamp', '\uD569\uC758'))
+  if (m.context) {
+    const d = el('details')
+    d.append(el('summary', '', '\uD568\uAED8 \uBCF4\uB0B8 \uBC30\uACBD'), el('div', 'text', m.context))
+    b.append(d)
+  }
+  li.append(b)
+  li.body = text
+  // \uC368 \uB0B4\uB824\uAC00\uB294 \uC911\uC5D0 \uB204\uB974\uBA74 \uBC14\uB85C \uB05D\uAE4C\uC9C0 \uBCF4\uC5EC \uC900\uB2E4.
+  li.addEventListener('click', () => text.typing && text.typing())
+  return li
+}
+// \uC5EC\uB7EC \uC138\uC158\uC5D0 \uD55C \uBC88\uC5D0 \uBCF4\uB0B8 \uC9C8\uBB38\uC740 \uBC29 \uD558\uB098\uB85C \uBB36\uB294\uB2E4. \uB2E8\uCCB4 \uB300\uD654\uBC29\uCC98\uB7FC \uC9C8\uBB38\uC740 \uD55C \uBC88\uB9CC \uBCF4\uC774\uACE0, \uB2F5\uC740 \uC628 \uCC28\uB840\uB300\uB85C \uD55C \uBC29\uC5D0 \uC313\uC778\uB2E4
+// (2026-11-16, \uC0AC\uB78C\uC774 \uC815\uD568). \uC138\uC158\uC740 \uBC1B\uB294 \uC0AC\uB78C\uB9C8\uB2E4 \uB300\uD654\uB97C \uB530\uB85C \uB450\uC9C0\uB9CC, \uC0AC\uB78C\uC5D0\uAC8C\uB294 \uD55C \uC9C8\uBB38\uC774\uB2E4.
+// \uBC1B\uC740 \uCABD\uC5D0\uC11C\uB294 \uB2E4\uB978 \uC0AC\uB78C\uC758 \uB2F5\uC774 \uC624\uC9C0 \uC54A\uC73C\uBBC0\uB85C \uBB36\uC744 \uAC83\uC774 \uC5C6\uB2E4.
+function roomsOf(convs) {
+  const out = [], byAsk = new Map()
+  for (const c of convs) {
+    if (!c.ask || c.startedBy !== 'me') {
+      out.push({ id: c.id, convs: [c] })
+      continue
+    }
+    let room = byAsk.get(c.ask.id)
+    if (!room) {
+      room = { id: 'ask:' + c.ask.id, convs: [] }
+      byAsk.set(c.ask.id, room)
+      out.push(room)
+    }
+    room.convs.push(c)
+  }
+  return out
+}
+// \uBC29 \uC804\uCCB4\uC758 \uB2E8\uACC4. \uD55C \uC0AC\uB78C\uC774\uB77C\uB3C4 \uAE30\uB2E4\uB9AC\uAC8C \uD558\uBA74 \uAE30\uB2E4\uB9AC\uB294 \uC911\uC774\uB2E4.
+function roomPhase(phases) {
+  for (const p of ['checking_with_your_human', 'peer_checking_with_their_human', 'your_turn', 'waiting_for_peer']) if (phases.includes(p)) return p
+  for (const p of ['agreed', 'closed']) if (phases.every(one => one === p)) return p
+  return phases.includes('answered') ? 'answered' : phases.includes('answered_by_me') ? 'answered_by_me' : phases[0]
+}
+const PERSON = { waiting_for_peer: ['wait', '\uAE30\uB2E4\uB9AC\uB294 \uC911'], peer_checking_with_their_human: ['human', '\uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911'], answered: ['ok', '\uB2F5\uD568'], answered_by_me: ['ok', '\uB2F5\uD568'], agreed: ['ok', '\uD569\uC758'], closed: ['', '\uB9C8\uAC10'] }
+
+// \uCE74\uB4DC \uD558\uB098\uB97C \uC9C0\uAE08 \uBC29\uC5D0 \uB9DE\uCD98\uB2E4. \uC774\uBBF8 \uC788\uB294 \uAC83\uC740 \uADF8\uB300\uB85C \uB450\uACE0 \uB2EC\uB77C\uC9C4 \uAC83\uB9CC \uBC14\uAFBC\uB2E4. \uADF8\uB798\uC57C \uC0C8\uB85C \uC628 \uAC83\uB9CC \uC6C0\uC9C1\uC778\uB2E4.
+function paint(v, room, live, index, news) {
+  const convs = room.convs, c = convs[0], group = convs.length > 1
+  const mine = c.startedBy === 'me', first = c.messages[0]
+  const names = convs.map(one => one.peerName)
+  v.peers = convs.map(one => one.peer)
+  put(v.badge, group ? '\uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 \uC9C8\uBB38' : mine ? '\uBCF4\uB0B8 \uC9C8\uBB38' : '\uBC1B\uC740 \uC9C8\uBB38')
+  v.badge.classList.toggle('out', mine)
+  put(v.subject, c.subject)
+  const where = convs.map(one => one.peerName + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
+  const mode = c.ask ? ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
+  const others = c.ask ? (group ? ' \xB7' + mode : ' \xB7 \uD568\uAED8 \uBC1B\uC740 \uC0AC\uB78C: ' + c.ask.to.join(', ') + mode) : ''
+  put(v.meta, (mine ? '\uBC1B\uB294 \uCABD: ' : '\uBCF4\uB0B8 \uCABD: ') + where + (first ? ' \xB7 \uC2DC\uC791 ' + time(first.at) : '') + others)
+
+  const phases = convs.map(phase), ph = group ? roomPhase(phases) : phases[0]
+  const answered = phases.filter(p => p === 'answered' || p === 'answered_by_me' || p === 'agreed').length
+  const pending = convs.filter((one, i) => phases[i] === ph && WAIT[ph])
+  const label = (PHASE[ph] ?? ph) + (group ? ' \xB7 ' + convs.length + '\uBA85 \uC911 ' + answered + '\uBA85 \uB2F5\uD568' : '')
+  if (v.st !== ph || v.label !== label) {
+    const was = v.st, changed = v.st !== ph
+    v.st = ph
+    v.label = label
+    v.card.dataset.st = PHASE[ph] ? ph : ''
+    v.card.classList.toggle('act', !!WAIT[ph])
+    put(v.stext, label)
+    v.typing.classList.toggle('r', ph === 'your_turn' || ph === 'checking_with_your_human')
+    if (live && was !== undefined) {
+      fx(v.status, [{ rotate: 'x 90deg', opacity: 0 }, { rotate: 'x 0deg', opacity: 1 }], { duration: 600, easing: SPRING })
+      // \uB2F5\uC774 \uC640\uC11C \uC9C8\uBB38\uACFC \uB2F5\uC774 \uB05D\uB0AC\uB2E4. \uAC00\uC7A5 \uD754\uD55C \uB05D\uC774\uBBC0\uB85C \uC5EC\uAE30\uC5D0\uB3C4 \uC791\uC740 \uB9C8\uBB34\uB9AC\uB97C \uB454\uB2E4: \uCCB4\uD06C\uAC00 \uADF8\uB824\uC9C0\uACE0 \uBE5B\uC774 \uD55C \uBC88 \uC9C0\uB098\uAC04\uB2E4.
+      if (changed && (ph === 'answered' || ph === 'answered_by_me')) {
+        fx(v.tick, [{ strokeDashoffset: 16 }, { strokeDashoffset: 0 }], { duration: 600, delay: 300, easing: 'ease-out', fill: 'backwards' })
+        fx(v.shine, [{ translate: '-130% 0' }, { translate: '330% 0' }], { duration: 1100, easing: 'ease-in-out' })
+      }
+    }
+  }
+  put(v.tlabel, !WAIT[ph] ? '' : group ? WAIT[ph] + ': ' + pending.map(one => one.peerName).join(', ') : WAIT[ph])
+  // \uBC1B\uC740 \uC0AC\uB78C\uB9C8\uB2E4 \uB2F5\uD588\uB294\uC9C0. \uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 \uC9C8\uBB38\uC5D0\uB9CC \uBD99\uB294\uB2E4.
+  const people = group ? convs.map((one, i) => [one.peerName, (PERSON[phases[i]] || ['', PHASE[phases[i]] ?? phases[i]])]) : []
+  const sig = JSON.stringify(people)
+  if (v.people.dataset.sig !== sig) {
+    v.people.dataset.sig = sig
+    v.people.replaceChildren(...people.map(([name, state]) => el('span', 'pp ' + state[0], name + ' \xB7 ' + state[1])))
+  }
+
+  // \uC5BC\uB9C8\uB098 \uAE30\uB2E4\uB838\uB294\uC9C0. \uC0C1\uB300\uAC00 \uC790\uAE30 \uC0AC\uB78C\uC5D0\uAC8C \uBB3B\uB294 \uC911\uC774\uBA74 \uBB3B\uAE30 \uC2DC\uC791\uD55C \uB54C\uBD80\uD130, \uC544\uB2C8\uBA74 \uAE30\uB2E4\uB9AC\uAC8C \uD558\uB294 \uB300\uD654\uC758 \uB9C8\uC9C0\uB9C9 \uAE00\uBD80\uD130 \uC13C\uB2E4.
+  const held = pending[0] || c, tail = held.messages[held.messages.length - 1]
+  const since = held.status === 'peer_checking_with_their_human' && held.humanSince ? held.humanSince : tail ? tail.at : ''
+  if (v.timer.dataset.since !== since) {
+    v.timer.dataset.since = since
+    v.timer.textContent = since ? clock(Date.now() - Date.parse(since)) : ''
+  }
+  // \uD55C \uBC29\uC5D0 \uBCF4\uC77C \uAE00. \uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 \uC9C8\uBB38\uC740 \uB300\uD654\uB9C8\uB2E4 \uAC19\uC740 \uC9C8\uBB38\uC774 \uB4E4\uC5B4 \uC788\uC73C\uBBC0\uB85C \uD558\uB098\uB9CC \uB0A8\uAE30\uACE0, \uB098\uBA38\uC9C0\uB294 \uC628 \uCC28\uB840\uB300\uB85C \uC11E\uB294\uB2E4.
+  const items = []
+  convs.forEach((one, k) =>
+    one.messages.forEach((m, i) => {
+      if (group && k > 0 && i === 0 && m.kind === 'question') return
+      items.push({ c: one, m, id: m.id || one.id + ':' + i })
+    }),
+  )
+  if (group) items.sort((x, y) => (x.m.at < y.m.at ? -1 : x.m.at > y.m.at ? 1 : 0))
+  const newest = items.reduce((at, it) => (it.m.at > at ? it.m.at : at), '')
+  if (newest && v.ago.dataset.ago !== newest) {
+    v.ago.dataset.ago = newest
+    v.ago.textContent = '\xB7 ' + ago(Date.now() - Date.parse(newest))
+  }
+  const ids = new Set(items.map(it => it.id))
+  for (const [id, node] of v.seen)
+    if (!ids.has(id)) {
+      v.seen.delete(id)
+      node.remove()
+    }
+  // \uC0C8 \uAE00\uB9CC \uB9CC\uB4E4\uC5B4 \uC81C\uC790\uB9AC\uC5D0 \uB07C\uC6B4\uB2E4. \uC774\uBBF8 \uC788\uB294 \uAE00\uC740 \uC62E\uAE30\uC9C0 \uC54A\uB294\uB2E4(\uC62E\uAE30\uBA74 \uB098\uD0C0\uB098\uB294 \uC6C0\uC9C1\uC784\uC774 \uB2E4\uC2DC \uB3C8\uB2E4).
+  for (let i = items.length - 1, after = null; i >= 0; i--) {
+    const it = items[i]
+    let node = v.seen.get(it.id)
+    if (!node) {
+      node = bubble(it.c, it.m, group ? names : null)
+      if (!live) node.style.setProperty('--i', Math.min(index + i + 1, 10))
+      v.seen.set(it.id, node)
+      v.msgs.insertBefore(node, after)
+      if (live) news.unshift({ c: it.c, m: it.m, v, node })
+    }
+    after = node
+  }
+}
+
+// \uC5EC\uB7EC \uC138\uC158\uACFC \uC774\uC5B4\uC838 \uC788\uC73C\uBA74 \uC138\uC158\uC744 \uACE8\uB77C \uADF8 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uB9CC \uBCF8\uB2E4. \uC5F0\uACB0 \uADF8\uB9BC\uC758 \uC138\uC158\uC744 \uB20C\uB7EC\uB3C4 \uB41C\uB2E4.
+const filters = byId('filters')
+let filter = ''
+function setFilter(key) {
+  filter = filter === key ? '' : key
+  applyFilter(true)
+}
+function applyFilter(byPerson) {
+  const slide = byPerson && moving(), before = new Map()
+  if (slide) for (const v of cards.values()) if (!v.wrap.hidden) before.set(v, v.wrap.getBoundingClientRect().top)
+  let count = 0
+  for (const v of cards.values()) {
+    const hide = !!filter && !v.peers.includes(filter)
+    if (v.wrap.hidden !== hide) v.wrap.hidden = hide
+    if (!hide) count++
+  }
+  empty.hidden = count > 0
+  put(byId('emptyText'), filter ? '\uC774 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uAC00 \uC544\uC9C1 \uC5C6\uC2B5\uB2C8\uB2E4.' : '\uC544\uC9C1 \uC8FC\uACE0\uBC1B\uC740 \uC9C8\uBB38\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.')
+  if (slide)
+    for (const [v, top] of before) {
+      if (v.wrap.hidden) continue
+      if (v.slide) v.slide.cancel()
+      const dy = top - v.wrap.getBoundingClientRect().top
+      if (Math.abs(dy) > 1) v.slide = v.wrap.animate([{ translate: '0 ' + dy.toFixed(1) + 'px' }, { translate: '0 0' }], { duration: 700, easing: SPRING })
+    }
+  for (const b of filters.children) {
+    const on = (b.dataset.key || '') === filter
+    b.classList.toggle('sel', on)
+    b.setAttribute('aria-pressed', String(on))
+  }
+  stage.select(filter)
+}
+function syncFilters(groups, links) {
+  const seen = new Map()
+  for (const l of links) seen.set(l.key, { name: l.name, n: 0 })
+  for (const room of groups)
+    for (const c of room.convs) {
+      const one = seen.get(c.peer) || { name: c.peerName, n: 0 }
+      one.n++
+      seen.set(c.peer, one)
+    }
+  if (filter && !seen.has(filter)) filter = ''
+  filters.hidden = seen.size < 2
+  const sig = JSON.stringify([...seen])
+  if (filters.dataset.sig === sig) return
+  filters.dataset.sig = sig
+  const chip = (key, name, n) => {
+    const b = el('button', 'chip')
+    b.type = 'button'
+    b.dataset.key = key
+    b.append(el('span', '', name), el('b', '', String(n)))
+    b.addEventListener('click', () => setFilter(key))
+    return b
+  }
+  filters.replaceChildren(chip('', '\uC804\uCCB4', groups.length), ...[...seen].map(([key, one]) => chip(key, one.name, one.n)))
+}
+
+// \uC811\uADFC\uD0A4(\uC5F0\uACB0 \uCF54\uB4DC)\uB97C \uD654\uBA74\uC5D0\uC11C \uB9CC\uB4E0\uB2E4. \uC0AC\uB78C\uC744 \uB354\uD560 \uB54C, \uADF8\uB9AC\uACE0 \uB04A\uAE34 \uC0C1\uB300\uAC00 \uB2E4\uC2DC \uB4E4\uC5B4\uC624\uAC8C \uD560 \uB54C \uC4F4\uB2E4.
+const keybox = byId('keybox'), keycode = byId('keycode'), keycopy = byId('keycopy'), issueButton = byId('issue')
+let keyFor = ''
+let hasKey = false
+async function issueKey(name) {
+  keyFor = name
+  hasKey = false
+  put(byId('keyhelp'), name ? name + ' \uCABD\uC5D0 \uC774 \uC811\uADFC\uD0A4\uB97C \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694. \uADF8\uCABD AI\uAC00 \uC774 \uCF54\uB4DC\uB85C \uB2E4\uC2DC \uC5F0\uACB0\uD558\uBA74 \uC774\uC5B4\uC9D1\uB2C8\uB2E4.' : '\uD568\uAED8\uD560 \uB3D9\uB8CC\uC5D0\uAC8C \uC774 \uC811\uADFC\uD0A4\uB97C \uBCF4\uB0B4\uC138\uC694. \uB3D9\uB8CC\uAC00 \uC790\uAE30 AI\uC5D0\uAC8C \u300C\uC774 \uCF54\uB4DC\uB85C \uC5F0\uACB0\uD574\uC918\u300D\uB77C\uACE0 \uD558\uBA74 \uC774\uC5B4\uC9D1\uB2C8\uB2E4.')
+  put(keycode, '\uB9CC\uB4DC\uB294 \uC911\u2026')
+  put(byId('keyinfo'), '')
+  if (!keybox.open) keybox.showModal()
+  try {
+    const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1' } })
+    if (!res.ok) throw new Error(String(res.status))
+    const made = await res.json()
+    hasKey = true
+    put(keycode, made.code)
+    put(byId('keyinfo'), '\uD55C \uC0AC\uB78C\uB9CC, \uD55C \uBC88\uB9CC \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4. ' + shortTime(made.expires) + '\uAE4C\uC9C0 \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4.')
+    fx(keycode, [{ scale: .96, opacity: .3 }, { scale: 1, opacity: 1 }], { duration: 500, easing: SPRING })
+  } catch (e) {
+    put(keycode, '')
+    put(byId('keyinfo'), e.message === '409' ? '\uBE0C\uB9BF\uC9C0\uAC00 \uB2EB\uD600 \uC788\uC5B4\uC11C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. AI\uC5D0\uAC8C \u300C\uBE0C\uB9BF\uC9C0 \uC5F4\uC5B4\uC918\u300D\uB77C\uACE0 \uD558\uC138\uC694.' : e.message === '429' ? '\uC7A0\uC2DC \uB4A4\uC5D0 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.' : '\uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.')
+  }
+}
+issueButton.addEventListener('click', () => issueKey(''))
+byId('keyagain').addEventListener('click', () => issueKey(keyFor))
+byId('keyclose').addEventListener('click', () => keybox.close())
+keybox.addEventListener('click', e => {
+  if (e.target === keybox) keybox.close()
+})
+keycopy.addEventListener('click', async () => {
+  if (!hasKey) return
+  let ok = false
+  try {
+    await navigator.clipboard.writeText(keycode.textContent)
+    ok = true
+  } catch (e) {
+    // \uD074\uB9BD\uBCF4\uB4DC\uB97C \uBABB \uC4F0\uB294 \uBE0C\uB77C\uC6B0\uC800: \uAE00\uC790\uB97C \uACE8\uB77C \uB450\uC5B4 \uC0AC\uB78C\uC774 \uBC14\uB85C \uBCF5\uC0AC\uD558\uAC8C \uD55C\uB2E4.
+    getSelection().selectAllChildren(keycode)
+  }
+  put(keycopy, ok ? '\uBCF5\uC0AC\uD588\uC2B5\uB2C8\uB2E4' : '\uACE8\uB77C \uB450\uC5C8\uC2B5\uB2C8\uB2E4. \uBCF5\uC0AC \uD0A4\uB97C \uB204\uB974\uC138\uC694')
+  setTimeout(() => put(keycopy, '\uBCF5\uC0AC'), 2000)
+})
+// \uB2FF\uC9C0 \uC54A\uB294 \uC138\uC158\uB9C8\uB2E4 \uD55C \uC904. \uC2A4\uC2A4\uB85C \uB2E4\uC2DC \uBD99\uC9C0\uB9CC, \uC624\uB798 \uAC78\uB9AC\uBA74 \uC0AC\uB78C\uC774 \uC811\uADFC\uD0A4\uB97C \uB2E4\uC2DC \uB9CC\uB4E4\uC5B4 \uBCF4\uB0BC \uC218 \uC788\uB2E4.
+function syncDowns(links) {
+  const box = byId('downs'), rows = links.filter(l => l.state !== 'connected')
+  const sig = rows.map(l => l.key + (l.since || '')).join(' ')
+  if (box.dataset.sig === sig) return
+  box.dataset.sig = sig
+  box.replaceChildren(
+    ...rows.map(l => {
+      const row = el('div', 'downrow'), text = el('span'), timer = el('b', 'timer'), again = el('button', 'chip', '\uC811\uADFC\uD0A4 \uB2E4\uC2DC \uB9CC\uB4E4\uAE30')
+      timer.dataset.since = l.since || ''
+      put(timer, l.since ? clock(Date.now() - Date.parse(l.since)) : '')
+      text.append(l.name + '\uC5D0 \uB2FF\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC2A4\uC2A4\uB85C \uB2E4\uC2DC \uBD99\uB294 \uC911 \xB7 ', timer)
+      again.type = 'button'
+      again.addEventListener('click', () => issueKey(l.name))
+      row.append(text, again)
+      return row
+    }),
+  )
+}
+
+let follow = saved.get('coworker.follow') !== 'off'
+let touched = 0
+// \uC0C8\uB85C \uC628 \uAE00\uC744 \uC54C\uB9B0\uB2E4: \uC5F0\uACB0 \uADF8\uB9BC\uC5D0 \uBE5B\uC774 \uB0A0\uC544\uAC00\uACE0, \uAE00\uC774 \uC368 \uB0B4\uB824\uAC00\uACE0, \uC54C\uB9BC\uC774 \uB72C\uB2E4. \uD569\uC758\uBB38\uC774\uBA74 \uC0C9\uC885\uC774\uAC00 \uD130\uC9C4\uB2E4.
+function announce(news) {
+  const few = news.length <= 4
+  news.forEach((n, i) => {
+    const recent = i >= news.length - 3
+    if (i < 8) stage.send(n.m.from === 'me' ? ME : n.c.peer, n.m.from === 'me' ? n.c.peer : ME, n.m.kind, i * 140)
+    if (few || recent) typeIn(n.node.body, n.m.text)
+    if (recent) toast(n)
+    if (n.m.kind === 'agreement' && recent) {
+      const stamp = n.node.querySelector('.stamp')
+      if (stamp) fx(stamp, [{ scale: 2.8, opacity: 0, rotate: '-24deg' }, { scale: 1, opacity: 1, rotate: '-6deg' }], { duration: 800, easing: SPRING })
+      const r = n.node.getBoundingClientRect()
+      confetti.burst(Math.min(innerWidth - 20, Math.max(20, r.left + r.width / 2)), Math.min(innerHeight - 20, Math.max(20, r.top + 20)))
+    }
+  })
+  const c = stage.center()
+  sky.wave(c.x, c.y)
+  const newest = news[news.length - 1]
+  // \uB530\uB77C\uAC00\uAE30\uB97C \uCF30\uC73C\uBA74 \uC0C8 \uAE00\uC774 \uBCF4\uC774\uAC8C \uC62E\uAE34\uB2E4. \uC0AC\uB78C\uC774 \uBC29\uAE08 \uD654\uBA74\uC744 \uB9CC\uC84C\uC73C\uBA74 \uAC74\uB4DC\uB9AC\uC9C0 \uC54A\uB294\uB2E4.
+  if (follow && Date.now() - touched > 3000) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
+}
+
+let first = true
+function render(data) {
+  const live = !first
+  first = false
+  const me = data.me
+  const relay = me.relay ? ' \xB7 \uC911\uACC4 \uC11C\uBC84 ' + ({ connected: '\uC5F0\uACB0\uB428', connecting: '\uC5F0\uACB0\uD558\uB294 \uC911', off: '\uAEBC\uC9D0' }[me.relay.status] ?? '\uB2FF\uC9C0 \uC54A\uC74C') : ''
+  put(byId('me'), me.name + (me.open ? ' \xB7 \uD3EC\uD2B8 ' + me.port + ' \uC5F4\uB9BC' : ' \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798') + relay)
+  const convs = [...data.conversations].sort((a, b) => (b.messages[0]?.at ?? '').localeCompare(a.messages[0]?.at ?? ''))
+  const links = data.links || []
+  const up = links.filter(l => l.state === 'connected').length
+  const asking = convs.filter(c => c.status === 'checking_with_your_human' || c.status === 'peer_checking_with_their_human').length
+  const unanswered = convs.filter(c => ['waiting_for_peer', 'your_turn'].includes(phase(c))).length
+  stats.set('links', up < links.length ? '\uC5F0\uACB0 (\uB04A\uAE40 ' + (links.length - up) + ')' : '\uC5F0\uACB0', up, false)
+  const groups = roomsOf(convs)
+  stats.set('convs', '\uB300\uD654', groups.length, false)
+  stats.set('msgs', '\uAE00', convs.reduce((n, c) => n + c.messages.length, 0), false)
+  stats.set('open', '\uB2F5 \uAE30\uB2E4\uB9BC', unanswered, false)
+  stats.set('humans', '\uC0AC\uB78C \uACB0\uC815 \uB300\uAE30', asking, asking > 0)
+  stage.update(data, convs)
+  issueButton.disabled = !me.open
+  syncDowns(links)
+
+  // \uCE74\uB4DC\uAC00 \uBC00\uB824\uB098\uB294 \uAC83\uC744 \uBD80\uB4DC\uB7FD\uAC8C \uC787\uB294\uB2E4: \uBC14\uAFB8\uAE30 \uC804 \uC790\uB9AC\uB97C \uC7AC \uB450\uACE0, \uBC14\uAFBC \uB4A4 \uADF8 \uCC28\uC774\uB9CC\uD07C \uBBF8\uB044\uB7EC\uC838 \uC624\uAC8C \uD55C\uB2E4.
+  const slide = live && moving()
+  const before = new Map()
+  if (slide) for (const v of cards.values()) before.set(v, v.wrap.getBoundingClientRect().top)
+  const news = [], keep = new Set()
+  let prev = null
+  groups.forEach((room, i) => {
+    keep.add(room.id)
+    let v = cards.get(room.id)
+    if (!v) {
+      v = makeCard()
+      cards.set(room.id, v)
+      if (!live) {
+        v.card.style.setProperty('--i', Math.min(i, 8))
+        setTimeout(() => v.card.style.removeProperty('--i'), 2000)
+      }
+      list.insertBefore(v.wrap, prev ? prev.nextSibling : list.firstChild)
+    }
+    paint(v, room, live, i, news)
+    if (filter && !v.peers.includes(filter)) v.wrap.hidden = true
+    prev = v.wrap
+  })
+  for (const [id, v] of [...cards])
+    if (!keep.has(id)) {
+      cards.delete(id)
+      leave(v.wrap)
+    }
+  syncFilters(groups, links)
+  applyFilter(false)
+  if (slide)
+    for (const [v, top] of before) {
+      if (!v.wrap.isConnected) continue
+      if (v.slide) v.slide.cancel()
+      const dy = top - v.wrap.getBoundingClientRect().top
+      if (Math.abs(dy) > 1) v.slide = v.wrap.animate([{ translate: '0 ' + dy.toFixed(1) + 'px' }, { translate: '0 0' }], { duration: 700, easing: SPRING })
+    }
+  if (news.length) announce(news)
+}
+
+// \uAE30\uB2E4\uB9B0 \uC2DC\uAC04\uACFC \u300C\uBA87 \uCD08 \uC804\u300D\uC744 1\uCD08\uB9C8\uB2E4 \uC0C8\uB85C \uC4F4\uB2E4.
+setInterval(() => {
+  if (document.hidden) return
+  const now = Date.now()
+  for (const n of document.querySelectorAll('[data-since]')) {
+    const from = Date.parse(n.dataset.since)
+    if (!isNaN(from)) put(n, (n.dataset.pre || '') + clock(now - from))
+  }
+  for (const n of document.querySelectorAll('[data-ago]')) put(n, '\xB7 ' + ago(now - Date.parse(n.dataset.ago)))
+}, 1000)
+
+// \uCE74\uB4DC \uC704\uC5D0\uC11C \uB9C8\uC6B0\uC2A4\uB97C \uC6C0\uC9C1\uC774\uBA74 \uCE74\uB4DC\uAC00 \uC0B4\uC9DD \uAE30\uC6B8\uACE0 \uBE5B\uC774 \uB530\uB77C\uC628\uB2E4. \uAE34 \uCE74\uB4DC\uB294 \uB35C \uAE30\uC6B4\uB2E4.
+const fine = matchMedia('(hover: hover) and (pointer: fine)')
+let tilt = null
+list.addEventListener('pointermove', e => {
+  if (!moving() || !fine.matches) return
+  const card = e.target.closest ? e.target.closest('.conv') : null
+  if (!card) return
+  const go = !tilt
+  tilt = { card, x: e.clientX, y: e.clientY }
+  if (go)
+    requestAnimationFrame(() => {
+      const t = tilt
+      tilt = null
+      const r = t.card.getBoundingClientRect(), x = (t.x - r.left) / r.width, y = (t.y - r.top) / r.height, k = Math.min(1, 420 / r.height)
+      t.card.style.setProperty('--mx', (x * 100).toFixed(1) + '%')
+      t.card.style.setProperty('--my', (y * 100).toFixed(1) + '%')
+      t.card.style.setProperty('--ry', ((x - .5) * 2.4).toFixed(2) + 'deg')
+      t.card.style.setProperty('--rx', ((.5 - y) * 2.4 * k).toFixed(2) + 'deg')
+    })
+})
+list.addEventListener('pointerout', e => {
+  const card = e.target.closest ? e.target.closest('.conv') : null
+  if (!card || (e.relatedTarget && card.contains(e.relatedTarget))) return
+  card.style.removeProperty('--rx')
+  card.style.removeProperty('--ry')
+})
+for (const name of ['wheel', 'touchstart', 'keydown', 'pointerdown']) addEventListener(name, () => { touched = Date.now() }, { passive: true })
+
+const motionButton = byId('motion'), followButton = byId('follow')
+function applyMotion() {
+  root.classList.toggle('on', moving())
+  put(motionButton, moving() ? '\uBAA8\uC158 \uB044\uAE30' : '\uBAA8\uC158 \uCF1C\uAE30')
+  sky.run()
+}
+motionButton.addEventListener('click', () => {
+  motionPref = moving() ? 'off' : 'on'
+  saved.set('coworker.motion', motionPref)
+  applyMotion()
+})
+reduce.addEventListener('change', applyMotion)
+function applyFollow() {
+  put(followButton, follow ? '\uC0C8 \uAE00 \uB530\uB77C\uAC00\uAE30 \uB044\uAE30' : '\uC0C8 \uAE00 \uB530\uB77C\uAC00\uAE30 \uCF1C\uAE30')
+}
+followButton.addEventListener('click', () => {
+  follow = !follow
+  saved.set('coworker.follow', follow ? 'on' : 'off')
+  applyFollow()
+})
+applyMotion()
+applyFollow()
+
+// \uC138\uC158\uC774 \uBC14\uB010 \uAC83\uC744 \uADF8\uB54C\uADF8\uB54C \uBC00\uC5B4 \uC900\uB2E4. \uC138\uC158\uC744 \uB2E4\uC2DC \uCF1C\uBA74 \uAC19\uC740 \uC8FC\uC18C\uB85C \uB3CC\uC544\uC624\uBBC0\uB85C, \uB04A\uACA8\uB3C4 \uC2A4\uC2A4\uB85C \uB2E4\uC2DC \uBD99\uB294\uB2E4.
+// \uBE0C\uB77C\uC6B0\uC800\uB294 \uD55C \uC8FC\uC18C\uC5D0 \uC5F0\uACB0\uC744 6\uAC1C\uAE4C\uC9C0\uB9CC \uC5F4\uC5B4 \uB454\uB2E4. \uD654\uBA74\uB9C8\uB2E4 \uC5F0\uACB0 \uD558\uB098\uB97C \uC950\uACE0 \uC788\uC73C\uBA74 \uD0ED\uC744 \uC5EC\uB7FF \uC5F0 \uB4A4 \uC0C8 \uD0ED\uC774 \uB728\uC9C0 \uC54A\uC73C\uBBC0\uB85C,
+// \uBCF4\uC774\uC9C0 \uC54A\uB294 \uD0ED\uC740 \uC5F0\uACB0\uC744 \uB193\uC558\uB2E4\uAC00 \uB2E4\uC2DC \uBCF4\uC77C \uB54C \uBD99\uB294\uB2E4. \uBD99\uC744 \uB54C\uB9C8\uB2E4 \uB300\uD654 \uC804\uCCB4\uB97C \uB2E4\uC2DC \uBC1B\uB294\uB2E4.
+const refresh = byId('refresh'), liveChip = byId('live'), liveText = byId('liveText')
+let changedAt = ''
+let shown = ''
+let events
+let retry
+function status(text, offline) {
+  put(refresh, text)
+  document.body.classList.toggle('offline', !!offline)
+  liveChip.classList.toggle('off', !!offline)
+  put(liveText, offline ? '\uB04A\uAE40' : '\uC2E4\uC2DC\uAC04')
+}
+function connect() {
+  clearTimeout(retry)
+  if (events) events.close()
+  const source = new EventSource(location.pathname + '/events')
+  events = source
+  source.onmessage = e => {
+    if (e.data !== shown) {
+      shown = e.data
+      render(JSON.parse(e.data))
+      changedAt = time(new Date().toISOString())
+    }
+    status('\uBC14\uB00C\uBA74 \uBC14\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4 \xB7 \uB9C8\uC9C0\uB9C9 \uBCC0\uACBD ' + changedAt)
+  }
+  source.onerror = () => {
+    status('\uC138\uC158\uC5D0 \uB2FF\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uB2E4\uC2DC \uCF1C\uC9C0\uBA74 \uC774 \uD654\uBA74\uC774 \uC2A4\uC2A4\uB85C \uC774\uC5B4\uC11C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4.', true)
+    // \uBE0C\uB77C\uC6B0\uC800\uAC00 \uB2E4\uC2DC \uBD99\uAE30\uB97C \uADF8\uB9CC\uB450\uC5C8\uC73C\uBA74(\uADF8 \uD3EC\uD2B8\uC5D0 \uB2E4\uB978 \uAC83\uC774 \uB5B4\uC744 \uB54C) \uC7A0\uC2DC \uB4A4 \uC9C1\uC811 \uB2E4\uC2DC \uBD99\uB294\uB2E4.
+    if (source.readyState === EventSource.CLOSED && events === source) retry = setTimeout(connect, 5000)
+  }
+}
+function release() {
+  clearTimeout(retry)
+  if (events) events.close()
+  events = undefined
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) release()
+  else {
+    connect()
+    sky.run()
+  }
+})
+if (!document.hidden) connect()
+</script>
+</body>
+</html>
+`;
+
 // src/viewer.ts
 class Viewer {
   bridge;
@@ -27152,6 +28592,7 @@ class Viewer {
   token;
   listener;
   wakers = new Set;
+  issuedAt = 0;
   constructor(bridge, options = {}) {
     this.bridge = bridge;
     this.options = options;
@@ -27186,7 +28627,36 @@ class Viewer {
     this.server = undefined;
   }
   data() {
-    return { me: this.bridge.describe(), conversations: [...this.bridge.threads.values()] };
+    return { me: this.bridge.describe(), links: this.bridge.links(), connecting: this.bridge.connecting(), conversations: [...this.bridge.threads.values()] };
+  }
+  status() {
+    const waiting = { yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 };
+    for (const t of this.bridge.threads.values()) {
+      if (t.status === "checking_with_your_human")
+        waiting.yourHuman++;
+      else if (t.status === "peer_checking_with_their_human")
+        waiting.theirHuman++;
+      else if (t.status === "your_turn" && owes(t) === "me")
+        waiting.yours++;
+      else if (t.status === "waiting_for_peer" && owes(t) === "peer")
+        waiting.theirs++;
+    }
+    const me = this.bridge.describe();
+    return { name: me.name, open: me.open, links: this.bridge.links().map((l) => ({ name: l.name, state: l.state })), connecting: this.bridge.connecting().length, waiting };
+  }
+  issue(req, headers) {
+    const origin = req.headers.get("origin");
+    const site = req.headers.get("sec-fetch-site");
+    const here = origin === null || [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`].includes(origin);
+    if (req.headers.get("x-coworker-viewer") !== "1" || !here || site !== null && site !== "same-origin")
+      return new Response("forbidden", { status: 403 });
+    if (!this.bridge.isOpen)
+      return Response.json({ error: "the bridge is closed" }, { status: 409, headers });
+    const now = Date.now();
+    if (now - this.issuedAt < ISSUE_GAP_MS)
+      return Response.json({ error: "too many requests" }, { status: 429, headers });
+    this.issuedAt = now;
+    return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers });
   }
   get listening() {
     return this.listener !== undefined;
@@ -27207,6 +28677,10 @@ class Viewer {
       });
     if (req.method === "GET" && path === `/${this.token}/data`)
       return Response.json(this.data(), { headers });
+    if (req.method === "GET" && path === `/${this.token}/status`)
+      return Response.json(this.status(), { headers });
+    if (req.method === "POST" && path === `/${this.token}/code`)
+      return this.issue(req, headers);
     if (req.method === "GET" && path === `/${this.token}/events`)
       return this.events(req, headers);
     if (req.method === "GET" && path === `/${this.token}/next`)
@@ -27307,6 +28781,18 @@ class Viewer {
     return new Response(body, { headers: { ...headers, "content-type": "text/event-stream; charset=utf-8" } });
   }
 }
+var ISSUE_TTL_MS = 60 * 60000;
+var ISSUE_GAP_MS = 1000;
+function owes(thread) {
+  for (let i = thread.messages.length - 1;i >= 0; i--) {
+    const m = thread.messages[i];
+    if (m.kind === "question")
+      return m.from === "me" ? "peer" : "me";
+    if (m.kind === "answer")
+      return;
+  }
+  return;
+}
 var LISTENING_ITSELF = "coworker: this session is listening by itself now. Nothing to do.";
 var AFTER_RESTART = "coworker: not an error.";
 function newsLine(events, open, when = "listening") {
@@ -27333,138 +28819,6 @@ var WHAT = {
   clock: "clocks differ",
   peer_human_slow: "their human is slow to decide"
 };
-var PAGE = `<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Coworker \uB300\uD654</title>
-<style>
-:root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd; --in: #e8f0fe; --out: #eaf6ec; --note: #fdf5e2; --accent: #2f5bd3; --warn: #b3261e; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #161615; --card: #20201e; --text: #ecebe6; --muted: #9c9b95; --line: #34332f; --in: #1f2a40; --out: #1e3324; --note: #3a321e; --accent: #8aa8ff; --warn: #ff8a80; }
-}
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
-main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
-h1 { font-size: 20px; margin: 0 0 4px; }
-.me, .meta, .time, .empty, .refresh { color: var(--muted); font-size: 13px; }
-.refresh { margin: 4px 0 20px; }
-.refresh.offline { color: var(--warn); font-weight: 600; }
-.conv { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
-.head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--in); }
-.badge.out { background: var(--out); }
-.subject { font-weight: 600; overflow-wrap: anywhere; }
-.status { margin-left: auto; font-size: 12px; color: var(--accent); }
-.meta { margin: 4px 0 10px; overflow-wrap: anywhere; }
-.msg { border-left: 3px solid var(--line); padding: 6px 10px; margin: 8px 0; border-radius: 0 6px 6px 0; background: var(--in); }
-.msg.mine { background: var(--out); }
-.msg.note { background: var(--note); }
-.msg.agreement { border-left-color: var(--accent); }
-.who { font-size: 13px; font-weight: 600; }
-.text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
-details { margin-top: 4px; font-size: 13px; color: var(--muted); }
-details .text { color: var(--text); }
-</style>
-</head>
-<body>
-<main>
-<h1>Coworker \uB300\uD654</h1>
-<div class="me" id="me"></div>
-<div class="refresh" id="refresh"></div>
-<div id="list"></div>
-</main>
-<script>
-const KIND = { question: '\uC9C8\uBB38', answer: '\uB2F5', note: '\uC54C\uB9BC', closed: '\uB9C8\uAC10', agreement: '\uD569\uC758\uBB38' }
-const STATUS = {
-  waiting_for_peer: '\uC0C1\uB300 \uCC28\uB840',
-  your_turn: '\uC774\uCABD \uCC28\uB840',
-  checking_with_your_human: '\uC774\uCABD \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911',
-  peer_checking_with_their_human: '\uC0C1\uB300\uAC00 \uC790\uAE30 \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911',
-  closed: '\uB9C8\uAC10 \xB7 \uB2E4\uB978 \uC0AC\uB78C\uC774 \uBA3C\uC800 \uB2F5\uD568',
-  agreed: '\uD569\uC758\uBB38 \uC791\uC131\uB428',
-}
-const ANSWERS = { all: '\uBAA8\uB450 \uB2F5', one: '\uD55C \uBA85\uB9CC \uB2F5' }
-const time = at => new Date(at).toLocaleString('ko-KR', { hour12: false })
-function el(tag, cls, text) {
-  const e = document.createElement(tag)
-  if (cls) e.className = cls
-  if (text !== undefined) e.textContent = text
-  return e
-}
-function render(data) {
-  const me = data.me
-  document.getElementById('me').textContent = me.name + (me.open ? ' \xB7 \uD3EC\uD2B8 ' + me.port + ' \uC5F4\uB9BC' : ' \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798')
-  const list = document.getElementById('list')
-  list.replaceChildren()
-  const convs = [...data.conversations].sort((a, b) => (b.messages[0]?.at ?? '').localeCompare(a.messages[0]?.at ?? ''))
-  if (!convs.length) list.append(el('div', 'empty', '\uC544\uC9C1 \uC8FC\uACE0\uBC1B\uC740 \uC9C8\uBB38\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.'))
-  for (const c of convs) {
-    const card = el('section', 'conv')
-    const head = el('div', 'head')
-    const mine = c.startedBy === 'me'
-    head.append(el('span', 'badge' + (mine ? ' out' : ''), mine ? '\uBCF4\uB0B8 \uC9C8\uBB38' : '\uBC1B\uC740 \uC9C8\uBB38'), el('span', 'subject', c.subject), el('span', 'status', (STATUS[c.status] ?? c.status) + (c.status === 'peer_checking_with_their_human' && c.humanSince ? ' \xB7 ' + Math.max(0, Math.floor((Date.now() - Date.parse(c.humanSince)) / 60000)) + '\uBD84\uC9F8' : '')))
-    const where = c.peerName + (c.peerAddr ? ' (' + c.peerAddr + ')' : '')
-    const first = c.messages[0]
-    const group = c.ask ? ' \xB7 \uD568\uAED8 \uBC1B\uC740 \uC0AC\uB78C: ' + c.ask.to.join(', ') + ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
-    card.append(head, el('div', 'meta', (mine ? '\uBC1B\uB294 \uCABD: ' : '\uBCF4\uB0B8 \uCABD: ') + where + (first ? ' \xB7 \uC2DC\uC791 ' + time(first.at) : '') + group))
-    for (const m of c.messages) {
-      const box = el('div', 'msg' + (m.from === 'me' ? ' mine' : '') + (m.kind === 'note' || m.kind === 'closed' ? ' note' : '') + (m.kind === 'agreement' ? ' agreement' : ''))
-      const who = m.from === 'me' ? '\uB098 \u2192 ' + c.peerName : c.peerName + ' \u2192 \uB098'
-      box.append(el('div', 'who', (KIND[m.kind] ?? m.kind) + (m.human ? ' \xB7 \uC0AC\uB78C\uC774 \uC815\uD568' : '') + ' \xB7 ' + who), el('div', 'time', time(m.at)), el('div', 'text', m.text))
-      if (m.context) {
-        const d = el('details')
-        d.append(el('summary', '', '\uD568\uAED8 \uBCF4\uB0B8 \uBC30\uACBD'), el('div', 'text', m.context))
-        box.append(d)
-      }
-      card.append(box)
-    }
-    list.append(card)
-  }
-}
-// \uC138\uC158\uC774 \uBC14\uB010 \uAC83\uC744 \uADF8\uB54C\uADF8\uB54C \uBC00\uC5B4 \uC900\uB2E4. \uC138\uC158\uC744 \uB2E4\uC2DC \uCF1C\uBA74 \uAC19\uC740 \uC8FC\uC18C\uB85C \uB3CC\uC544\uC624\uBBC0\uB85C, \uB04A\uACA8\uB3C4 \uC2A4\uC2A4\uB85C \uB2E4\uC2DC \uBD99\uB294\uB2E4.
-// \uBE0C\uB77C\uC6B0\uC800\uB294 \uD55C \uC8FC\uC18C\uC5D0 \uC5F0\uACB0\uC744 6\uAC1C\uAE4C\uC9C0\uB9CC \uC5F4\uC5B4 \uB454\uB2E4. \uD654\uBA74\uB9C8\uB2E4 \uC5F0\uACB0 \uD558\uB098\uB97C \uC950\uACE0 \uC788\uC73C\uBA74 \uD0ED\uC744 \uC5EC\uB7FF \uC5F0 \uB4A4 \uC0C8 \uD0ED\uC774 \uB728\uC9C0 \uC54A\uC73C\uBBC0\uB85C,
-// \uBCF4\uC774\uC9C0 \uC54A\uB294 \uD0ED\uC740 \uC5F0\uACB0\uC744 \uB193\uC558\uB2E4\uAC00 \uB2E4\uC2DC \uBCF4\uC77C \uB54C \uBD99\uB294\uB2E4. \uBD99\uC744 \uB54C\uB9C8\uB2E4 \uB300\uD654 \uC804\uCCB4\uB97C \uB2E4\uC2DC \uBC1B\uB294\uB2E4.
-const refresh = document.getElementById('refresh')
-let changedAt = ''
-let shown = ''
-let events
-let retry
-function status(text, offline) {
-  refresh.textContent = text
-  refresh.classList.toggle('offline', !!offline)
-}
-function connect() {
-  clearTimeout(retry)
-  if (events) events.close()
-  const source = new EventSource(location.pathname + '/events')
-  events = source
-  source.onmessage = e => {
-    if (e.data !== shown) {
-      shown = e.data
-      render(JSON.parse(e.data))
-      changedAt = time(new Date().toISOString())
-    }
-    status('\uBC14\uB00C\uBA74 \uBC14\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4 \xB7 \uB9C8\uC9C0\uB9C9 \uBCC0\uACBD ' + changedAt)
-  }
-  source.onerror = () => {
-    status('\uC138\uC158\uC5D0 \uB2FF\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uB2E4\uC2DC \uCF1C\uC9C0\uBA74 \uC774 \uD654\uBA74\uC774 \uC2A4\uC2A4\uB85C \uC774\uC5B4\uC11C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4.', true)
-    // \uBE0C\uB77C\uC6B0\uC800\uAC00 \uB2E4\uC2DC \uBD99\uAE30\uB97C \uADF8\uB9CC\uB450\uC5C8\uC73C\uBA74(\uADF8 \uD3EC\uD2B8\uC5D0 \uB2E4\uB978 \uAC83\uC774 \uB5B4\uC744 \uB54C) \uC7A0\uC2DC \uB4A4 \uC9C1\uC811 \uB2E4\uC2DC \uBD99\uB294\uB2E4.
-    if (source.readyState === EventSource.CLOSED && events === source) retry = setTimeout(connect, 5000)
-  }
-}
-function release() {
-  clearTimeout(retry)
-  if (events) events.close()
-  events = undefined
-}
-document.addEventListener('visibilitychange', () => (document.hidden ? release() : connect()))
-if (!document.hidden) connect()
-</script>
-</body>
-</html>
-`;
 
 // src/session.ts
 var DEFAULT_CODE_MINUTES = 60;
