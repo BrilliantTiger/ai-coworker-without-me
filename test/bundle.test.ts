@@ -19,20 +19,24 @@ test('the plugin folder holds the bundled server and no package install', () => 
   for (const f of ['package.json', 'bun.lock', 'bun.lockb', 'package-lock.json', 'node_modules', 'src']) expect(files).not.toContain(f)
 })
 
-test('Claude Code and Codex start the bundle with bun --no-install; the only hook wakes the AI after a restart', () => {
+test('Claude Code and Codex start the bundle with bun --no-install; the only command hook wakes the AI after a restart', () => {
   const claude = json(join(pluginDir, '.claude-plugin', 'plugin.json'))
   expect(claude.mcpServers.coworker.command).toBe('bun')
   expect(claude.mcpServers.coworker.args).toEqual(['--no-install', '${CLAUDE_PLUGIN_ROOT}/coworker.js'])
-  // 세션을 다시 켰을 때만, 백그라운드로 돌며(asyncRewake) 그사이 온 소식으로 AI를 깨운다. 다른 훅은 없다(디렉터리판에는 훅이 아예 없다).
-  expect(Object.keys(claude.hooks)).toEqual(['SessionStart'])
-  expect(claude.hooks.SessionStart).toEqual([
+  // hooks 는 둘이다. 하나는 명령 훅이고, 하나는 채팅창 위 띠를 그리는 모듈의 파일이다(아래 시험).
+  // 명령 훅은 세션을 다시 켰을 때만, 백그라운드로 돌며(asyncRewake) 그사이 온 소식으로 AI를 깨운다. 다른 명령 훅은 없다(디렉터리판에는 훅이 아예 없다).
+  const [hooks, band] = claude.hooks
+  expect(claude.hooks).toHaveLength(2)
+  expect(band).toBe('./claude/hooks.json')
+  expect(Object.keys(hooks)).toEqual(['SessionStart'])
+  expect(hooks.SessionStart).toEqual([
     {
       matcher: 'resume',
       hooks: [expect.objectContaining({ type: 'command', command: 'bun --no-install "${CLAUDE_PLUGIN_ROOT}/coworker.js" wake', asyncRewake: true })],
     },
   ])
   // 훅의 시간 제한을 밀리초로 바꿔도 타이머가 받는 값 안에 든다.
-  expect(claude.hooks.SessionStart[0].hooks[0].timeout * 1000).toBeLessThanOrEqual(2 ** 31 - 1)
+  expect(hooks.SessionStart[0].hooks[0].timeout * 1000).toBeLessThanOrEqual(2 ** 31 - 1)
   expect(claude.mcpServers.coworker.env.BUN_OPTIONS).toBeUndefined()
   const codex = json(join(pluginDir, '.codex-plugin', 'plugin.json'))
   expect(codex.mcpServers.coworker.args).toEqual(['--no-install', './coworker.js'])
@@ -42,6 +46,21 @@ test('Claude Code and Codex start the bundle with bun --no-install; the only hoo
   expect(codex.version).toBe(version)
   expect(json(join(root, '.claude-plugin', 'marketplace.json')).plugins[0].source).toBe('./plugin')
   expect(json(join(root, '.agents', 'plugins', 'marketplace.json')).plugins[0].source.path).toBe('./plugin')
+})
+
+test('the band above the prompt is a Claude Code hooks module that Codex never reads and that only talks to this PC', () => {
+  // 옛 Claude Code 는 hooks 가 없는 hooks.json 을 받지 않는다. 그래서 빈 hooks 를 함께 둔다.
+  expect(json(join(pluginDir, 'claude', 'hooks.json'))).toMatchObject({ hooks: {}, modules: ['./band.tsx'] })
+  // Codex 도 플러그인의 hooks/hooks.json 을 읽는다. 그 자리에는 아무것도 두지 않는다.
+  expect(existsSync(join(pluginDir, 'hooks'))).toBe(false)
+  // plugin.json 에 새 항목을 넣지 않는다. 그 항목을 모르는 옛 Claude Code 가 플러그인을 통째로 거절할 수 있다.
+  expect(json(join(pluginDir, '.claude-plugin', 'plugin.json')).types).toBeUndefined()
+  const source = readFileSync(join(pluginDir, 'claude', 'band.tsx'), 'utf8')
+  // 플러그인 밖의 코드를 가져오지 않는다. claude-code 는 타입뿐이다.
+  expect([...source.matchAll(/^import (type )?.* from '([^']+)'$/gm)].map(m => [m[1], m[2]])).toEqual([['type ', 'claude-code']])
+  // 읽는 곳은 이 PC 안의 대화 보기 서버뿐이다.
+  expect([...source.matchAll(/https?:\/\/[\w.-]+/g)].map(m => m[0]).every(u => u === 'http://127.0.0.1' || u === 'http://localhost')).toBe(true)
+  expect(source).toContain('$.http.fetch(`${api}/status`)')
 })
 
 test('the bundled server starts from a copy of the plugin folder with no packages around it', async () => {
@@ -67,7 +86,13 @@ test('the bundled server starts from a copy of the plugin folder with no package
       ['check_with_human', 'close_bridge', 'connect', 'inbox', 'list_connections', 'open_bridge', 'read_conversation', 'reply', 'send_question', 'wait_for_message', 'write_agreement', 'connection_log'].sort(),
     )
     const res = (await client.callTool({ name: 'open_bridge', arguments: {} })) as { content: { text: string }[] }
-    expect(JSON.parse(res.content[0]!.text).code).toStartWith('cw1.')
+    const opened = JSON.parse(res.content[0]!.text)
+    expect(opened.code).toStartWith('cw1.')
+    // 묶은 뒤에도 대화 보기 화면의 글은 한글 그대로 내려간다. 묶는 도구가 한글을 \uXXXX 로 바꿔 적어도 화면에는 그 글자가 찍히지 않는다.
+    const page = await (await fetch(opened.viewer)).text()
+    expect(page).toContain('<h1>Coworker <span>대화</span></h1>')
+    expect(page).toContain('접근키 발급')
+    expect(page).not.toMatch(/\\u[0-9a-fA-F]{4}/)
     await client.callTool({ name: 'close_bridge', arguments: {} })
   } finally {
     await client.close()

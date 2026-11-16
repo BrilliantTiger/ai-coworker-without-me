@@ -1,0 +1,7 @@
+{
+  "description": "Claude Code only: the band above the prompt (band.tsx). Codex reads hooks/hooks.json, so this file is kept out of that path.",
+  "hooks": {},
+  "modules": [
+    "./band.tsx"
+  ]
+}

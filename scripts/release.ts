@@ -64,6 +64,8 @@ run(['bun', 'run', 'build'])
 run(['bun', 'test'])
 run(['bun', 'run', 'typecheck'])
 run(['claude', 'plugin', 'validate', 'plugin'])
+// 채팅창 위 띠(plugin/claude/band.tsx)는 `bun test` 가 돌리지 못한다. Claude Code 의 시험 도구로 돌린다.
+run(['bun', 'scripts/mod-test.ts'])
 run(['claude', 'plugin', 'validate', 'directory'])
 run(['claude', 'plugin', 'validate', '.'])
 

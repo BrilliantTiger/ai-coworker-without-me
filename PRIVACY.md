@@ -26,7 +26,8 @@ What you send also reaches the other person's AI session, under the terms of the
 - `~/.coworker/agreements/`: agreements with the conversation they came from. Kept until you delete them.
 - `~/.coworker/hint-shown`: marks that the hint on starting Claude Code as a channel was passed on.
 - If you use the coworker app (the Claude plugin directory edition): the app file `~/.coworker/coworker.js`, its log `~/.coworker/app.log`, and what starts it at login (`~/Library/LaunchAgents/com.brillianttiger.coworker.plist` on Mac, a `coworker.lnk` shortcut in the Startup folder on Windows). The app listens only on `127.0.0.1:7690` and refuses requests from web pages.
-- The conversation viewer serves the session's conversations at `127.0.0.1` only, behind a token in its link, while the session is open.
+- The conversation viewer serves the session's conversations at `127.0.0.1` only, behind a token in its link, while the session is open. The page loads nothing from the network: its styles, scripts and motion are all in the page itself. The one thing you can do on the page is make a new connection code; that request goes only to the session on this computer.
+- In Claude Code, the plugin draws one line above the prompt while a bridge is open. To draw it, it reads the viewer's address from `~/.coworker/sessions/<session>.json` and asks the viewer at `127.0.0.1` for a short summary: the names of the connected sessions, whether each can be reached, and how many conversations still wait for an answer or a human's decision. It reads no conversation text and sends nothing off this computer.
 
 ## Contact
 
@@ -60,7 +61,8 @@ AI Co-worker Without Me는 만든 사람이 운영하는 서버가 없고, 아�
 - `~/.coworker/agreements/`: 합의문과 그 대화 기록. 지울 때까지 남는다.
 - `~/.coworker/hint-shown`: Claude Code를 채널로 켜는 법 안내를 한 번 전했다는 표시.
 - coworker 앱(Claude 플러그인 디렉터리판)을 쓰면: 앱 파일 `~/.coworker/coworker.js`, 기록 `~/.coworker/app.log`, 로그인할 때 앱을 켜는 설정(Mac은 `~/Library/LaunchAgents/com.brillianttiger.coworker.plist`, Windows는 시작프로그램 폴더의 `coworker.lnk`). 앱은 `127.0.0.1:7690`에서만 열리고 웹페이지가 보낸 요청은 거절한다.
-- 대화 보기 화면은 세션이 살아 있는 동안 `127.0.0.1`에서만, 링크에 든 토큰을 알아야 열린다.
+- 대화 보기 화면은 세션이 살아 있는 동안 `127.0.0.1`에서만, 링크에 든 토큰을 알아야 열린다. 화면은 밖에서 아무것도 받아 오지 않는다. 모양, 스크립트, 움직임이 모두 화면 안에 들어 있다. 화면에서 할 수 있는 일은 접근키(연결 코드)를 새로 만드는 것 하나이고, 그 요청은 이 PC의 세션에만 간다.
+- Claude Code에서는 브릿지가 열려 있는 동안 플러그인이 채팅창 위에 한 줄을 그린다. 그러려고 `~/.coworker/sessions/<세션>.json`에서 대화 보기 주소를 읽고, `127.0.0.1`의 대화 보기 서버에 짧은 요약을 묻는다. 요약에는 연결된 세션의 이름, 각각 닿는지, 답이나 사람의 결정을 기다리는 대화가 몇 개인지만 있다. 대화 글은 읽지 않고, 이 PC 밖으로 아무것도 보내지 않는다.
 
 ## 연락
 

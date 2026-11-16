@@ -25,23 +25,26 @@
     }
   },
   "channels": [{ "server": "coworker", "displayName": "Coworker" }],
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bun --no-install \"${CLAUDE_PLUGIN_ROOT}/coworker.js\" wake",
-            "asyncRewake": true,
-            "timeout": 2147483,
-            "rewakeMessage": "From the coworker plugin, after this session restarted:",
-            "rewakeSummary": "coworker: new message after the restart"
-          }
-        ]
-      }
-    ]
-  },
+  "hooks": [
+    {
+      "SessionStart": [
+        {
+          "matcher": "resume",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bun --no-install \"${CLAUDE_PLUGIN_ROOT}/coworker.js\" wake",
+              "asyncRewake": true,
+              "timeout": 2147483,
+              "rewakeMessage": "From the coworker plugin, after this session restarted:",
+              "rewakeSummary": "coworker: new message after the restart"
+            }
+          ]
+        }
+      ]
+    },
+    "./claude/hooks.json"
+  ],
   "userConfig": {
     "ports": {
       "type": "string",

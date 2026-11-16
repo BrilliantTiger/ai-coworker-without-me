@@ -1,9 +1,11 @@
 import type { Server } from 'bun'
-import type { Bridge, BridgeEvent, ViewerAddress } from './bridge'
+import type { Bridge, BridgeEvent, Thread, ViewerAddress } from './bridge'
 import { randomToken } from './crypto'
+import { PAGE } from './page'
 
 // 사람이 브라우저로 대화를 지켜보는 화면. 이 PC 안(127.0.0.1)에서만 열리고, 주소에 든 토큰을 알아야 볼 수 있다.
 // 상대가 보낸 글은 화면에 글자로만 넣는다. HTML 로 해석하지 않는다.
+// 사람이 화면에서 할 수 있는 일은 하나다: 접근키(연결 코드)를 새로 만드는 것(/code). 나머지는 모두 보기만 한다.
 // 채널 없이 켠 Claude Code 가 백그라운드 명령으로 기다리는 주소(/next)도 여기에 둔다.
 // 주소는 브릿지가 기억한다. 같은 세션을 다시 켜면 같은 포트와 토큰으로 열어, 사람이 열어 둔 화면이 끊기지 않고 이어서 보여 준다.
 export class Viewer {
@@ -13,6 +15,8 @@ export class Viewer {
   private listener?: (text: string) => void
   // 세션을 다시 켰을 때 플러그인 훅이 거는 기다림(/wake). AI가 스스로 기다리기를 걸면 끝난다.
   private wakers = new Set<(text: string) => void>()
+  // 화면에서 접근키를 마지막으로 만든 때. 너무 잦은 요청을 막는다.
+  private issuedAt = 0
 
   // pushes: 채널로 켠 세션이라 소식이 세션에 바로 들어간다. 그때는 기다릴 것이 없다.
   constructor(
@@ -53,8 +57,43 @@ export class Viewer {
     this.server = undefined
   }
 
+  // links: 연결된 세션마다 지금 닿는지. 화면의 연결 그림과 Claude Code 의 채팅창 위 띠가 본다.
   data() {
-    return { me: this.bridge.describe(), conversations: [...this.bridge.threads.values()] }
+    return { me: this.bridge.describe(), links: this.bridge.links(), connecting: this.bridge.connecting(), conversations: [...this.bridge.threads.values()] }
+  }
+
+  // Claude Code 의 채팅창 위 띠(plugin/claude/band.tsx)가 몇 초마다 읽는 짧은 요약. 대화 글은 넣지 않는다.
+  // 대화는 대개 합의문 없이 질문과 답으로 끝난다(2026-11-16, 사람이 정함). 그래서 「차례」가 아니라 답을 빚진 대화만 센다.
+  // yours: 상대가 물었고 이쪽이 아직 답하지 않았다. theirs: 이쪽이 물었고 상대가 아직 답하지 않았다.
+  status() {
+    const waiting = { yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 }
+    for (const t of this.bridge.threads.values()) {
+      if (t.status === 'checking_with_your_human') waiting.yourHuman++
+      else if (t.status === 'peer_checking_with_their_human') waiting.theirHuman++
+      else if (t.status === 'your_turn' && owes(t) === 'me') waiting.yours++
+      else if (t.status === 'waiting_for_peer' && owes(t) === 'peer') waiting.theirs++
+    }
+    const me = this.bridge.describe()
+    return { name: me.name, open: me.open, links: this.bridge.links().map(l => ({ name: l.name, state: l.state })), connecting: this.bridge.connecting().length, waiting }
+  }
+
+  // 사람이 화면에서 접근키(연결 코드)를 새로 만든다. 사람을 더할 때, 그리고 끊긴 상대가 다시 들어오게 할 때 쓴다
+  // (2026-11-16, 사람이 정함: 「끊겼을경우 웹에서 접근키를 재생성」, 「유저 추가가 필요할때 접근키 발급」).
+  // AI가 open_bridge 로 만드는 코드와 같다: 그룹 코드이고, 한 번만 쓸 수 있고, 60분 동안 쓸 수 있다.
+  // 화면 주소의 토큰을 아는 이 PC의 사람만 부를 수 있다. 다른 웹페이지가 부르지 못하게 이 화면에서 온 요청인지도 본다:
+  // 화면이 붙이는 표시 헤더가 있어야 하고(다른 사이트가 붙이면 브라우저가 먼저 허락을 묻는데, 이 서버는 허락하지 않는다),
+  // 브라우저가 알려 주는 출처가 이 화면이어야 한다.
+  private issue(req: Request, headers: Record<string, string>): Response {
+    const origin = req.headers.get('origin')
+    const site = req.headers.get('sec-fetch-site')
+    const here = origin === null || [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`].includes(origin)
+    if (req.headers.get('x-coworker-viewer') !== '1' || !here || (site !== null && site !== 'same-origin')) return new Response('forbidden', { status: 403 })
+    // 브릿지가 닫혀 있으면 만들지 않는다. 화면에서 누른 것으로 닫힌 브릿지를 다시 열지 않는다.
+    if (!this.bridge.isOpen) return Response.json({ error: 'the bridge is closed' }, { status: 409, headers })
+    const now = Date.now()
+    if (now - this.issuedAt < ISSUE_GAP_MS) return Response.json({ error: 'too many requests' }, { status: 429, headers })
+    this.issuedAt = now
+    return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers })
   }
 
   // 백그라운드 명령이 지금 기다리고 있는지.
@@ -80,6 +119,8 @@ export class Viewer {
         },
       })
     if (req.method === 'GET' && path === `/${this.token}/data`) return Response.json(this.data(), { headers })
+    if (req.method === 'GET' && path === `/${this.token}/status`) return Response.json(this.status(), { headers })
+    if (req.method === 'POST' && path === `/${this.token}/code`) return this.issue(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/events`) return this.events(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/next`) return this.next(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/wake`) return this.wake(req, headers)
@@ -179,6 +220,20 @@ export class Viewer {
   }
 }
 
+// 화면에서 만든 접근키를 쓸 수 있는 시간과, 다시 만들 수 있는 간격.
+const ISSUE_TTL_MS = 60 * 60_000
+const ISSUE_GAP_MS = 1000
+
+// 누가 답을 빚졌는지. 마지막으로 오간 글이 질문이면 받은 쪽이 빚졌고, 답이면 아무도 빚지지 않았다. 알림은 건너뛴다.
+export function owes(thread: Thread): 'me' | 'peer' | undefined {
+  for (let i = thread.messages.length - 1; i >= 0; i--) {
+    const m = thread.messages[i]!
+    if (m.kind === 'question') return m.from === 'me' ? 'peer' : 'me'
+    if (m.kind === 'answer') return undefined
+  }
+  return undefined
+}
+
 // 백그라운드 명령이 찍는 한 줄. 무엇이 몇 건 왔는지만 알린다. 상대가 정한 이름이나 보낸 글은 넣지 않는다.
 // 내용은 AI가 inbox 로 읽는다. 아무 일도 없으면 아무것도 돌려주지 않아 명령이 계속 기다린다.
 const LISTENING_ITSELF = 'coworker: this session is listening by itself now. Nothing to do.'
@@ -212,136 +267,3 @@ const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
   clock: 'clocks differ',
   peer_human_slow: 'their human is slow to decide',
 }
-
-const PAGE = `<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Coworker 대화</title>
-<style>
-:root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd; --in: #e8f0fe; --out: #eaf6ec; --note: #fdf5e2; --accent: #2f5bd3; --warn: #b3261e; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #161615; --card: #20201e; --text: #ecebe6; --muted: #9c9b95; --line: #34332f; --in: #1f2a40; --out: #1e3324; --note: #3a321e; --accent: #8aa8ff; --warn: #ff8a80; }
-}
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
-main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
-h1 { font-size: 20px; margin: 0 0 4px; }
-.me, .meta, .time, .empty, .refresh { color: var(--muted); font-size: 13px; }
-.refresh { margin: 4px 0 20px; }
-.refresh.offline { color: var(--warn); font-weight: 600; }
-.conv { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
-.head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--in); }
-.badge.out { background: var(--out); }
-.subject { font-weight: 600; overflow-wrap: anywhere; }
-.status { margin-left: auto; font-size: 12px; color: var(--accent); }
-.meta { margin: 4px 0 10px; overflow-wrap: anywhere; }
-.msg { border-left: 3px solid var(--line); padding: 6px 10px; margin: 8px 0; border-radius: 0 6px 6px 0; background: var(--in); }
-.msg.mine { background: var(--out); }
-.msg.note { background: var(--note); }
-.msg.agreement { border-left-color: var(--accent); }
-.who { font-size: 13px; font-weight: 600; }
-.text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
-details { margin-top: 4px; font-size: 13px; color: var(--muted); }
-details .text { color: var(--text); }
-</style>
-</head>
-<body>
-<main>
-<h1>Coworker 대화</h1>
-<div class="me" id="me"></div>
-<div class="refresh" id="refresh"></div>
-<div id="list"></div>
-</main>
-<script>
-const KIND = { question: '질문', answer: '답', note: '알림', closed: '마감', agreement: '합의문' }
-const STATUS = {
-  waiting_for_peer: '상대 차례',
-  your_turn: '이쪽 차례',
-  checking_with_your_human: '이쪽 사람에게 확인 중',
-  peer_checking_with_their_human: '상대가 자기 사람에게 확인 중',
-  closed: '마감 · 다른 사람이 먼저 답함',
-  agreed: '합의문 작성됨',
-}
-const ANSWERS = { all: '모두 답', one: '한 명만 답' }
-const time = at => new Date(at).toLocaleString('ko-KR', { hour12: false })
-function el(tag, cls, text) {
-  const e = document.createElement(tag)
-  if (cls) e.className = cls
-  if (text !== undefined) e.textContent = text
-  return e
-}
-function render(data) {
-  const me = data.me
-  document.getElementById('me').textContent = me.name + (me.open ? ' · 포트 ' + me.port + ' 열림' : ' · 브릿지 닫힘')
-  const list = document.getElementById('list')
-  list.replaceChildren()
-  const convs = [...data.conversations].sort((a, b) => (b.messages[0]?.at ?? '').localeCompare(a.messages[0]?.at ?? ''))
-  if (!convs.length) list.append(el('div', 'empty', '아직 주고받은 질문이 없습니다.'))
-  for (const c of convs) {
-    const card = el('section', 'conv')
-    const head = el('div', 'head')
-    const mine = c.startedBy === 'me'
-    head.append(el('span', 'badge' + (mine ? ' out' : ''), mine ? '보낸 질문' : '받은 질문'), el('span', 'subject', c.subject), el('span', 'status', (STATUS[c.status] ?? c.status) + (c.status === 'peer_checking_with_their_human' && c.humanSince ? ' · ' + Math.max(0, Math.floor((Date.now() - Date.parse(c.humanSince)) / 60000)) + '분째' : '')))
-    const where = c.peerName + (c.peerAddr ? ' (' + c.peerAddr + ')' : '')
-    const first = c.messages[0]
-    const group = c.ask ? ' · 함께 받은 사람: ' + c.ask.to.join(', ') + ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
-    card.append(head, el('div', 'meta', (mine ? '받는 쪽: ' : '보낸 쪽: ') + where + (first ? ' · 시작 ' + time(first.at) : '') + group))
-    for (const m of c.messages) {
-      const box = el('div', 'msg' + (m.from === 'me' ? ' mine' : '') + (m.kind === 'note' || m.kind === 'closed' ? ' note' : '') + (m.kind === 'agreement' ? ' agreement' : ''))
-      const who = m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'
-      box.append(el('div', 'who', (KIND[m.kind] ?? m.kind) + (m.human ? ' · 사람이 정함' : '') + ' · ' + who), el('div', 'time', time(m.at)), el('div', 'text', m.text))
-      if (m.context) {
-        const d = el('details')
-        d.append(el('summary', '', '함께 보낸 배경'), el('div', 'text', m.context))
-        box.append(d)
-      }
-      card.append(box)
-    }
-    list.append(card)
-  }
-}
-// 세션이 바뀐 것을 그때그때 밀어 준다. 세션을 다시 켜면 같은 주소로 돌아오므로, 끊겨도 스스로 다시 붙는다.
-// 브라우저는 한 주소에 연결을 6개까지만 열어 둔다. 화면마다 연결 하나를 쥐고 있으면 탭을 여럿 연 뒤 새 탭이 뜨지 않으므로,
-// 보이지 않는 탭은 연결을 놓았다가 다시 보일 때 붙는다. 붙을 때마다 대화 전체를 다시 받는다.
-const refresh = document.getElementById('refresh')
-let changedAt = ''
-let shown = ''
-let events
-let retry
-function status(text, offline) {
-  refresh.textContent = text
-  refresh.classList.toggle('offline', !!offline)
-}
-function connect() {
-  clearTimeout(retry)
-  if (events) events.close()
-  const source = new EventSource(location.pathname + '/events')
-  events = source
-  source.onmessage = e => {
-    if (e.data !== shown) {
-      shown = e.data
-      render(JSON.parse(e.data))
-      changedAt = time(new Date().toISOString())
-    }
-    status('바뀌면 바로 보여 줍니다 · 마지막 변경 ' + changedAt)
-  }
-  source.onerror = () => {
-    status('세션에 닿지 않습니다. 세션이 다시 켜지면 이 화면이 스스로 이어서 보여 줍니다.', true)
-    // 브라우저가 다시 붙기를 그만두었으면(그 포트에 다른 것이 떴을 때) 잠시 뒤 직접 다시 붙는다.
-    if (source.readyState === EventSource.CLOSED && events === source) retry = setTimeout(connect, 5000)
-  }
-}
-function release() {
-  clearTimeout(retry)
-  if (events) events.close()
-  events = undefined
-}
-document.addEventListener('visibilitychange', () => (document.hidden ? release() : connect()))
-if (!document.hidden) connect()
-</script>
-</body>
-</html>
-`

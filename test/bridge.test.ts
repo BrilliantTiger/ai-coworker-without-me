@@ -437,6 +437,8 @@ describe('bridge', () => {
     expect(away.last_seen).toBeDefined()
     expect(away.next_try).toBeDefined()
     expect(b.peers.has(a.key)).toBe(true)
+    // 화면의 연결 그림도 핑 없이 같은 것을 안다: 언제부터 닿지 않는지.
+    expect(b.links()).toEqual([expect.objectContaining({ name: 'A · Claude Code', state: 'reconnecting', since: expect.any(String) })])
 
     ;(a as any).abort = new AbortController()
     expect((a as any).listen(port)).toBe(true)
@@ -444,6 +446,7 @@ describe('bridge', () => {
     const back = (await b.connections()).peers[0]!
     expect(back).toMatchObject({ reachable: true, state: 'connected', queued: 0 })
     expect(back.last_error).toBeUndefined()
+    expect(b.links()).toEqual([expect.objectContaining({ state: 'connected', since: undefined })])
   }, 15_000)
 
   test('a session the other side forgot is not dropped: it gets back in with the code it joined with', async () => {
@@ -729,9 +732,60 @@ describe('viewer', () => {
         }),
         expect.objectContaining({ id: sent.thread, startedBy: 'me', peerName: 'B · Codex', messages: [expect.objectContaining({ from: 'me', kind: 'question' })] }),
       ])
+      // 연결 그림이 그리는 것: 연결된 세션마다 지금 닿는지. 대화의 peer 와 같은 key 로 이어 붙인다.
+      expect(data.links).toEqual([{ key: b.key, id: expect.any(String), name: 'B · Codex', state: 'connected', since: undefined, via: 'direct' }])
+      expect(data.connecting).toEqual([])
+      expect(data.conversations[0]!.peer).toBe(b.key)
+      // Claude Code 의 채팅창 위 띠가 읽는 짧은 요약. 누가 닿는지와 답을 기다리는 대화가 몇 개인지만 있고, 대화 글은 없다.
+      // 받은 질문에는 이미 답했다. 질문과 답으로 끝난 대화는 세지 않는다. 보낸 질문 하나만 답을 기다린다.
+      const status = await (await fetch(`${url}/status`)).json()
+      expect(status).toEqual({ name: 'A · Claude Code', open: true, links: [{ name: 'B · Codex', state: 'connected' }], connecting: 0, waiting: { yours: 0, theirs: 1, yourHuman: 0, theirHuman: 0 } })
+      expect(JSON.stringify(status)).not.toContain('Which port')
+      // 화면의 글은 한글 그대로 내려간다. \uXXXX 로 바뀐 글자가 없다.
+      const html = await (await fetch(url)).text()
+      expect(html).toContain('<h1>Coworker <span>대화</span></h1>')
+      expect(html).not.toMatch(/\\u[0-9a-fA-F]{4}/)
 
       expect((await fetch(url.replace(/[^/]+$/, 'wrong-token'))).status).toBe(404)
       expect((await fetch(`${url}/data`, { method: 'POST' })).status).toBe(404)
+    } finally {
+      viewer.stop()
+    }
+  })
+
+  test('the human makes a new connection code on the page; nothing but that page can ask for one', async () => {
+    const a = make('A · Claude Code')
+    a.open()
+    const viewer = new Viewer(a)
+    try {
+      const url = viewer.start()
+      const here = new URL(url).origin
+      const ask = (headers: Record<string, string>) => fetch(`${url}/code`, { method: 'POST', headers })
+      // 화면이 붙이는 표시가 없거나, 다른 사이트에서 왔으면 만들지 않는다.
+      expect((await ask({})).status).toBe(403)
+      expect((await ask({ 'x-coworker-viewer': '1', origin: 'https://evil.example' })).status).toBe(403)
+      expect((await ask({ 'x-coworker-viewer': '1', origin: here, 'sec-fetch-site': 'cross-site' })).status).toBe(403)
+      expect((await fetch(`${url.replace(/[^/]+$/, 'wrong-token')}/code`, { method: 'POST', headers: { 'x-coworker-viewer': '1' } })).status).toBe(404)
+      expect((await fetch(`${url}/code`)).status).toBe(404)
+
+      const res = await ask({ 'x-coworker-viewer': '1', origin: here, 'sec-fetch-site': 'same-origin' })
+      expect(res.status).toBe(200)
+      const made = (await res.json()) as { code: string; expires: string }
+      expect(Date.parse(made.expires) - Date.now()).toBeGreaterThan(59 * 60_000)
+      // 바로 또 누르면 잠깐 막는다.
+      expect((await ask({ 'x-coworker-viewer': '1', origin: here })).status).toBe(429)
+
+      // 그 코드로 다른 세션이 들어온다. AI가 만든 코드와 같다: 한 번만 쓸 수 있다.
+      const b = make('B · Codex')
+      await b.connect(made.code)
+      expect(await next(a, 'connected')).toMatchObject({ peer: 'B · Codex' })
+      await expect(make('C · Codex').connect(made.code)).rejects.toThrow('refused this code')
+
+      // 브릿지를 닫았으면 화면에서 눌러도 다시 열지 않는다.
+      await Bun.sleep(1000)
+      await a.close()
+      expect((await ask({ 'x-coworker-viewer': '1', origin: here })).status).toBe(409)
+      expect(a.isOpen).toBe(false)
     } finally {
       viewer.stop()
     }

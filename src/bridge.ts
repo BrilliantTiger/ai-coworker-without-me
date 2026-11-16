@@ -691,6 +691,26 @@ export class Bridge {
     return [...this.invites.values()].map(i => ({ name: i.name, introducedBy: i.by }))
   }
 
+  // 화면에 보여 줄 연결 상태. 핑을 보내지 않고, 마지막으로 주고받아 본 결과를 그대로 돌려준다.
+  // 닿는지가 바뀔 때만 달라지는 값만 넣는다. 「마지막으로 본 때」처럼 늘 바뀌는 값을 넣으면,
+  // 화면에 밀어 줄 때 「보낸 것과 같으면 보내지 않는다」가 깨진다.
+  // via: 마지막으로 닿은 길이다. direct 는 바로 닿는 주소, relay 는 중계 서버.
+  // pickup 은 이쪽에서 닿은 적이 없고 상대가 이쪽에 와서 가져가기만 하는 것이다.
+  links() {
+    return [...this.peers.values()].map(peer => {
+      const pulling = this.isPulling(peer)
+      const down = pulling ? undefined : this.down.get(peer.key)
+      return {
+        key: peer.key,
+        id: peerId(peer.key),
+        name: peer.name,
+        state: down ? ('reconnecting' as const) : ('connected' as const),
+        since: isoOf(down?.since),
+        via: peer.lastAddr ? (isRelayAddr(peer.lastAddr) ? ('relay' as const) : ('direct' as const)) : pulling ? ('pickup' as const) : ('direct' as const),
+      }
+    })
+  }
+
   // 한 세션에 묻는다. 대화 하나가 생긴다.
   async ask(to: string | undefined, question: string, context?: string) {
     const peer = await this.resolvePeer(to)
