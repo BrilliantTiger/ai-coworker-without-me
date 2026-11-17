@@ -1,7 +1,7 @@
 // 사람이 브라우저로 보는 대화 화면. viewer.ts 가 이 글을 그대로 내려 준다.
 // 화면은 차분하고 읽기 쉽게 짜고, 움직임은 과하지도 모자라지도 않게 넣는다(2026-11-17, 사람이 정함:
 // 「모던하고 심플하되 가독성 높은 상태에서 모션이 과하지 않고 이질감없이 자연스럽게」, 「과하지 않은 적절한 모션」).
-// 왼쪽에 고른 대화 하나를, 오른쪽에 대화 목록을 둔다(2026-11-17, 사람이 정함: 「대화의 묶음 리스트를 오른쪽에 두고 클릭하면 볼 수 있게」).
+// 왼쪽에 대화 목록을, 오른쪽에 고른 대화 하나를 둔다(2026-11-17, 사람이 정함: 「대화의 묶음 리스트를 … 클릭하면 볼 수 있게」, 「오른쪽이 아니라 왼쪽이다」).
 // 넣는 움직임: 글이 오가면 연결선을 따라 점이 건너간다. 고른 대화와 새 글이 부드럽게 들어온다. 차례가 바뀌면 목록의 줄이 미끄러져 간다.
 // 상태가 바뀌면 이름표가 넘어가고 체크가 그려진다. 기다리는 곳에서는 점이 조용히 뛴다.
 // 넣지 않는 것: 얼굴 캐릭터, 배경에 떠다니는 것, 색종이, 번쩍이며 도는 테두리, 글자가 써 내려가는 것, 카드가 기우는 것.
@@ -172,11 +172,11 @@ button.sess:hover { background: var(--soft); }
 .filters[hidden], .wrap[hidden], .room[hidden], .board[hidden] { display: none; }
 
 /* 대화 카드 */
-/* 왼쪽에 고른 대화 하나, 오른쪽에 대화 목록. 목록은 화면을 내려도 따라온다. 좁은 화면에서는 목록이 위에 옆으로 놓인다. */
-.board { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; margin-top: 14px; }
-.pane { grid-column: 1; grid-row: 1; min-width: 0; }
+/* 왼쪽에 대화 목록, 오른쪽에 고른 대화 하나. 목록은 화면을 내려도 따라온다. 좁은 화면에서는 목록이 위에 옆으로 놓인다. */
+.board { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 14px; }
+.pane { grid-column: 2; grid-row: 1; min-width: 0; }
 .wrap { position: relative; }
-.rooms { grid-column: 2; grid-row: 1; position: sticky; top: 68px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 84px); overflow-y: auto; padding: 3px; margin: -3px; scrollbar-width: thin; overscroll-behavior: contain; }
+.rooms { grid-column: 1; grid-row: 1; position: sticky; top: 68px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 84px); overflow-y: auto; padding: 3px; margin: -3px; scrollbar-width: thin; overscroll-behavior: contain; }
 .room { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; flex: none; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); cursor: pointer; --ring: var(--muted); }
 .on .room { transition: opacity .35s ease-out, translate .45s var(--ease), background-color .15s, border-color .2s; transition-delay: calc(var(--i, 0) * 45ms), calc(var(--i, 0) * 45ms), 0s, 0s; }
 .room:hover { border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
@@ -479,7 +479,7 @@ function fx(node, frames, options) {
 }
 
 const pane = byId('pane'), rooms = byId('rooms'), board = byId('board')
-// 왼쪽에 열어 둔 대화. 사람이 목록에서 고르거나, 새 글이 오면 그 대화로 바뀐다.
+// 오른쪽에 열어 둔 대화. 사람이 왼쪽 목록에서 고르거나, 새 글이 오면 그 대화로 바뀐다.
 let active = ''
 const empty = byId('empty')
 const toasts = byId('toasts')
@@ -768,7 +768,7 @@ function showItem(item) {
   const dy = a.top < b.top ? a.top - b.top : a.bottom > b.bottom ? a.bottom - b.bottom : 0
   if (dx || dy) rooms.scrollBy({ left: dx, top: dy, behavior: moving() ? 'smooth' : 'auto' })
 }
-// 왼쪽에 열 대화를 고른다. 열리는 대화는 카드만 떠오르고, 안의 글은 따로 움직이지 않는다.
+// 오른쪽에 열 대화를 고른다. 열리는 대화는 카드만 떠오르고, 안의 글은 따로 움직이지 않는다.
 // byHand: 사람이 목록에서 골랐다. 긴 대화를 읽다가 다른 대화로 가도 처음부터 보이게 화면을 올린다.
 function activate(id, byHand) {
   const next = cards.get(id)
@@ -864,7 +864,7 @@ function makeCard(id) {
   card.append(head, sub, people, msgs, typing)
   wrap.append(card)
   wrap.hidden = true
-  // 오른쪽 목록의 한 줄: 분류와 제목, 마지막 글의 때, 상태, 상대, 그리고 고정했는지와 새 글이 왔는지. 누르면 이 대화가 열린다.
+  // 왼쪽 목록의 한 줄: 분류와 제목, 마지막 글의 때, 상태, 상대, 그리고 고정했는지와 새 글이 왔는지. 누르면 이 대화가 열린다.
   const item = el('button', 'room'), ititle = el('span', 'rtitle'), icat = el('span', 'rcat'), isub = el('span', 'rsub'), iago = el('span', 'rago')
   const istate = el('span', 'rstate'), ilabel = el('span', 'rlabel'), iwho = el('span', 'rwho'), imarks = el('span', 'rmarks'), ipin = el('span', 'rpin'), inew = el('span', 'rnew')
   item.type = 'button'
@@ -1201,12 +1201,11 @@ function syncDowns(links) {
 }
 
 let follow = saved.get('coworker.follow') !== 'off'
-let touched = 0
 // 새로 온 글을 알린다: 연결선을 따라 점이 건너가고, 새 글에 테두리가 잠깐 둘린다.
-// 「새 글 따라가기」를 켰으면 그 글이 온 대화를 연다(2026-11-17, 사람이 정함: 「새로운 질답 오면 그걸 활성화」).
-// 사람이 방금 화면을 만졌으면 건드리지 않는다. 열어 두지 않은 대화에 온 글은 목록에 표시하고 알림으로 띄운다.
+// 「새 글 따라가기」를 켰으면 그 글이 온 대화를 언제나 연다(2026-11-17, 사람이 정함: 「신규 질답이 오면 그 창이 활성화 되게」).
+// 껐으면 열어 둔 대화를 그대로 둔다. 열어 두지 않은 대화에 온 글은 목록에 표시하고 알림으로 띄운다.
 function announce(news) {
-  const newest = news[news.length - 1], jump = follow && Date.now() - touched > 3000
+  const newest = news[news.length - 1], jump = follow
   if (jump) activate(newest.v.id, false)
   news.forEach((n, i) => {
     const recent = i >= news.length - 3
@@ -1311,7 +1310,6 @@ setInterval(() => {
   if (nextFlip && now >= nextFlip && lastData) render(lastData)
 }, 1000)
 
-for (const name of ['wheel', 'touchstart', 'keydown', 'pointerdown']) addEventListener(name, () => { touched = Date.now() }, { passive: true })
 
 const motionButton = byId('motion'), followButton = byId('follow')
 function applyMotion() {
