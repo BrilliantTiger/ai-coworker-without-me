@@ -297,6 +297,40 @@ html:not(.js) :is([data-motion], .copy) { display: none; }
 .count { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: auto 0 0; padding-block-start: 4px; font-size: .9375rem; color: var(--muted); }
 .count b { font-size: 2rem; line-height: 1.1; font-weight: 800; letter-spacing: -.03em; color: var(--text); font-variant-numeric: tabular-nums; }
 .way .tell { margin: 0; font-size: .9375rem; color: var(--muted); }
+/* Claude 아티팩트 공유와 견주기. 넓으면 표이고, 좁으면 줄마다 쌓인 묶음이다. */
+.versus { margin-block-start: 16px; padding: 22px; }
+.versus-head { max-inline-size: 46rem; }
+.versus h3 { margin: 0; font-size: 1.1875rem; line-height: 1.35; letter-spacing: -.015em; text-wrap: balance; }
+.versus-head p { margin: 8px 0 0; font-size: .9375rem; color: var(--muted); }
+.versus-table { container-type: inline-size; margin-block-start: 18px; }
+.versus table { inline-size: 100%; border-collapse: separate; border-spacing: 0; font-size: .9375rem; line-height: 1.55; }
+.versus :is(th, td) { padding: 12px 14px; text-align: start; vertical-align: top; font-weight: 400; }
+.versus thead :is(th, td) { padding-block-end: 10px; }
+.versus .tag { display: inline-block; }
+.versus tbody :is(th, td) { border-block-start: 1px solid var(--line); }
+.versus tbody th { inline-size: 9rem; padding-inline-start: 0; font-size: .875rem; font-weight: 700; color: var(--muted); }
+.versus tbody td:nth-child(2) { color: var(--muted); }
+/* coworker 칸은 위아래로 이어진 옅은 기둥으로 보인다 */
+.versus :is(thead th, tbody td):nth-child(3) { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.versus thead th:nth-child(3) { border-start-start-radius: 12px; border-start-end-radius: 12px; }
+.versus tbody tr:last-child td:nth-child(3) { border-end-start-radius: 12px; border-end-end-radius: 12px; }
+.versus-foot { margin: 16px 0 0; font-size: .9375rem; }
+.versus-src { margin: 6px 0 0; font-size: .8125rem; color: var(--muted); }
+.versus-src a { color: var(--accent); font-weight: 600; text-underline-offset: 3px; }
+@container (width < 600px) {
+  .versus :is(table, thead, tbody, tr, th, td) { display: block; }
+  /* 쌓인 모양에서는 머리 줄을 감추고, 칸마다 이름을 붙인다 */
+  .versus thead { display: none; }
+  .versus tbody tr { padding-block: 14px; border-block-start: 1px solid var(--line); }
+  .versus tbody tr:first-child { padding-block-start: 0; border-block-start: 0; }
+  .versus tbody :is(th, td) { inline-size: auto; border: 0; }
+  .versus tbody th { padding: 0 0 8px; font-size: .9375rem; color: var(--text); }
+  .versus tbody td { padding: 9px 12px; border-radius: 10px; background: var(--soft); color: var(--text); }
+  .versus tbody td:nth-child(3) { margin-block-start: 6px; background: color-mix(in srgb, var(--accent) 9%, var(--soft)); }
+  .versus td::before { display: block; margin-block-end: 2px; font-size: .75rem; font-weight: 700; color: var(--muted); }
+  .versus td:nth-child(2)::before { content: var(--label-2); }
+  .versus td:nth-child(3)::before { content: var(--label-3); color: var(--ok); }
+}
 
 /* 어떻게 */
 .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }

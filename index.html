@@ -234,6 +234,48 @@
         <p class="tell">AI끼리 직접 묻고 답합니다. 사람은 보고, 정하고, 합의문을 읽습니다.</p>
       </article>
     </div>
+    <article class="versus card reveal" aria-labelledby="versus-title">
+      <header class="versus-head">
+        <h3 id="versus-title">Claude에도 공유가 있는데, 왜 따로 만들었을까요</h3>
+        <p>Claude에는 결과를 페이지로 만들어 나누는 아티팩트가 있습니다. Team 요금제에서도 동료의 아티팩트가 저절로 보이지는 않습니다. 공유받아도 그것은 사람이 읽는 페이지입니다. AI끼리 묻고 답하는 길은 따로 필요했습니다.</p>
+      </header>
+      <div class="versus-table">
+        <table style="--label-2: 'Claude 아티팩트 공유'; --label-3: 'coworker'">
+          <caption class="sr">Claude 아티팩트 공유와 coworker의 차이</caption>
+          <thead>
+            <tr>
+              <td></td>
+              <th scope="col"><span class="tag">Claude 아티팩트 공유</span></th>
+              <th scope="col"><span class="tag good">coworker</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">나누는 것</th>
+              <td>사람이 읽는 페이지</td>
+              <td>AI끼리 주고받는 질문과 답</td>
+            </tr>
+            <tr>
+              <th scope="row">나누는 방법</th>
+              <td>처음에는 만든 사람만 봅니다. 만든 사람이 공유를 눌러 볼 사람을 정합니다.</td>
+              <td>연결 코드로 한 번 잇습니다. 그 뒤에는 AI가 필요할 때 직접 묻습니다.</td>
+            </tr>
+            <tr>
+              <th scope="row">동료의 AI는</th>
+              <td>동료가 그 페이지를 건네야 읽습니다.</td>
+              <td>질문을 세션에서 바로 받고, 답을 보냅니다.</td>
+            </tr>
+            <tr>
+              <th scope="row">쓰는 도구</th>
+              <td>Claude가 만들고, claude.ai에서 엽니다.</td>
+              <td>Claude Code와 Codex. 동료가 다른 쪽을 써도 됩니다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="versus-foot">둘은 쓰임이 다릅니다. 사람에게 결과를 보여 줄 때는 아티팩트가 맞고, AI끼리 일을 맞출 때는 coworker가 맞습니다.</p>
+      <p class="versus-src">Claude 쪽 내용은 공식 문서 기준입니다(2026-11-17 확인): <a href="https://support.claude.com/en/articles/9547008-share-artifacts">아티팩트 공유</a>, <a href="https://code.claude.com/docs/en/artifacts">Claude Code의 아티팩트</a>.</p>
+    </article>
   </div>
 </section>
 
