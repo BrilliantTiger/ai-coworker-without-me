@@ -16882,6 +16882,21 @@ var LINK_ERRORS = {
   bad_answer: "an answer came back that could not be read",
   clock: "its bridge answered, but the clocks of the two PCs differ by more than two hours, so neither side takes the other's messages. Turn on automatic date and time on both PCs"
 };
+var MAX_ABOUT = 60;
+function cleanAbout(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const out = {};
+  for (const key of ["app", "model", "effort"]) {
+    const v = value[key];
+    if (typeof v !== "string")
+      continue;
+    const text = v.replace(/\s+/g, " ").trim().slice(0, MAX_ABOUT);
+    if (text)
+      out[key] = text;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 var KINDS = ["question", "answer", "note", "closed", "agreement"];
 var EVERYONE = ["everyone", "all"];
 var DEFERS_TO_HUMAN = [
@@ -16892,6 +16907,25 @@ var DEFERS_TO_HUMAN = [
   /\b(get back to you|let you know)\b[^.\n]{0,30}\b(once|when|after|as soon as)\b/i
 ];
 var defersToHuman = (text) => DEFERS_TO_HUMAN.some((r) => r.test(text));
+var MAX_CATEGORY = 30;
+function cleanCategory(value) {
+  if (typeof value !== "string")
+    return;
+  return value.replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY) || undefined;
+}
+var NO_ANSWER_TEXT = [
+  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294|\uC744|\uC774|\uB3C4)?\s*(?:\uD558\uC2E4|\uD560|\uC8FC\uC2E4|\uC904)?\s*\uD544\uC694(?:(?:\uB294|\uAC00|\uB3C4)?\s*\uC5C6(?!\uC73C\uBA74|\uB2E4\uBA74|\uB2E4\uACE0|\uB2E4\uB294|\uB2E4\uBA70|\uB2E4\uB358|\uB294\uC9C0|\uC744\uC9C0|\uB098\uC694|\uC2B5\uB2C8\uAE4C|\uC5C8|\uC9C0\s*\uC54A|\uB294\s*(?:\uAC74|\uAC83\uC740|\uAC83\uC774|\uAC8C)\s*\uC544\uB2C8)|\uD558\uC9C0\s*\uC54A(?:\uC2B5\uB2C8\uB2E4|\uC544\uC694|\uC74C|\uB2E4(?![\uACE0\uB294\uBA70\uB358\uBA74])))/,
+  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294)?\s*\uBD88\uD544\uC694(?!\uD55C\uC9C0|\uD558\uBA74|\uD558\uB2E4\uBA74)/,
+  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294|\uC744)?\s*(?:\uC548\s*(?:\uD558\uC154|\uD574|\uC8FC\uC154|\uC918)\uB3C4|(?:\uD558|\uC8FC)\uC2DC?\uC9C0\s*\uC54A(?:\uC73C\uC154|\uC544)\uB3C4)\s*(?:\uB429|\uB3FC|\uAD1C\uCC2E|\uB418(?!\uB098|\uB294\uC9C0|\uB290\uB0D0|\uB0D0|\uACA0\uC2B5\uB2C8\uAE4C|\uACA0\uC5B4\uC694|\uACA0\uC8E0))/,
+  /(?<!\b(?:if|whether)\s)\bno\s+(?:reply|answer)\s+(?:is\s+)?(?:needed|required|necessary|expected)\b/i,
+  /\bno\s+need\s+to\s+(?:reply|answer|respond)\b/i,
+  /\b(?:do(?:es)?\s+not|don['\u2019]?t|doesn['\u2019]?t)\s+need\s+(?:to\s+)?(?:an?\s+|any\s+)?(?:reply|answer)\b/i,
+  /\bneed(?:n['\u2019]?t|\s+not)\s+(?:reply|answer)\b/i
+];
+var ASKS = /[?\uFF1F](?![A-Za-z0-9_%=&-])/;
+function saysNoAnswer(text) {
+  return typeof text === "string" && !ASKS.test(text) && NO_ANSWER_TEXT.some((re) => re.test(text));
+}
 function openQuestion(thread) {
   for (let i = thread.messages.length - 1;i >= 0; i--) {
     const m = thread.messages[i];
@@ -16960,12 +16994,13 @@ var linkErrorOf = (e) => {
 var isoOf = (ms) => ms ? new Date(ms).toISOString() : undefined;
 var MAX_USED = 500;
 var MAX_ENDED = 20;
-var savedPeer = (p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given });
+var savedPeer = (p) => ({ key: p.key, name: p.name, about: p.about, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given });
 var TICK_MS = 5000;
 var PAUSE_MS = 30000;
 
 class Bridge {
   keys;
+  about;
   key;
   route;
   name;
@@ -17037,10 +17072,12 @@ class Bridge {
   }
   static restore(saved, options) {
     const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } });
+    b.about = cleanAbout(saved.about);
     for (const p of saved.peers)
       b.peers.set(p.key, {
         key: p.key,
         name: p.name,
+        about: cleanAbout(p.about),
         addrs: p.addrs,
         port: p.port,
         private: p.private || undefined,
@@ -17050,6 +17087,10 @@ class Bridge {
       });
     for (const t of saved.threads)
       b.threads.set(t.id, t);
+    for (const t of b.threads.values())
+      for (const m of t.messages ?? [])
+        if (m.kind === "question" && !m.noAnswer && saysNoAnswer(m.text))
+          m.noAnswer = true;
     b.outbox = saved.outbox.filter((o) => b.peers.has(o.peer));
     for (const t of saved.tokens)
       b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private });
@@ -17103,6 +17144,7 @@ class Bridge {
       publicKey: toB64(this.keys.publicKey),
       secretKey: toB64(this.keys.secretKey),
       port: this.port,
+      about: this.about,
       peers: [...this.peers.values()].map(savedPeer),
       threads: [...this.threads.values()],
       outbox: this.outbox,
@@ -17227,6 +17269,7 @@ class Bridge {
         key: peer.key,
         id: peerId(peer.key),
         name: peer.name,
+        about: peer.about,
         state: down ? "reconnecting" : "connected",
         since: isoOf(down?.since),
         via: peer.lastAddr ? isRelayAddr(peer.lastAddr) ? "relay" : "direct" : pulling ? "pickup" : "direct"
@@ -17237,12 +17280,12 @@ class Bridge {
     const peer = await this.resolvePeer(to);
     return this.sendQuestion(peer, question, context);
   }
-  async askMany(to, question, context, answers = "all", noAnswer = false) {
+  async askMany(to, question, context, answers = "all", noAnswer = false, category) {
     const peers = await this.resolvePeers(to);
     if (peers.length === 1)
-      return this.sendQuestion(peers[0], question, context, undefined, noAnswer);
+      return this.sendQuestion(peers[0], question, context, undefined, noAnswer, category);
     const ask = { id: randomUUID().slice(0, 8), to: peers.map((p) => p.name), answers };
-    const sent = await Promise.all(peers.map((peer) => this.sendQuestion(peer, question, context, ask, noAnswer).catch((e) => ({
+    const sent = await Promise.all(peers.map((peer) => this.sendQuestion(peer, question, context, ask, noAnswer, category).catch((e) => ({
       thread: undefined,
       to: peer.name,
       delivery: "refused",
@@ -17250,8 +17293,9 @@ class Bridge {
     }))));
     return { ask: ask.id, answers, to: ask.to, sent };
   }
-  async sendQuestion(peer, question, context, ask, noAnswer = false) {
-    assertNoSecrets({ question, context });
+  async sendQuestion(peer, question, context, ask, noAnswer = false, category) {
+    assertNoSecrets({ question, context, category });
+    const label = cleanCategory(category);
     const thread = {
       id: randomUUID().slice(0, 8),
       peer: peer.key,
@@ -17261,11 +17305,12 @@ class Bridge {
       startedBy: "me",
       status: "waiting_for_peer",
       ask,
+      category: label,
       messages: []
     };
     this.threads.set(thread.id, thread);
-    const notice = noAnswer ? { noAnswer: true } : {};
-    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ask, ...notice, at: now() };
+    const notice = noAnswer || saysNoAnswer(question) ? { noAnswer: true } : {};
+    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ask, ...notice, category: label, at: now() };
     thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text: msg.text, context: msg.context, ...notice, at: msg.at });
     this.changed();
     try {
@@ -17404,6 +17449,7 @@ ${f.evidence}`).join(`
       const error = !reachable && peer.lastError;
       return {
         name: peer.name,
+        about: peer.about,
         id: peerId(peer.key),
         group: !peer.private,
         reachable,
@@ -17425,6 +17471,7 @@ ${f.evidence}`).join(`
         id: t.id,
         with: t.peerName,
         subject: t.subject,
+        category: t.category,
         status: t.status,
         ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
         messages: counted(t),
@@ -17436,7 +17483,7 @@ ${f.evidence}`).join(`
   }
   describe() {
     const relay = this.opts.relay ? { url: this.opts.relay, status: this.relayState } : undefined;
-    return { name: this.name, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay };
+    return { name: this.name, about: this.about, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay };
   }
   async relayReady(timeoutMs) {
     const deadline = Date.now() + timeoutMs;
@@ -17558,14 +17605,14 @@ ${f.evidence}`).join(`
       const remote = relayed || !!seenAt && !isLoopback(seenAt);
       const given = remote ? payload.addrs.filter((a) => !isLoopback(a)) : payload.addrs;
       const addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])];
-      const added = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined };
+      const added = { key: from, name: payload.name.slice(0, MAX_NAME), about: cleanAbout(payload.about), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined };
       const members = token && !token.private ? this.groupPeers().filter((p) => p.key !== from) : [];
       for (const m of members)
         this.sendOrQueue(m, { type: "introduce", member: memberOf(added) }).catch(() => {});
       const rejoin = this.rejoinFor(added);
       const again = !!token && "again" in token;
       this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again, how: invited ? "introduced" : again ? "came back with its token" : "code" });
-      return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin });
+      return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about });
     }
     peer.lastSeen = Date.now();
     this.wakeRetry(peer.key);
@@ -17660,7 +17707,8 @@ ${f.evidence}`).join(`
     else
       this.changed();
     this.flush();
-    return { type: "hello_ack", name: this.name, rejoin: this.rejoinFor(peer) };
+    this.learn(peer, hello.about);
+    return { type: "hello_ack", name: this.name, rejoin: this.rejoinFor(peer), about: this.about };
   }
   process(peer, payload) {
     switch (payload.type) {
@@ -17677,7 +17725,8 @@ ${f.evidence}`).join(`
           return null;
         peer.addrs = payload.addrs;
         peer.port = payload.port;
-        return { type: "hello_ack", name: this.name };
+        this.learn(peer, payload.about);
+        return { type: "hello_ack", name: this.name, about: this.about };
       case "introduce":
         if (!peer.private)
           this.invite(payload.member, peer.name);
@@ -17701,7 +17750,7 @@ ${f.evidence}`).join(`
     this.ended = this.ended.filter((e) => e.id !== peerId(peer.key));
     this.save();
     if (options.emit)
-      this.emit({ type: "connected", peer: peer.name, via: options.via, again: options.again || undefined, at: now() });
+      this.emit({ type: "connected", peer: peer.name, via: options.via, again: options.again || undefined, about: peer.about, at: now() });
     else
       this.changed();
     this.pollLoop(peer.key);
@@ -17903,6 +17952,7 @@ ${f.evidence}`).join(`
         startedBy: "peer",
         status: "your_turn",
         ask: isAskInfo(msg.ask) ? { id: msg.ask.id, to: msg.ask.to, answers: msg.ask.answers } : undefined,
+        category: cleanCategory(msg.category),
         messages: []
       };
       this.threads.set(thread.id, thread);
@@ -17923,7 +17973,7 @@ ${f.evidence}`).join(`
       return;
     const text = agreement ? renderAgreement(agreement) : msg.text;
     const human = msg.human === true ? { human: true } : {};
-    const notice = msg.kind === "question" && msg.noAnswer === true;
+    const notice = msg.kind === "question" && (msg.noAnswer === true || saysNoAnswer(msg.text));
     thread.messages.push({ id: msg.id, from: "peer", kind: msg.kind, text, context, agreement, ...human, ...notice ? { noAnswer: true } : {}, at: now() });
     if (thread.status === "closed" || msg.kind === "closed")
       thread.status = "closed";
@@ -17946,7 +17996,7 @@ ${f.evidence}`).join(`
         this.closeSiblings(thread.ask, peer.name, thread.id);
       ask = this.askProgress(thread.ask);
     }
-    this.emit({ type: "message", thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, ...notice ? { no_answer_needed: true } : {}, at: now() });
+    this.emit({ type: "message", thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, ...notice ? { no_answer_needed: true } : {}, ...thread.category ? { category: thread.category } : {}, at: now() });
   }
   peerAsksHuman(thread, inText) {
     if (thread.status !== "peer_checking_with_their_human" || !thread.humanSince) {
@@ -18214,13 +18264,48 @@ ${f.evidence}`).join(`
     }
   }
   async sayHello(peer, extra = {}) {
-    const reply = await this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), ...extra });
+    const reply = await this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, ...extra });
+    if (reply.type === "hello_ack")
+      this.learn(peer, reply.about);
     if (reply.type === "hello_ack" && isToken(reply.rejoin)) {
       peer.token = reply.rejoin;
       if (this.peers.has(peer.key))
         this.dirty();
     }
     return reply;
+  }
+  learn(peer, about) {
+    const next = cleanAbout(about);
+    if (JSON.stringify(next) === JSON.stringify(peer.about))
+      return;
+    peer.about = next;
+    if (this.peers.has(peer.key))
+      this.changed();
+  }
+  setAbout(about) {
+    const next = cleanAbout({ ...this.about, ...about });
+    if (JSON.stringify(next) === JSON.stringify(this.about))
+      return;
+    this.about = next;
+    this.changed();
+    for (const peer of this.peers.values())
+      this.sayHello(peer).catch(() => {});
+  }
+  pin(ids, pinned) {
+    let changed = 0;
+    for (const id of new Set(ids)) {
+      const t = this.threads.get(id);
+      if (!t || !!t.pinned === pinned)
+        continue;
+      if (pinned)
+        t.pinned = true;
+      else
+        delete t.pinned;
+      changed++;
+    }
+    if (changed)
+      this.changed();
+    return changed;
   }
   watchThisPc() {
     clearInterval(this.ticker);
@@ -19419,7 +19504,7 @@ import { platform as platform4 } from "os";
 import { basename, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.10.0";
+var version2 = "0.11.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -27184,330 +27269,343 @@ var PAGE = `<!doctype html>
 <meta name="color-scheme" content="light dark">
 <title>Coworker \uB300\uD654</title>
 <style>
-@property --a { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
 :root {
   color-scheme: light dark;
-  --bg: #f3f2ee; --card: #ffffff; --text: #1c1b19; --muted: #63615b; --line: #dcdad2;
-  --in: #e7eefe; --in-b: #2f5bd3; --out: #e3f4e7; --out-b: #17703c; --note: #fcf2d7; --note-b: #8f5c0e; --agree: #f0e8ff; --agree-b: #6f42c9;
-  --accent: #2f5bd3; --accent2: #7c4ddb; --warn: #b3261e;
-  --shadow: 0 1px 2px rgba(20, 20, 30, .06), 0 8px 24px rgba(20, 20, 30, .07);
-  --aur1: #9db8ff; --aur2: #c9b3ff; --aur3: #9fe3c0; --aur-o: .55;
-  --spring: cubic-bezier(.34, 1.56, .64, 1); --bounce: cubic-bezier(.34, 1.56, .64, 1);
+  --bg: #f4f4f7; --card: #ffffff; --soft: #f0f0f4; --line: #e1e1e8; --text: #17171c; --muted: #5f606b;
+  --in: #edf0fd; --in-b: #3350c9; --out: #e7f5ec; --out-b: #1b7340; --note: #fbf1d8; --note-b: #8a5a0c; --agree: #f1ebfe; --agree-b: #6a3fc0;
+  --accent: #4353d6; --accent2: #7a4fd8; --warn: #b3261e; --ok: #1b8a4b;
+  --t1: #3350c9; --t2: #1b7340; --t3: #8a5a0c; --t4: #6a3fc0; --t5: #0e7490; --t6: #b4325f;
+  --shadow: 0 1px 2px rgba(16, 20, 40, .05), 0 6px 20px rgba(16, 20, 40, .06);
+  --pop: 0 4px 12px rgba(16, 20, 40, .08), 0 18px 44px rgba(16, 20, 40, .16);
+  --glow: 9%;
+  --ease: cubic-bezier(.22, 1, .36, 1);
   --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
-}
-@supports (transition-timing-function: linear(0, 1)) {
-  :root {
-    --spring: linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1);
-    --bounce: linear(0, 0.214 14.7%, 0.386 23.7%, 0.598 31.9%, 0.999 44.7%, 0.807 52.6%, 0.762 56%, 0.747 59.4%, 0.758 62.4%, 0.793 65.6%, 0.999 77.4%, 0.961 81.2%, 0.949 84.8%, 0.956 88%, 0.993 95.5%, 1);
-  }
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0b0c11; --card: #171924; --text: #ecebe6; --muted: #9b9ba6; --line: #2a2d3b;
-    --in: #162242; --in-b: #8aa8ff; --out: #12301e; --out-b: #62d28d; --note: #32280e; --note-b: #f0b84a; --agree: #281d47; --agree-b: #b9a0ff;
-    --accent: #8aa8ff; --accent2: #b9a0ff; --warn: #ff8a80;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .35);
-    --aur1: #2b4fb8; --aur2: #5a36b0; --aur3: #17694a; --aur-o: .42;
+    --bg: #0c0d11; --card: #15161c; --soft: #1d1f27; --line: #282a33; --text: #ededf1; --muted: #9c9eaa;
+    --in: #161f38; --in-b: #8eaaff; --out: #122a1e; --out-b: #6fd49b; --note: #2a2311; --note-b: #e8b85a; --agree: #221b3a; --agree-b: #b9a2ff;
+    --accent: #8b9dff; --accent2: #b08cff; --warn: #ff8f85; --ok: #5fd08f;
+    --t1: #8eaaff; --t2: #6fd49b; --t3: #e8b85a; --t4: #b9a2ff; --t5: #5cc8de; --t6: #ff8fb1;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .22);
+    --pop: 0 4px 14px rgba(0, 0, 0, .4), 0 20px 50px rgba(0, 0, 0, .5);
+    --glow: 14%;
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.55 var(--font); overflow-x: hidden; }
+body { margin: 0; min-height: 100vh; color: var(--text); font: 15px/1.55 var(--font); background: radial-gradient(1000px 440px at 50% -180px, color-mix(in srgb, var(--accent) var(--glow), transparent), transparent 72%) fixed no-repeat, var(--bg); }
 button { font: inherit; color: inherit; }
-button:focus-visible, .node:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-/* \uBC30\uACBD: \uB5A0\uB2E4\uB2C8\uB294 \uBE5B\uACFC \uBCC4\uC790\uB9AC */
-#sky, .aurora, #fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-#sky, .aurora { z-index: 0; }
-#fx { z-index: 40; }
-.aurora { overflow: hidden; opacity: var(--aur-o); }
-.aurora i { position: absolute; width: 46vmax; height: 46vmax; border-radius: 50%; filter: blur(70px); }
-.aurora i:nth-child(1) { left: -12vmax; top: -16vmax; background: radial-gradient(circle, var(--aur1), transparent 65%); }
-.aurora i:nth-child(2) { right: -14vmax; top: 4vmax; background: radial-gradient(circle, var(--aur2), transparent 65%); }
-.aurora i:nth-child(3) { left: 22vmax; bottom: -26vmax; background: radial-gradient(circle, var(--aur3), transparent 65%); }
-.on .aurora i:nth-child(1) { animation: drift1 26s ease-in-out infinite alternate; }
-.on .aurora i:nth-child(2) { animation: drift2 32s ease-in-out infinite alternate; }
-.on .aurora i:nth-child(3) { animation: drift3 38s ease-in-out infinite alternate; }
-@keyframes drift1 { to { translate: 14vmax 10vmax; scale: 1.25; } }
-@keyframes drift2 { to { translate: -16vmax 12vmax; scale: .85; } }
-@keyframes drift3 { to { translate: -10vmax -14vmax; scale: 1.3; } }
-
-/* \uB9E8 \uC704: \uC774\uB984, \uC2E4\uC2DC\uAC04 \uD45C\uC2DC, \uB2E8\uCD94 */
-.bar { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 20; background: linear-gradient(90deg, var(--accent), var(--accent2)); transform-origin: 0 50%; scale: 0 1; }
-.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; padding: 12px max(16px, calc((100vw - 900px) / 2 + 16px)); background: color-mix(in srgb, var(--bg) 72%, transparent); -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4); border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
-.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
-.logo { width: 30px; height: 30px; overflow: visible; flex: none; }
-.logo .lo { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 3 5; opacity: .6; }
-.logo .l1 { fill: var(--accent); } .logo .l2 { fill: var(--accent2); }
-.logo .ll { stroke: var(--muted); stroke-width: 2; stroke-linecap: round; }
-.on .logo .lg { animation: rot 9s linear infinite; }
-.on .logo .lo { animation: rot 30s linear infinite reverse; }
-@keyframes rot { to { rotate: 360deg; } }
-h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; white-space: nowrap; }
-h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2), var(--accent)); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; }
-.on h1 span { animation: shimmer 5s linear infinite; }
-@keyframes shimmer { to { background-position: -200% 0; } }
-.chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1; padding: 7px 11px; border-radius: 99px; border: 1px solid var(--line); background: color-mix(in srgb, var(--card) 80%, transparent); white-space: nowrap; }
-button.chip { cursor: pointer; transition: scale .5s var(--spring), border-color .2s; }
-button.chip:hover { border-color: var(--accent); }
-.on button.chip:hover { scale: 1.06; }
-.on button.chip:active { scale: .94; }
-.live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--out-b); position: relative; flex: none; }
-.on .live .dot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: ping 1.8s ease-out infinite; }
-@keyframes ping { from { scale: 1; opacity: .7; } to { scale: 3.2; opacity: 0; } }
-.live.off { color: var(--warn); border-color: var(--warn); }
-.live.off .dot { background: var(--warn); }
-@supports ((animation-timeline: scroll()) and (animation-range: entry)) {
-  .on .bar { animation: grow auto linear both; animation-timeline: scroll(root); }
-  .on .top { animation: tuck auto linear both; animation-timeline: scroll(root); animation-range: 0px 140px; }
-  @keyframes grow { to { scale: 1 1; } }
-  @keyframes tuck { from { padding-block: 20px; } to { padding-block: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .14); } }
-}
-
-main { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 16px 16px 90px; transition: filter .6s ease; }
-.offline main { filter: grayscale(.85); }
-.me, .refresh { color: var(--muted); font-size: 13px; margin: 0; }
-.refresh { margin: 2px 0 16px; }
-.offline .refresh { color: var(--warn); font-weight: 600; }
-
-/* \uC5F0\uACB0 \uADF8\uB9BC */
-.stage { position: relative; border: 1px solid var(--line); border-radius: 18px; background: color-mix(in srgb, var(--card) 62%, transparent); box-shadow: var(--shadow); overflow: hidden; margin-bottom: 12px; }
-.stage::before { content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .4; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 28px 28px; -webkit-mask-image: radial-gradient(ellipse at center, #000 15%, transparent 72%); mask-image: radial-gradient(ellipse at center, #000 15%, transparent 72%); }
-.on .stage::before { animation: grid 14s linear infinite; }
-@keyframes grid { to { background-position: 28px 28px, 28px 28px; } }
-#net { display: block; width: 100%; position: relative; }
-#net text { font: 600 12px/1 var(--font); fill: var(--text); text-anchor: middle; paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; }
-#net .sub { font-weight: 400; font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
-#net .ini { fill: #fff; stroke: none; font-size: 15px; font-weight: 700; }
-.link { fill: none; stroke: var(--line); stroke-width: 2; }
-.flow { fill: none; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 1 15; opacity: .9; }
-.flow.a { stroke: var(--out-b); } .flow.b { stroke: var(--in-b); }
-.on .flow.a { animation: dash-a 1.8s linear infinite; }
-.on .flow.b { animation: dash-b 2.6s linear infinite; }
-@keyframes dash-a { to { stroke-dashoffset: -16; } }
-@keyframes dash-b { to { stroke-dashoffset: 16; } }
-.lk.down .link { stroke: var(--warn); stroke-dasharray: 6 8; }
-.lk.down .flow, .lk.ghost .flow { display: none; }
-.on .lk.down .link { animation: blink 1.8s ease-in-out infinite; }
-@keyframes blink { 50% { opacity: .3; } }
-.lk.ghost .link { stroke-dasharray: 3 7; opacity: .7; }
-.node { cursor: pointer; outline-offset: 6px; }
-.node.me { cursor: default; }
-.node .core { fill: var(--in-b); stroke: var(--card); stroke-width: 2; }
-.node.me .core { fill: url(#gme); }
-.node.ghost .core { fill: var(--muted); stroke-dasharray: 3 3; opacity: .7; }
-.node.down .core, .node.closed .core { fill: var(--muted); }
-.node .halo { fill: var(--in-b); opacity: .14; }
-.node.me .halo { fill: var(--accent2); }
-.node.down .halo { fill: var(--warn); }
-.on .node .halo { animation: halo 3.2s ease-in-out infinite; }
-@keyframes halo { 50% { scale: 1.28; opacity: .04; } }
-.on .node .fl { animation: float var(--fd, 5s) ease-in-out var(--fo, 0s) infinite alternate; }
-@keyframes float { from { translate: 0 -3px; } to { translate: 0 4px; } }
-.orbit, .hb { display: none; }
-.orbit circle { fill: var(--out-b); }
-.node.think .orbit { display: inline; }
-.on .node.think .orbit { animation: rot 1.4s linear infinite; }
-.node.human .hb { display: inline; }
-.hb circle { fill: var(--note-b); stroke: var(--card); stroke-width: 2; }
-#net .hb text { fill: var(--card); stroke: none; font-size: 11px; font-weight: 800; }
-.on .node.human .hb circle { animation: beat 1.4s ease-in-out infinite; }
-.rip { fill: none; stroke: var(--accent); stroke-width: 2; }
-.pkt { fill: var(--in-b); filter: drop-shadow(0 0 5px var(--in-b)); }
-.pkt.k-answer { fill: var(--out-b); filter: drop-shadow(0 0 5px var(--out-b)); }
-.pkt.k-note, .pkt.k-closed { fill: var(--note-b); filter: drop-shadow(0 0 5px var(--note-b)); }
-.pkt.k-agreement { fill: var(--agree-b); filter: drop-shadow(0 0 6px var(--agree-b)); }
-.stats { position: relative; display: flex; gap: 10px 30px; flex-wrap: wrap; justify-content: center; align-items: flex-start; padding: 4px 12px 14px; }
-.stat { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 52px; font-size: 12px; line-height: 1.3; color: var(--muted); text-align: center; }
-.stat.hot { color: var(--note-b); }
-.num { display: inline-flex; justify-content: center; font-weight: 700; font-size: 20px; line-height: 1.2; height: 1.2em; color: var(--text); font-variant-numeric: tabular-nums; -webkit-user-select: none; user-select: none; }
-/* \uD654\uBA74\uC5D0\uB294 \uC548 \uBCF4\uC774\uACE0, \uAE01\uC5B4\uC11C \uBCF5\uC0AC\uD560 \uB54C\uC640 \uC77D\uC5B4 \uC8FC\uB294 \uD504\uB85C\uADF8\uB7A8\uC5D0\uB9CC \uC7A1\uD788\uB294 \uAE00 */
+:where(button, summary, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* \uD654\uBA74\uC5D0\uB294 \uC548 \uBCF4\uC774\uACE0 \uC77D\uC5B4 \uC8FC\uB294 \uD504\uB85C\uADF8\uB7A8\uC5D0\uB9CC \uC7A1\uD788\uB294 \uAE00 */
 .plain { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.stat.hot .num { color: var(--note-b); }
-.dg { display: inline-block; height: 1.2em; overflow: hidden; }
-.dg > span { display: block; translate: 0 calc(var(--d, 0) * -1.2em); }
-/* \uB760\uC758 \uC22B\uC790\uB294 \uAE00\uC774 \uC544\uB2C8\uB77C \uAFB8\uBC08\uC73C\uB85C \uADF8\uB9B0\uB2E4. \uADF8\uB798\uC57C \uAE01\uC5B4\uC11C \uBCF5\uC0AC\uD560 \uB54C 0\uBD80\uD130 9\uAE4C\uC9C0\uAC00 \uB538\uB824 \uC624\uC9C0 \uC54A\uB294\uB2E4. */
-.dg i { display: block; height: 1.2em; font-style: normal; }
-.dg i::before { content: attr(data-d); }
-.on .dg > span { transition: translate .8s var(--spring); }
-.stage .key { position: absolute; top: 10px; right: 10px; z-index: 2; }
+
+/* \uB9E8 \uC704: \uC774\uB984, \uC2E4\uC2DC\uAC04 \uD45C\uC2DC, \uB2E8\uCD94. \uD654\uBA74\uC744 \uB0B4\uB9AC\uBA74 \uC544\uB798 \uAE08\uC774 \uB098\uD0C0\uB09C\uB2E4. */
+.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 12px max(16px, calc((100vw - 1180px) / 2 + 16px)); background: color-mix(in srgb, var(--bg) 80%, transparent); -webkit-backdrop-filter: blur(14px) saturate(1.3); backdrop-filter: blur(14px) saturate(1.3); border-bottom: 1px solid var(--line); }
+@supports (animation-timeline: scroll()) {
+  .top { border-bottom-color: transparent; animation: edge linear both; animation-timeline: scroll(root); animation-range: 0px 72px; }
+  @keyframes edge { to { border-bottom-color: var(--line); } }
+}
+.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+.logo { width: 26px; height: 26px; flex: none; }
+.logo path { stroke: var(--muted); stroke-width: 2; stroke-linecap: round; opacity: .55; }
+.logo .l1 { fill: var(--accent); } .logo .l2 { fill: var(--accent2); }
+h1 { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: -.015em; white-space: nowrap; }
+h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1; padding: 8px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--card); white-space: nowrap; }
+button.chip { cursor: pointer; transition: background-color .15s, border-color .15s, color .15s, scale .2s var(--ease); }
+button.chip:hover { background: var(--soft); border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
+.on button.chip:active { scale: .96; }
 button.chip:disabled { opacity: .5; cursor: not-allowed; }
-.downs { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 0 12px 12px; }
+.chip b { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip.sel { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, var(--card)); color: var(--accent); font-weight: 600; }
+.chip.sel b { color: inherit; opacity: .8; }
+.chip.main { background: linear-gradient(135deg, var(--accent), var(--accent2)); border-color: transparent; color: var(--card); font-weight: 600; }
+button.chip.main:hover { background: linear-gradient(135deg, var(--accent), var(--accent2)); filter: brightness(1.08); }
+/* \uC0B4\uC544 \uC788\uC74C\uC744 \uC54C\uB9AC\uB294 \uC810. \uB458\uB808\uB85C \uACE0\uB9AC\uAC00 \uCC9C\uCC9C\uD788 \uD37C\uC9C4\uB2E4. */
+.live { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); padding: 0 8px 0 2px; white-space: nowrap; }
+.beacon { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
+.beacon::after, .sdot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: inherit; opacity: 0; }
+.on .beacon::after, .on .act .sdot::after { animation: ping 2.4s var(--ease) infinite; }
+@keyframes ping { 0% { opacity: .5; scale: 1; } 70%, 100% { opacity: 0; scale: 2.9; } }
+.live.off { color: var(--warn); font-weight: 600; }
+.live.off .beacon { background: var(--warn); }
+.on .live.off .beacon::after { animation: none; }
+
+main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 90px; transition: opacity .3s; }
+.offline main { opacity: .55; }
+.on.boot .panel, .on.boot .info { animation: enter .6s var(--ease) both; }
+.on.boot .info { animation-delay: .08s; }
+@keyframes enter { from { opacity: 0; translate: 0 10px; } }
+
+/* \uC5F0\uACB0 \uADF8\uB9BC: \uC67C\uCABD\uC774 \uC774 \uC138\uC158, \uC624\uB978\uCABD\uC774 \uC5F0\uACB0\uB41C \uC138\uC158. \uC120\uC774 \uB458\uC744 \uC787\uACE0, \uAE00\uC774 \uC624\uAC00\uBA74 \uC120\uC744 \uB530\uB77C \uC810\uC774 \uAC74\uB108\uAC04\uB2E4. */
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); margin-bottom: 10px; overflow: hidden; container: panel / inline-size; }
+.net { position: relative; display: grid; grid-template-columns: minmax(0, max-content) minmax(56px, 1fr) minmax(0, 1.6fr); align-items: center; padding: 20px 20px 18px; background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 70%); }
+#wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.wire { fill: none; stroke: color-mix(in srgb, var(--muted) 28%, var(--line)); stroke-width: 1.5; transition: stroke .3s; }
+/* \uAE30\uB2E4\uB9AC\uB294 \uC77C\uC774 \uC788\uB294 \uC120\uC740 \uC810\uC120\uC774 \uB418\uC5B4, \uB2F5\uD560 \uCABD\uC73C\uB85C \uCC9C\uCC9C\uD788 \uD750\uB978\uB2E4 */
+.wire.fwd, .wire.back { stroke: color-mix(in srgb, var(--accent) 55%, var(--line)); stroke-dasharray: 3 7; }
+.on .wire.fwd { animation: flow 1.8s linear infinite; }
+.on .wire.back { animation: flow 1.8s linear infinite reverse; }
+@keyframes flow { to { stroke-dashoffset: -10; } }
+.wire.ghost { stroke-dasharray: 2 6; }
+.wire.sel { stroke: color-mix(in srgb, var(--accent) 80%, var(--line)); }
+.wire.down, .on .wire.down { stroke: var(--warn); stroke-dasharray: 4 6; animation: none; }
+.spark { fill: var(--c, var(--accent)); filter: drop-shadow(0 0 5px var(--c, var(--accent))); }
+.peers { grid-column: 3; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.peers:empty { display: none; }
+.nopeer { grid-column: 2 / 4; margin: 0; padding-left: 24px; font-size: 13px; color: var(--muted); text-wrap: pretty; }
+.nopeer[hidden] { display: none; }
+.sess { position: relative; display: flex; align-items: center; gap: 11px; min-width: 0; padding: 7px 10px; border-radius: 12px; border: 1px solid transparent; background: none; text-align: left; }
+.sess.me { grid-column: 1; padding: 0; gap: 13px; max-width: 280px; }
+button.sess { width: 100%; cursor: pointer; }
+.on .sess { transition: opacity .4s ease-out, background-color .15s, border-color .2s; }
+button.sess:hover { background: var(--soft); }
+.sess[aria-pressed=true] { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.avatar { position: relative; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; flex: none; font-size: 14px; font-weight: 650; color: var(--tone, var(--muted)); background: color-mix(in srgb, var(--tone, var(--muted)) 14%, var(--card)); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--tone, var(--muted)) 36%, transparent); }
+.sess.me .avatar { width: 46px; height: 46px; font-size: 17px; color: var(--card); background: linear-gradient(135deg, var(--accent), var(--accent2)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); }
+.sess.ghost .avatar { box-shadow: none; outline: 1.5px dashed color-mix(in srgb, var(--tone, var(--muted)) 55%, transparent); outline-offset: -1.5px; }
+.sess.down .avatar, .sess.closed .avatar { filter: grayscale(1); opacity: .7; }
+.ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 2px var(--c, var(--accent)); opacity: 0; pointer-events: none; }
+.st { position: absolute; right: -1px; bottom: -1px; width: 10px; height: 10px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--card); }
+.sess.down .st { background: var(--warn); }
+.sess.ghost .st, .sess.closed .st { background: var(--muted); }
+.sinfo { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+.sname { font-size: 13.5px; font-weight: 600; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess.me .sname { font-size: 15px; font-weight: 650; }
+.ssub { font-size: 12px; line-height: 1.45; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssub:empty { display: none; }
+/* \uB2F5\uD560 \uCC28\uB840\uC778 \uCABD\uC5D0\uB294 \uC810 \uC138 \uAC1C\uAC00, \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911\uC778 \uCABD\uC5D0\uB294 \uC774\uB984\uD45C\uAC00 \uBD99\uB294\uB2E4. */
+.stag { display: none; flex: none; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; line-height: 1; padding: 5px 9px; border-radius: 99px; white-space: nowrap; }
+.sinfo .stag { align-self: flex-start; margin-top: 5px; }
+.sess.think .stag { display: inline-flex; color: var(--in-b); background: color-mix(in srgb, var(--in-b) 12%, transparent); }
+.sess.human .stag { display: inline-flex; color: var(--note-b); background: color-mix(in srgb, var(--note-b) 14%, transparent); }
+.sess.human .stag .dots { display: none; }
+@container panel (max-width: 619px) {
+  .net { grid-template-columns: minmax(0, 1fr); row-gap: 12px; padding: 16px; }
+  .sess.me, .peers, .nopeer { grid-column: 1; }
+  .sess.me { max-width: none; }
+  .peers { padding-left: 34px; }
+  .nopeer { padding-left: 2px; }
+}
+.dots { display: inline-flex; gap: 3px; align-items: center; }
+.dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: .4; }
+.on .dots i { animation: wave 1.3s ease-in-out infinite; }
+.on .dots i:nth-child(2) { animation-delay: .16s; }
+.on .dots i:nth-child(3) { animation-delay: .32s; }
+@keyframes wave { 0%, 60%, 100% { translate: 0 0; opacity: .35; } 30% { translate: 0 -3px; opacity: 1; } }
+/* \uB2FF\uC9C0 \uC54A\uB294 \uC138\uC158 */
+.downs { display: flex; flex-direction: column; gap: 6px; padding: 0 14px 12px; }
 .downs:empty { display: none; }
 .downrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; color: var(--warn); padding: 7px 10px; border-radius: 10px; background: color-mix(in srgb, var(--warn) 9%, transparent); }
 .downrow > span { flex: 1 1 220px; }
-.node.sel .core { stroke: var(--accent2); stroke-width: 4; }
+/* \uC22B\uC790 \uB760. \uCE78 \uB108\uBE44\uAC00 \uAC19\uC544\uC11C \uC904\uC774 \uB9DE\uB294\uB2E4. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); border-top: 1px solid var(--line); overflow: hidden; }
+.stat { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 11px 20px 12px; margin: -1px 0 0 -1px; border-left: 1px solid var(--line); border-top: 1px solid var(--line); font-size: 12px; line-height: 1.4; color: var(--muted); }
+.num { display: block; font-weight: 650; font-size: 20px; line-height: 1.25; color: var(--text); font-variant-numeric: tabular-nums; }
+.stat.hot, .stat.hot .num { color: var(--note-b); }
+.info { display: flex; flex-wrap: wrap; gap: 2px 14px; justify-content: space-between; margin: 0 4px 18px; color: var(--muted); font-size: 12.5px; }
+.me, .refresh { margin: 0; }
+.offline .refresh { color: var(--warn); font-weight: 600; }
 
-/* \uC138\uC158\uC744 \uACE8\uB77C \uADF8 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uB9CC \uBCF8\uB2E4 */
-.filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
-.filters[hidden], .wrap[hidden] { display: none; }
-.chip b { font-weight: 600; opacity: .75; font-variant-numeric: tabular-nums; }
-.chip.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--card)); font-weight: 600; }
+/* \uC138\uC158\uC774\uB098 \uBD84\uB958\uB97C \uACE8\uB77C \uADF8 \uB300\uD654\uB9CC \uBCF8\uB2E4 */
+.filterbar { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.filters[hidden], .wrap[hidden], .room[hidden], .board[hidden] { display: none; }
 
 /* \uB300\uD654 \uCE74\uB4DC */
-#list { display: flex; flex-direction: column; gap: 16px; }
+/* \uC67C\uCABD\uC5D0 \uB300\uD654 \uBAA9\uB85D, \uC624\uB978\uCABD\uC5D0 \uACE0\uB978 \uB300\uD654 \uD558\uB098. \uBAA9\uB85D\uC740 \uD654\uBA74\uC744 \uB0B4\uB824\uB3C4 \uB530\uB77C\uC628\uB2E4. \uC881\uC740 \uD654\uBA74\uC5D0\uC11C\uB294 \uBAA9\uB85D\uC774 \uC704\uC5D0 \uC606\uC73C\uB85C \uB193\uC778\uB2E4. */
+.board { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 14px; }
+.pane { grid-column: 2; grid-row: 1; min-width: 0; }
 .wrap { position: relative; }
-@supports ((animation-timeline: view()) and (animation-range: entry)) {
-  .on .wrap { animation: rise auto linear backwards, sink auto linear forwards; animation-timeline: view(), view(); animation-range: entry 0px entry 180px, exit calc(100% - 160px) exit 100%; }
-  @keyframes rise { from { opacity: 0; scale: .95; } }
-  @keyframes sink { to { opacity: .2; scale: .97; } }
+.rooms { grid-column: 1; grid-row: 1; position: sticky; top: 68px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 84px); overflow-y: auto; padding: 3px; margin: -3px; scrollbar-width: thin; overscroll-behavior: contain; }
+.room { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; flex: none; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); cursor: pointer; --ring: var(--muted); }
+.on .room { transition: opacity .35s ease-out, translate .45s var(--ease), background-color .15s, border-color .2s; transition-delay: calc(var(--i, 0) * 45ms), calc(var(--i, 0) * 45ms), 0s, 0s; }
+.room:hover { border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
+.room[aria-current=true] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
+.rtitle { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: 13.5px; font-weight: 600; line-height: 1.4; }
+.rsub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rcat { flex: none; font-size: 11px; font-weight: 650; line-height: 1.3; padding: 1px 6px; border-radius: 6px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.rcat:empty { display: none; }
+.rago { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rstate { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.rstate .sdot { color: var(--ring); }
+.rlabel { flex: 0 1 auto; min-width: 0; color: var(--ring); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rwho { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rmarks { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 12px; }
+.rpin { display: none; color: var(--accent); }
+.rpin svg { display: block; width: 12px; height: 12px; fill: currentColor; }
+.room.pinned .rpin { display: block; }
+/* \uC5F4\uC5B4 \uB450\uC9C0 \uC54A\uC740 \uB300\uD654\uC5D0 \uC0C8 \uAE00\uC774 \uC654\uB2E4\uB294 \uD45C\uC2DC */
+.rnew { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.room.unseen .rnew { display: block; }
+.room.unseen .rago { color: var(--accent); font-weight: 650; }
+@media (max-width: 860px) {
+  .board { grid-template-columns: minmax(0, 1fr); }
+  .pane, .rooms { grid-column: 1; grid-row: auto; }
+  .rooms { position: static; flex-direction: row; max-height: none; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; padding-bottom: 8px; }
+  .room { flex: 0 0 min(80%, 300px); scroll-snap-align: start; }
 }
-.conv { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px 12px; box-shadow: var(--shadow); transform: perspective(1100px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)); --ring: var(--muted); }
-.conv[data-st=waiting_for_peer] { --ring: var(--in-b); }
-.conv[data-st=your_turn] { --ring: var(--out-b); }
-.conv[data-st=checking_with_your_human], .conv[data-st=peer_checking_with_their_human] { --ring: var(--note-b); }
-.conv[data-st=agreed] { --ring: var(--agree-b); }
-.conv[data-st=answered], .conv[data-st=answered_by_me] { --ring: var(--out-b); }
-.conv[data-st=unread], .conv[data-st=unread_notice] { --ring: var(--note-b); }
-.conv.act { border-color: color-mix(in srgb, var(--ring) 45%, var(--line)); }
-.conv::before { content: ''; position: absolute; inset: -1px; border-radius: inherit; padding: 2px; pointer-events: none; opacity: 0; background: conic-gradient(from var(--a), transparent 0 62%, var(--ring) 84%, transparent 100%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
-.on .conv.act::before { opacity: 1; animation: spin 3.6s linear infinite; }
-@keyframes spin { to { --a: 360deg; } }
-.conv::after { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity .3s; background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 0%), color-mix(in srgb, var(--accent) 13%, transparent), transparent 60%); }
-.on .conv:hover::after { opacity: 1; }
-.on .conv { transition-property: opacity, translate, scale, filter, transform, border-color; transition-duration: .6s, .9s, .9s, .6s, .4s, .3s; transition-timing-function: ease-out, var(--spring), var(--spring), ease-out, ease-out, ease; --d: calc(var(--i, 0) * 70ms); transition-delay: var(--d), var(--d), var(--d), var(--d), 0s, 0s; }
-.on .wrap.gone .conv { opacity: 0; scale: .92; filter: blur(6px); }
-.head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.badge { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 99px; background: var(--in); color: var(--in-b); white-space: nowrap; }
-.badge.out { background: var(--out); color: var(--out-b); }
-.subject { font-size: 15px; font-weight: 650; margin: 0; overflow-wrap: anywhere; flex: 1 1 220px; min-width: 0; }
-.status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; color: var(--ring); background: color-mix(in srgb, var(--ring) 12%, transparent); }
-.sdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
-.on .act .sdot { animation: beat 1.4s ease-in-out infinite; }
+.conv { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; box-shadow: var(--shadow); --ring: var(--muted); }
+/* \uC0C1\uD0DC\uB9C8\uB2E4 \uBE5B\uAE54 \uD558\uB098. \uCE74\uB4DC\uC640 \uBAA9\uB85D\uC758 \uC904\uC774 \uAC19\uC774 \uC4F4\uB2E4. */
+[data-st=waiting_for_peer] { --ring: var(--in-b); }
+[data-st=your_turn] { --ring: var(--out-b); }
+[data-st=checking_with_your_human], [data-st=peer_checking_with_their_human] { --ring: var(--note-b); }
+[data-st=agreed] { --ring: var(--agree-b); }
+[data-st=answered], [data-st=answered_by_me] { --ring: var(--out-b); }
+[data-st=unread], [data-st=unread_notice] { --ring: var(--note-b); }
+.conv:hover { border-color: color-mix(in srgb, var(--muted) 38%, var(--line)); }
+.conv.pinned, .conv.pinned:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.on .conv { transition: opacity .35s ease-out, translate .5s var(--ease), border-color .25s; transition-delay: calc(var(--i, 0) * 55ms), calc(var(--i, 0) * 55ms), 0s; }
+.head { display: flex; gap: 8px 10px; align-items: flex-start; flex-wrap: wrap; }
+/* \uC9C8\uBB38\uC5D0 \uBD99\uC740 \uBD84\uB958 */
+.cat { flex: none; margin-top: 2px; font-size: 11.5px; font-weight: 650; line-height: 1.3; padding: 3px 8px; border-radius: 7px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); white-space: nowrap; }
+.cat:empty { display: none; }
+.subject { font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -.005em; margin: 0; overflow-wrap: anywhere; flex: 1 1 240px; min-width: 0; }
+.status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; line-height: 1.3; padding: 4px 10px; border-radius: 99px; color: var(--ring); background: color-mix(in srgb, var(--ring) 12%, transparent); transition: color .25s, background-color .25s; }
+.sdot { position: relative; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 /* \uB2F5\uC774 \uC624\uAC04 \uB300\uD654\uC640 \uD569\uC758\uD55C \uB300\uD654\uB294 \uC810 \uB300\uC2E0 \uCCB4\uD06C\uB85C \uB05D\uB0AC\uC74C\uC744 \uBCF4\uC778\uB2E4 */
 .ck { display: none; width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 16; }
 .conv[data-st^=answered] .ck, .conv[data-st=agreed] .ck { display: inline; }
 .conv[data-st^=answered] .sdot, .conv[data-st=agreed] .sdot { display: none; }
-.fxl { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; }
-.shine { position: absolute; top: 0; bottom: 0; left: 0; width: 45%; translate: -130% 0; background: linear-gradient(100deg, transparent, color-mix(in srgb, var(--ring) 30%, transparent), transparent); }
-@keyframes beat { 50% { scale: 1.6; opacity: .5; } }
 .ago { font-weight: 400; opacity: .85; font-variant-numeric: tabular-nums; }
-.meta { color: var(--muted); font-size: 12.5px; margin: 6px 0 2px; overflow-wrap: anywhere; }
+/* \uB9E8 \uC704\uC5D0 \uACE0\uC815\uD558\uB294 \uB2E8\uCD94. \uACE0\uC815\uD558\uBA74 \uD540\uC774 \uBC14\uB85C \uC11C\uACE0 \uC0C9\uC774 \uCC2C\uB2E4. */
+.pin { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 1; padding: 5px 8px; border-radius: 8px; border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; transition: background-color .15s, color .15s, border-color .15s; }
+.pin:hover { background: var(--soft); color: var(--text); }
+.pin svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; rotate: 38deg; }
+.on .pin svg { transition: rotate .35s var(--ease); }
+.pin[aria-pressed=true] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.pin[aria-pressed=true] svg { rotate: 0deg; fill: currentColor; }
+.sub { margin-top: 5px; font-size: 12.5px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.badge { font-weight: 650; color: var(--in-b); margin-right: 8px; white-space: nowrap; }
+.badge.out { color: var(--out-b); }
 /* \uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 \uC9C8\uBB38: \uBC1B\uC740 \uC0AC\uB78C\uB9C8\uB2E4 \uB2F5\uD588\uB294\uC9C0 */
-.people { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
+.people { display: flex; gap: 6px; flex-wrap: wrap; margin: 9px 0 0; }
 .people:empty { display: none; }
-.pp { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.pp { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.3; padding: 3px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
 .pp::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.pp.ok { color: var(--out-b); border-color: color-mix(in srgb, var(--out-b) 40%, var(--line)); }
-.pp.wait { color: var(--in-b); border-color: color-mix(in srgb, var(--in-b) 40%, var(--line)); }
-.pp.human { color: var(--note-b); border-color: color-mix(in srgb, var(--note-b) 40%, var(--line)); }
-.on .pp.wait::before, .on .pp.human::before { animation: beat 1.4s ease-in-out infinite; }
-.av { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--b); color: var(--card); font-size: 11px; font-weight: 700; flex: none; }
+.pp.ok { color: var(--out-b); border-color: color-mix(in srgb, var(--out-b) 35%, var(--line)); }
+.pp.wait { color: var(--in-b); border-color: color-mix(in srgb, var(--in-b) 35%, var(--line)); }
+.pp.human { color: var(--note-b); border-color: color-mix(in srgb, var(--note-b) 35%, var(--line)); }
 
 /* \uC8FC\uACE0\uBC1B\uC740 \uAE00 */
-.msgs { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
-.msg { max-width: min(88%, 660px); min-width: 0; }
+.msgs { list-style: none; margin: 14px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: min(86%, 640px); min-width: 0; }
 .msg.peer { align-self: flex-start; }
 .msg.mine { align-self: flex-end; }
 .msg.note { align-self: center; max-width: 92%; }
-.msg.agreement { align-self: stretch; max-width: none; margin-top: 8px; }
-.bubble { position: relative; padding: 9px 13px 10px; border-radius: 16px; background: var(--in); --b: var(--in-b); border: 1px solid color-mix(in srgb, var(--b) 22%, transparent); }
+.msg.agreement { align-self: stretch; max-width: none; margin-top: 4px; }
+.on .msg { transition: opacity .3s ease-out, translate .45s var(--ease); transition-delay: calc(var(--i, 0) * 40ms); }
+.bubble { position: relative; padding: 9px 13px 10px; border-radius: 14px; background: var(--in); --b: var(--in-b); }
 .peer .bubble { border-bottom-left-radius: 5px; }
 .mine .bubble { background: var(--out); --b: var(--out-b); border-bottom-right-radius: 5px; }
-.note .bubble { background: var(--note); --b: var(--note-b); border-radius: 12px; font-size: 13.5px; }
-.agreement .bubble { background: var(--agree); --b: var(--agree-b); border-width: 1.5px; border-color: color-mix(in srgb, var(--b) 55%, transparent); border-radius: 14px; padding: 14px 16px; }
+.note .bubble { background: var(--note); --b: var(--note-b); border-radius: 11px; font-size: 13.5px; padding: 7px 12px 8px; }
+.agreement .bubble { background: var(--agree); --b: var(--agree-b); padding: 13px 15px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--b) 35%, transparent); }
+/* \uC0C8\uB85C \uC628 \uAE00\uC5D0\uB294 \uD14C\uB450\uB9AC\uAC00 \uC7A0\uAE50 \uB458\uB838\uB2E4\uAC00 \uC0AC\uB77C\uC9C4\uB2E4 */
+.bubble::after { content: ''; position: absolute; inset: -3px; border-radius: inherit; border: 2px solid var(--b); opacity: 0; pointer-events: none; transition: opacity .9s ease-out; }
+.msg.fresh .bubble::after { opacity: .6; transition-duration: .2s; }
 .who { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center; font-size: 12.5px; font-weight: 650; color: var(--b); }
+.av { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--tone, var(--b)); color: var(--card); font-size: 11px; font-weight: 700; flex: none; }
 .hum { font-size: 11.5px; padding: 1px 7px; border-radius: 99px; background: color-mix(in srgb, var(--note-b) 18%, transparent); color: var(--note-b); }
 .dir { font-weight: 500; color: var(--muted); }
 .time { color: var(--muted); font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; margin-left: auto; }
 .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 3px; }
-.rest { visibility: hidden; }
-.caret { display: inline-block; width: 0; position: relative; }
-.caret::after { content: ''; position: absolute; left: 1px; bottom: -.2em; width: 2px; height: 1.15em; border-radius: 1px; background: var(--b); }
-.on .caret::after { animation: caret 1s steps(1) infinite; }
-@keyframes caret { 50% { opacity: 0; } }
-.stamp { position: absolute; right: 12px; top: -13px; padding: 3px 10px; border: 2px solid var(--agree-b); color: var(--agree-b); background: var(--card); border-radius: 8px; font-weight: 800; font-size: 12px; letter-spacing: .08em; rotate: -6deg; }
 details { margin-top: 6px; font-size: 13px; color: var(--muted); }
 summary { cursor: pointer; width: fit-content; }
 details .text { color: var(--text); }
 @supports (interpolate-size: allow-keywords) {
   :root { interpolate-size: allow-keywords; }
-  .on details::details-content { block-size: 0; overflow: clip; transition: block-size .45s ease, content-visibility .45s; transition-behavior: allow-discrete; }
+  .on details::details-content { block-size: 0; overflow: clip; transition: block-size .3s var(--ease), content-visibility .3s; transition-behavior: allow-discrete; }
   .on details[open]::details-content { block-size: auto; }
 }
-.on .msg { transition: opacity .5s ease-out, translate .8s var(--spring), scale .8s var(--spring), filter .5s ease-out; transition-delay: calc(var(--i, 0) * 45ms); }
-.typing { display: none; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--ring); }
+/* \uB204\uAD70\uAC00\uB97C \uAE30\uB2E4\uB9AC\uB294 \uB3D9\uC548: \uAE30\uB2E4\uB9AC\uAC8C \uD558\uB294 \uCABD\uC5D0 \uC810 \uC138 \uAC1C\uAC00 \uB6F4\uB2E4 */
+.typing { display: none; align-items: center; gap: 8px; margin-top: 12px; font-size: 12.5px; color: var(--ring); }
 .conv.act .typing { display: flex; }
 .typing.r { flex-direction: row-reverse; }
-.dots { display: inline-flex; gap: 4px; padding: 7px 10px; border-radius: 12px; background: color-mix(in srgb, var(--ring) 14%, transparent); }
-.dots i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .6; }
-.on .dots i { animation: hop 1.2s ease-in-out infinite; }
-.on .dots i:nth-child(2) { animation-delay: .15s; }
-.on .dots i:nth-child(3) { animation-delay: .3s; }
-@keyframes hop { 0%, 60%, 100% { translate: 0 0; opacity: .45; } 30% { translate: 0 -5px; opacity: 1; } }
+.typing .dots { padding: 7px 10px; border-radius: 11px; background: color-mix(in srgb, var(--ring) 12%, transparent); }
 .timer { font-variant-numeric: tabular-nums; font-weight: 650; }
 
 /* \uC544\uC9C1 \uB300\uD654\uAC00 \uC5C6\uC744 \uB54C */
-.empty { display: grid; place-items: center; gap: 12px; padding: 30px 16px 40px; color: var(--muted); text-align: center; }
+.empty { display: grid; place-items: center; gap: 10px; padding: 36px 16px 40px; color: var(--muted); text-align: center; font-size: 14px; border: 1px dashed var(--line); border-radius: 16px; }
 .empty[hidden] { display: none; }
-.radar { width: 88px; height: 88px; border-radius: 50%; position: relative; border: 1px solid var(--line); background: radial-gradient(circle, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%); }
-.radar::before { content: ''; position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(color-mix(in srgb, var(--accent) 55%, transparent), transparent 28%); }
-.radar::after { content: ''; position: absolute; inset: 38px; border-radius: 50%; background: var(--accent); }
-.on .radar::before { animation: rot 2.6s linear infinite; }
-.on .radar::after { animation: beat 1.6s ease-in-out infinite; }
+.empty svg { width: 44px; height: 44px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; opacity: .6; }
 
 /* \uC0C8 \uC18C\uC2DD \uC54C\uB9BC */
-#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; flex-direction: column; gap: 8px; width: min(360px, calc(100vw - 32px)); }
-.toast { position: relative; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; text-align: left; padding: 10px 12px 12px; border-radius: 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--card) 88%, transparent); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); box-shadow: var(--shadow); cursor: pointer; overflow: hidden; }
+#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; flex-direction: column; gap: 8px; width: min(350px, calc(100vw - 32px)); }
+.toast { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; text-align: left; padding: 11px 13px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); box-shadow: var(--pop); cursor: pointer; }
 .toast .tk { font-size: 12px; font-weight: 700; color: var(--in-b); }
 .toast .tk.k-answer { color: var(--out-b); } .toast .tk.k-note, .toast .tk.k-closed { color: var(--note-b); } .toast .tk.k-agreement { color: var(--agree-b); }
 .toast .tw { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast .ts { grid-column: 1 / -1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toast .life { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); transform-origin: 0 50%; }
-.on .toast { transition: opacity .3s ease, translate .7s var(--spring); }
-.on .toast .life { animation: life 5.2s linear forwards; }
-@keyframes life { to { scale: 0 1; } }
-.on .toast.out { opacity: 0; translate: 48px 0; }
+.on .toast { transition: opacity .3s ease-out, translate .45s var(--ease); }
+.on .toast.out { opacity: 0; translate: 14px 0; }
 
 /* \uC811\uADFC\uD0A4 \uCC3D */
-dialog { border: 1px solid var(--line); border-radius: 16px; padding: 18px 18px 14px; width: min(540px, calc(100vw - 32px)); background: var(--card); color: var(--text); box-shadow: 0 20px 60px rgba(0, 0, 0, .35); }
+dialog { border: 1px solid var(--line); border-radius: 16px; padding: 20px 20px 16px; width: min(540px, calc(100vw - 32px)); background: var(--card); color: var(--text); box-shadow: var(--pop); }
 dialog::backdrop { background: rgba(8, 9, 14, .5); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
-.on dialog[open] { animation: pop .5s var(--spring); }
-@keyframes pop { from { opacity: 0; scale: .9; translate: 0 12px; } }
+.on dialog[open] { animation: pop .35s var(--ease); }
+.on dialog[open]::backdrop { animation: fade .25s ease-out; }
+@keyframes pop { from { opacity: 0; scale: .96; translate: 0 8px; } }
+@keyframes fade { from { opacity: 0; } }
 dialog h2 { margin: 0 0 6px; font-size: 16px; }
 dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
-.code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 3em; max-height: 180px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px dashed var(--line); background: color-mix(in srgb, var(--accent) 7%, transparent); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+.code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 3em; max-height: 180px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--soft); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
 .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
-.chip.main { background: var(--accent); border-color: var(--accent); color: var(--card); font-weight: 600; }
 
 /* \uCC98\uC74C \uB098\uD0C0\uB0A0 \uB54C\uC758 \uCD9C\uBC1C \uBAA8\uC2B5. \uB9E8 \uBC14\uAE65\uC5D0 \uB46C\uC57C \uBE0C\uB77C\uC6B0\uC800\uAC00 \uC77D\uB294\uB2E4. */
 @starting-style {
-  .on .conv { opacity: 0; translate: 0 26px; scale: .96; filter: blur(8px); }
-  .on .msg { opacity: 0; scale: .92; filter: blur(6px); }
-  .on .msg.peer { translate: -28px 8px; }
-  .on .msg.mine { translate: 28px 8px; }
-  .on .msg.note, .on .msg.agreement { translate: 0 14px; }
-  .on .toast { opacity: 0; translate: 48px 0; }
+  .on .conv { opacity: 0; translate: 0 14px; }
+  .on .msg { opacity: 0; translate: 0 10px; }
+  .on .room { opacity: 0; translate: 0 8px; }
+  .on .toast { opacity: 0; translate: 14px 0; }
+  .on .sess { opacity: 0; }
+  /* \uB300\uD654\uB97C \uC5F4 \uB54C\uB294 \uCE74\uB4DC\uB9CC \uB5A0\uC624\uB978\uB2E4. \uC548\uC758 \uAE00\uC740 \uB530\uB85C \uC6C0\uC9C1\uC774\uC9C0 \uC54A\uB294\uB2E4. */
+  .on .wrap.quiet .msg { opacity: 1; translate: none; }
+  /* \uC790\uB9AC\uB9CC \uC62E\uAE34 \uBAA9\uB85D \uC904\uC740 \uB2E4\uC2DC \uB098\uD0C0\uB098\uB294 \uC6C0\uC9C1\uC784\uC744 \uD558\uC9C0 \uC54A\uB294\uB2E4 */
+  .on .room.still { opacity: 1; translate: none; }
 }
 </style>
 </head>
 <body>
-<canvas id="sky" aria-hidden="true"></canvas>
-<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
-<div class="bar" aria-hidden="true"></div>
 <header class="top">
   <div class="brand">
-    <svg class="logo" viewBox="-24 -24 48 48" aria-hidden="true"><circle class="lo" r="21"/><g class="lg"><path class="ll" d="M-7 0H7"/><circle class="l1" cx="-13" r="6"/><circle class="l2" cx="13" r="6"/></g></svg>
+    <svg class="logo" viewBox="0 0 28 28" aria-hidden="true"><path d="M9 14h10"/><circle class="l1" cx="7" cy="14" r="5"/><circle class="l2" cx="21" cy="14" r="5"/></svg>
     <h1>Coworker <span>\uB300\uD654</span></h1>
   </div>
   <div class="chips">
-    <span class="chip live" id="live"><i class="dot"></i><span id="liveText">\uC5F0\uACB0\uD558\uB294 \uC911</span></span>
+    <span class="live" id="live"><i class="beacon" aria-hidden="true"></i><span id="liveText">\uC5F0\uACB0\uD558\uB294 \uC911</span></span>
+    <button class="chip" id="issue" type="button">\uC811\uADFC\uD0A4 \uBC1C\uAE09</button>
     <button class="chip" id="follow" type="button">\uC0C8 \uAE00 \uB530\uB77C\uAC00\uAE30 \uB044\uAE30</button>
     <button class="chip" id="motion" type="button">\uBAA8\uC158 \uB044\uAE30</button>
   </div>
 </header>
 <main>
-  <section class="stage" id="stage" aria-label="\uC5F0\uACB0 \uC0C1\uD0DC">
-    <button class="chip key" id="issue" type="button">\uC811\uADFC\uD0A4 \uBC1C\uAE09</button>
-    <svg id="net" role="img" aria-label="\uC138\uC158 \uC5F0\uACB0 \uADF8\uB9BC"></svg>
-    <div class="stats" id="stats"></div>
+  <section class="panel" aria-label="\uC5F0\uACB0 \uC0C1\uD0DC">
+    <div class="net" id="net">
+      <svg id="wires" aria-hidden="true"></svg>
+      <div class="peers" id="peers"></div>
+      <p class="nopeer" id="nopeer" hidden>\uC544\uC9C1 \uC5F0\uACB0\uB41C \uC138\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \u300C\uC811\uADFC\uD0A4 \uBC1C\uAE09\u300D\uC73C\uB85C \uB3D9\uB8CC\uB97C \uCD08\uB300\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.</p>
+    </div>
     <div class="downs" id="downs"></div>
+    <div class="stats" id="stats"></div>
   </section>
-  <p class="me" id="me"></p>
-  <p class="refresh" id="refresh" role="status"></p>
-  <div class="filters" id="filters" role="group" aria-label="\uC138\uC158\uC744 \uACE8\uB77C \uBCF4\uAE30" hidden></div>
-  <div id="list"></div>
-  <div class="empty" id="empty" hidden><div class="radar" aria-hidden="true"></div><div id="emptyText">\uC544\uC9C1 \uC8FC\uACE0\uBC1B\uC740 \uC9C8\uBB38\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.</div></div>
+  <div class="info">
+    <p class="me" id="me"></p>
+    <p class="refresh" id="refresh" role="status"></p>
+  </div>
+  <div class="filterbar">
+    <div class="filters" id="filters" role="group" aria-label="\uC138\uC158\uC744 \uACE8\uB77C \uBCF4\uAE30" hidden></div>
+    <div class="filters" id="cats" role="group" aria-label="\uBD84\uB958\uB97C \uACE8\uB77C \uBCF4\uAE30" hidden></div>
+  </div>
+  <p class="plain" id="said" role="status"></p>
+  <div class="board" id="board" hidden>
+    <nav class="rooms" id="rooms" aria-label="\uB300\uD654 \uBAA9\uB85D"></nav>
+    <div class="pane" id="pane"></div>
+  </div>
+  <div class="empty" id="empty" hidden>
+    <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 12a4 4 0 0 1 4-4h18a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4H19l-7 6v-6a4 4 0 0 1-4-4z"/><path d="M38 19a4 4 0 0 1 2 3.5V32a4 4 0 0 1-4 4v5l-6-5h-8"/></svg>
+    <div id="emptyText">\uC544\uC9C1 \uC8FC\uACE0\uBC1B\uC740 \uC9C8\uBB38\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.</div>
+  </div>
 </main>
 <dialog id="keybox" aria-labelledby="keytitle">
   <h2 id="keytitle">\uC811\uADFC\uD0A4 (\uC5F0\uACB0 \uCF54\uB4DC)</h2>
@@ -27521,7 +27619,6 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
   </div>
 </dialog>
 <div id="toasts" role="log" aria-live="polite"></div>
-<canvas id="fx" aria-hidden="true"></canvas>
 <script>
 const KIND = { question: '\uC9C8\uBB38', answer: '\uB2F5', note: '\uC54C\uB9BC', closed: '\uB9C8\uAC10', agreement: '\uD569\uC758\uBB38' }
 // \uB300\uD654\uAC00 \uC9C0\uAE08 \uC5B4\uB514\uC5D0 \uC640 \uC788\uB294\uC9C0. \uB300\uD654\uB294 \uB300\uAC1C \uD569\uC758\uBB38 \uC5C6\uC774 \uC9C8\uBB38\uACFC \uB2F5\uC73C\uB85C \uB05D\uB09C\uB2E4. \uADF8\uB798\uC11C \uC138\uC158\uC774 \uC54C\uB824 \uC8FC\uB294 \u300C\uCC28\uB840\u300D\uB97C
@@ -27542,7 +27639,7 @@ const PHASE = {
   closed: '\uB9C8\uAC10 \xB7 \uB2E4\uB978 \uC0AC\uB78C\uC774 \uBA3C\uC800 \uB2F5\uD568',
   agreed: '\uD569\uC758\uBB38 \uC791\uC131\uB428',
 }
-// \uB204\uAD70\uAC00\uB97C \uAE30\uB2E4\uB9AC\uB294 \uB2E8\uACC4. \uCE74\uB4DC \uD14C\uB450\uB9AC\uAC00 \uB3CC\uACE0, \uAE30\uB2E4\uB9AC\uB294 \uCABD\uC5D0 \uC810 \uC138 \uAC1C\uAC00 \uB6F4\uB2E4.
+// \uB204\uAD70\uAC00\uB97C \uAE30\uB2E4\uB9AC\uB294 \uB2E8\uACC4. \uC0C1\uD0DC \uC810 \uB458\uB808\uB85C \uACE0\uB9AC\uAC00 \uD37C\uC9C0\uACE0, \uAE30\uB2E4\uB9AC\uAC8C \uD558\uB294 \uCABD\uC5D0 \uC810 \uC138 \uAC1C\uAC00 \uB6F4\uB2E4.
 const WAIT = {
   waiting_for_peer: '\uC0C1\uB300\uC758 \uB2F5\uC744 \uAE30\uB2E4\uB9AC\uB294 \uC911',
   your_turn: '\uC774\uCABD AI\uAC00 \uB2F5\uD560 \uCC28\uB840',
@@ -27573,8 +27670,8 @@ function phase(c) {
   return quiet ? 'read_no_answer' : 'your_turn'
 }
 const ANSWERS = { all: '\uBAA8\uB450 \uB2F5', one: '\uD55C \uBA85\uB9CC \uB2F5' }
-const SPRING_FN = 'linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1)'
-const SPRING = window.CSS && CSS.supports('transition-timing-function', 'linear(0, 1)') ? SPRING_FN : 'cubic-bezier(.34, 1.56, .64, 1)'
+// \uC6C0\uC9C1\uC784\uC5D0 \uC4F0\uB294 \uBE60\uB974\uAE30 \uACE1\uC120. \uBE68\uB9AC \uB098\uAC00\uC11C \uBD80\uB4DC\uB7FD\uAC8C \uBA4E\uB294\uB2E4. \uD280\uC5B4 \uB118\uC9C0 \uC54A\uB294\uB2E4.
+const EASE = 'cubic-bezier(.22, 1, .36, 1)'
 const root = document.documentElement
 const byId = id => document.getElementById(id)
 const time = at => new Date(at).toLocaleString('ko-KR', { hour12: false })
@@ -27623,351 +27720,121 @@ function fx(node, frames, options) {
   try { return node.animate(frames, options) } catch (e) { return null }
 }
 
-// \uBC30\uACBD\uC758 \uBCC4\uC790\uB9AC. \uC810\uC774 \uCC9C\uCC9C\uD788 \uB5A0\uB2E4\uB2C8\uACE0 \uAC00\uAE4C\uC6B4 \uC810\uB07C\uB9AC \uC120\uC774 \uC774\uC5B4\uC9C4\uB2E4. \uC0C8 \uAE00\uC774 \uC624\uBA74 \uBB3C\uACB0\uC774 \uD55C \uBC88 \uD37C\uC9C4\uB2E4.
-const sky = (() => {
-  const canvas = byId('sky')
-  const ctx = canvas.getContext('2d')
-  let w = 0, h = 0, points = [], waves = [], raf = 0, px = -1e4, py = -1e4, rgb = '120,150,255'
-  const make = () => ({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - .5) * .28, vy: (Math.random() - .5) * .28, r: Math.random() * 1.5 + .6, p: Math.random() * 6.28 })
-  function tone() {
-    const m = /^#([0-9a-f]{6})$/i.exec(getComputedStyle(root).getPropertyValue('--accent').trim())
-    if (m) rgb = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)).join(',')
-  }
-  function size() {
-    const dpr = Math.min(devicePixelRatio || 1, 2)
-    w = innerWidth
-    h = innerHeight
-    canvas.width = Math.round(w * dpr)
-    canvas.height = Math.round(h * dpr)
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    const n = Math.round(Math.min(90, Math.max(26, (w * h) / 17000)))
-    while (points.length < n) points.push(make())
-    points.length = n
-    tone()
-    paint(performance.now(), false)
-  }
-  function paint(now, step) {
-    ctx.clearRect(0, 0, w, h)
-    for (const p of points) {
-      if (step) {
-        p.x += p.vx
-        p.y += p.vy
-        const dx = p.x - px, dy = p.y - py, d2 = dx * dx + dy * dy
-        if (d2 < 16000 && d2 > 1) {
-          const f = ((16000 - d2) / 16000) * .7, d = Math.sqrt(d2)
-          p.x += (dx / d) * f
-          p.y += (dy / d) * f
-        }
-        if (p.x < -20) p.x = w + 20
-        else if (p.x > w + 20) p.x = -20
-        if (p.y < -20) p.y = h + 20
-        else if (p.y > h + 20) p.y = -20
-      }
-      ctx.fillStyle = 'rgba(' + rgb + ',' + (.3 + .25 * Math.sin(now / 900 + p.p)).toFixed(3) + ')'
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, p.r, 0, 6.2832)
-      ctx.fill()
-    }
-    ctx.lineWidth = 1
-    for (let i = 0; i < points.length; i++)
-      for (let j = i + 1; j < points.length; j++) {
-        const a = points[i], b = points[j], dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy
-        if (d2 > 16900) continue
-        ctx.strokeStyle = 'rgba(' + rgb + ',' + ((1 - Math.sqrt(d2) / 130) * .2).toFixed(3) + ')'
-        ctx.beginPath()
-        ctx.moveTo(a.x, a.y)
-        ctx.lineTo(b.x, b.y)
-        ctx.stroke()
-      }
-    waves = waves.filter(v => v.r < v.max)
-    for (const v of waves) {
-      if (step) v.r += 7
-      ctx.strokeStyle = 'rgba(' + rgb + ',' + ((1 - v.r / v.max) * .35).toFixed(3) + ')'
-      ctx.lineWidth = 2
-      ctx.beginPath()
-      ctx.arc(v.x, v.y, v.r, 0, 6.2832)
-      ctx.stroke()
-    }
-  }
-  function frame(now) {
-    raf = 0
-    if (!moving() || document.hidden) return
-    paint(now, true)
-    raf = requestAnimationFrame(frame)
-  }
-  function run() {
-    if (!raf && moving() && !document.hidden) raf = requestAnimationFrame(frame)
-    if (!moving()) {
-      waves = []
-      paint(0, false)
-    }
-  }
-  addEventListener('resize', size)
-  addEventListener('pointermove', e => { px = e.clientX; py = e.clientY }, { passive: true })
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { tone(); run() })
-  size()
-  return { run, wave(x, y) { if (moving()) waves.push({ x, y, r: 10, max: Math.max(w, h) * .6 }) } }
-})()
-
-// \uD569\uC758\uBB38\uC774 \uC624\uBA74 \uC0C9\uC885\uC774\uAC00 \uD130\uC9C4\uB2E4.
-const confetti = (() => {
-  const canvas = byId('fx')
-  const ctx = canvas.getContext('2d')
-  const colors = ['#8aa8ff', '#b9a0ff', '#62d28d', '#f0b84a', '#ff8a80', '#5fd3e6']
-  let parts = [], raf = 0, w = 0, h = 0, seen = 0
-  // \uC2DC\uAC04\uC73C\uB85C \uC6C0\uC9C1\uC778\uB2E4. \uD0ED\uC774 \uAC00\uB824\uC838 \uADF8\uB9AC\uAE30\uAC00 \uBA48\uCDC4\uB2E4\uAC00 \uB3CC\uC544\uC624\uBA74, \uC9C0\uB09C \uC870\uAC01\uC740 \uB0A8\uAE30\uC9C0 \uC54A\uACE0 \uBC14\uB85C \uCE58\uC6B4\uB2E4.
-  function frame(now) {
-    raf = 0
-    const dt = Math.min(3, (now - seen) / 16.7)
-    seen = now
-    ctx.clearRect(0, 0, w, h)
-    parts = parts.filter(p => now - p.born < 2400 && p.y < h + 40)
-    for (const p of parts) {
-      const age = now - p.born
-      p.vy += .3 * dt
-      p.vx *= Math.pow(.99, dt)
-      p.x += p.vx * dt
-      p.y += p.vy * dt
-      p.rot += p.vr * dt
-      ctx.save()
-      ctx.globalAlpha = age > 1600 ? Math.max(0, 1 - (age - 1600) / 800) : 1
-      ctx.translate(p.x, p.y)
-      ctx.rotate(p.rot)
-      ctx.fillStyle = p.color
-      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.abs(Math.cos(age / 150 + p.rot)))
-      ctx.restore()
-    }
-    if (parts.length && moving()) raf = requestAnimationFrame(frame)
-    else {
-      parts = []
-      ctx.clearRect(0, 0, w, h)
-    }
-  }
-  return {
-    burst(x, y) {
-      if (!moving()) return
-      const dpr = Math.min(devicePixelRatio || 1, 2)
-      w = innerWidth
-      h = innerHeight
-      canvas.width = Math.round(w * dpr)
-      canvas.height = Math.round(h * dpr)
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      for (let i = 0; i < 120; i++) {
-        const a = -Math.PI / 2 + (Math.random() - .5) * 2.4, v = 4 + Math.random() * 10
-        parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, w: 5 + Math.random() * 6, h: 8 + Math.random() * 6, rot: Math.random() * 6.28, vr: (Math.random() - .5) * .4, color: colors[i % colors.length], born: performance.now() })
-      }
-      if (!raf) {
-        seen = performance.now()
-        raf = requestAnimationFrame(frame)
-      }
-    },
-  }
-})()
-
-const list = byId('list')
+const pane = byId('pane'), rooms = byId('rooms'), board = byId('board')
+// \uC624\uB978\uCABD\uC5D0 \uC5F4\uC5B4 \uB454 \uB300\uD654. \uC0AC\uB78C\uC774 \uC67C\uCABD \uBAA9\uB85D\uC5D0\uC11C \uACE0\uB974\uAC70\uB098, \uC0C8 \uAE00\uC774 \uC624\uBA74 \uADF8 \uB300\uD654\uB85C \uBC14\uB010\uB2E4.
+let active = ''
 const empty = byId('empty')
 const toasts = byId('toasts')
 const cards = new Map()
 
+// \uC0C8\uB85C \uC628 \uAE00\uC5D0 \uD14C\uB450\uB9AC\uB97C \uC7A0\uAE50 \uB458\uB7EC \uC5B4\uB514\uAC00 \uBC14\uB00C\uC5C8\uB294\uC9C0 \uBCF4\uC778\uB2E4.
+function mark(node) {
+  node.classList.add('fresh')
+  clearTimeout(node.unmark)
+  node.unmark = setTimeout(() => node.classList.remove('fresh'), 1800)
+}
 function reveal(node) {
   node.scrollIntoView({ block: 'center', behavior: moving() ? 'smooth' : 'auto' })
-  fx(node, [{ scale: 1.03, filter: 'brightness(1.2)' }, { scale: 1, filter: 'brightness(1)' }], { duration: 800, easing: 'ease-out' })
+  mark(node)
 }
 
-// \uC5F0\uACB0 \uADF8\uB9BC. \uAC00\uC6B4\uB370\uAC00 \uC774 \uC138\uC158\uC774\uACE0 \uB458\uB808\uAC00 \uC5F0\uACB0\uB41C \uC138\uC158\uC774\uB2E4. \uAE00\uC774 \uC624\uAC00\uBA74 \uADF8 \uC120\uC744 \uB530\uB77C \uBE5B\uC774 \uB0A0\uC544\uAC04\uB2E4.
+// \uC5F0\uACB0 \uADF8\uB9BC. \uC67C\uCABD\uC774 \uC774 \uC138\uC158\uC774\uACE0, \uC5F0\uACB0\uB41C \uC138\uC158\uC774 \uC624\uB978\uCABD\uC5D0 \uC904\uC9C0\uC5B4 \uC120\uB2E4. \uC120\uC774 \uB458\uC744 \uC787\uB294\uB2E4.
+// \uAE00\uC774 \uC624\uAC00\uBA74 \uADF8 \uC120\uC744 \uB530\uB77C \uC810 \uD558\uB098\uAC00 \uBCF4\uB0B8 \uCABD\uC5D0\uC11C \uBC1B\uC740 \uCABD\uC73C\uB85C \uAC74\uB108\uAC00\uACE0, \uB2FF\uC740 \uCABD \uB458\uB808\uC5D0 \uACE0\uB9AC\uAC00 \uD55C \uBC88 \uD37C\uC9C4\uB2E4.
+// \uB2F5\uD560 \uCC28\uB840\uC778 \uCABD\uC5D0\uB294 \uC810 \uC138 \uAC1C\uAC00, \uC0AC\uB78C\uC5D0\uAC8C \uD655\uC778 \uC911\uC778 \uCABD\uC5D0\uB294 \uC774\uB984\uD45C\uAC00 \uBD99\uB294\uB2E4.
+// \uC138\uC158\uC744 \uB204\uB974\uBA74 \uADF8 \uC138\uC158\uC774 \uB4E4\uC5B4 \uC788\uB294 \uB300\uD654\uB9CC \uBCF4\uC778\uB2E4. \uB2E4\uC2DC \uB204\uB974\uBA74 \uBAA8\uB450 \uBCF4\uC778\uB2E4.
 const ME = ':me'
-const stage = (() => {
-  const box = byId('stage'), net = byId('net'), NS = 'http://www.w3.org/2000/svg'
-  const mk = (tag, cls, attrs) => {
-    const e = document.createElementNS(NS, tag)
-    if (cls) e.setAttribute('class', cls)
-    for (const k in attrs || {}) e.setAttribute(k, attrs[k])
-    return e
+const net = (() => {
+  const box = byId('net'), wires = byId('wires'), peersBox = byId('peers'), nopeer = byId('nopeer')
+  const NS = 'http://www.w3.org/2000/svg'
+  const tiles = new Map(), tones = new Map()
+  // \uC138\uC158\uB9C8\uB2E4 \uBE5B\uAE54 \uD558\uB098. \uC5EC\uB7FF\uC774 \uC788\uB294 \uBC29\uC758 \uAE00\uC5D0\uB3C4 \uAC19\uC740 \uBE5B\uAE54\uC744 \uC4F4\uB2E4.
+  const toneOf = key => {
+    if (!tones.has(key)) tones.set(key, 'var(--t' + ((tones.size % 6) + 1) + ')')
+    return tones.get(key)
   }
-  const defs = mk('defs'), grad = mk('radialGradient', '', { id: 'gme', cx: '35%', cy: '30%', r: '80%' })
-  const s1 = mk('stop', '', { offset: '0' }), s2 = mk('stop', '', { offset: '1' })
-  s1.style.stopColor = 'var(--accent2)'
-  s2.style.stopColor = 'var(--accent)'
-  grad.append(s1, s2)
-  defs.append(grad)
-  const linkLayer = mk('g'), packetLayer = mk('g'), nodeLayer = mk('g')
-  net.append(defs, linkLayer, packetLayer, nodeLayer)
-  const nodes = new Map()
-  let W = 0, H = 190, raf = 0, packets = [], shown = []
-
-  // \uC138\uC158\uC744 \uB204\uB974\uBA74 \uADF8 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uB9CC \uBCF4\uC778\uB2E4. \uB2E4\uC2DC \uB204\uB974\uBA74 \uBAA8\uB450 \uBCF4\uC778\uB2E4.
-  function open(key) {
-    setFilter(key)
-    byId('filters').scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
-  }
-  function node(key, kind) {
-    let n = nodes.get(key)
-    if (n) return n
-    const r = kind === 'me' ? 26 : kind === 'ghost' ? 15 : 20
-    const g = mk('g', 'node ' + kind), fl = mk('g', 'fl'), tip = mk('title')
-    const core = mk('circle', 'core', { r }), ini = mk('text', 'ini', { dy: '.35em' })
-    const orbit = mk('g', 'orbit')
-    orbit.append(mk('circle', '', { cx: r + 8, r: 3.2 }), mk('circle', '', { cx: -(r + 8), r: 2.2 }))
-    const hb = mk('g', 'hb', { transform: 'translate(' + (r * .78).toFixed(1) + ' ' + (-r * .78).toFixed(1) + ')' })
-    const mark = mk('text', '', { dy: '.35em' })
-    mark.textContent = '?'
-    hb.append(mk('circle', '', { r: 9 }), mark)
-    const nm = mk('text', 'nm', { y: r + 20 }), sub = mk('text', 'sub', { y: r + 35 })
-    fl.append(mk('circle', 'halo', { r: r + 9 }), orbit, core, ini, hb)
-    g.append(tip, fl, nm, sub)
-    fl.style.setProperty('--fd', (4 + Math.random() * 3).toFixed(1) + 's')
-    fl.style.setProperty('--fo', (-Math.random() * 5).toFixed(1) + 's')
-    nodeLayer.append(g)
-    n = { key, kind, g, fl, core, ini, nm, sub, tip, r, x: NaN, y: NaN, tx: 0, ty: 0, sign: 1, lk: null }
-    if (kind !== 'me') {
-      const lg = mk('g', 'lk' + (kind === 'ghost' ? ' ghost' : '')), paths = [mk('path', 'link'), mk('path', 'flow a'), mk('path', 'flow b')]
-      lg.append(...paths)
-      linkLayer.append(lg)
-      n.lk = { g: lg, paths }
-      g.setAttribute('tabindex', '0')
-      g.setAttribute('role', 'button')
-      g.addEventListener('click', () => open(key))
-      g.addEventListener('keydown', e => {
-        if (e.key !== 'Enter' && e.key !== ' ') return
-        e.preventDefault()
-        open(key)
-      })
-    }
-    nodes.set(key, n)
-    fx(fl, [{ scale: 0 }, { scale: 1 }], { duration: 800, easing: SPRING })
-    return n
-  }
-  function drop(n) {
-    nodes.delete(n.key)
-    if (n.lk) n.lk.g.remove()
-    const a = fx(n.g, [{ opacity: 1 }, { opacity: 0 }], { duration: 400, easing: 'ease-in' })
-    if (a) a.finished.then(() => n.g.remove(), () => n.g.remove())
-    else n.g.remove()
-  }
-  function label(n, name, sub, since) {
-    const chars = Array.from(name)
-    put(n.nm, chars.length > 18 ? chars.slice(0, 17).join('') + '\u2026' : name)
-    put(n.ini, (Array.from(name.trim())[0] || '?').toUpperCase())
-    put(n.tip, name + ' \xB7 ' + sub)
-    n.g.setAttribute('aria-label', name + ', ' + sub)
-    if (since) {
-      n.sub.dataset.pre = sub + ' '
-      if (n.sub.dataset.since !== since) {
-        n.sub.dataset.since = since
-        n.sub.textContent = sub + ' ' + clock(Date.now() - Date.parse(since))
-      }
+  function tile(key, kind) {
+    let t = tiles.get(key)
+    if (t) return t
+    const node = el(kind === 'peer' ? 'button' : 'div', 'sess ' + kind)
+    const avatar = el('span', 'avatar'), ini = el('span'), ring = el('i', 'ring'), info = el('span', 'sinfo'), name = el('span', 'sname'), sub = el('span', 'ssub'), about = el('span', 'ssub')
+    const tag = el('span', 'stag'), dots = el('span', 'dots'), tagText = el('span')
+    avatar.setAttribute('aria-hidden', 'true')
+    avatar.append(ini, ring, el('i', 'st'))
+    dots.setAttribute('aria-hidden', 'true')
+    dots.append(el('i'), el('i'), el('i'))
+    tag.append(dots, tagText)
+    info.append(name, sub)
+    node.append(avatar, info)
+    let wire = null
+    if (kind === 'me') {
+      info.append(about, tag)
+      box.insertBefore(node, peersBox)
     } else {
-      delete n.sub.dataset.since
-      put(n.sub, sub)
+      node.append(tag)
+      node.style.setProperty('--tone', toneOf(key))
+      wire = document.createElementNS(NS, 'path')
+      wire.setAttribute('class', kind === 'ghost' ? 'wire ghost' : 'wire')
+      wires.append(wire)
     }
+    if (kind === 'peer') {
+      node.type = 'button'
+      node.setAttribute('aria-pressed', 'false')
+      node.addEventListener('click', () => setFilter(key))
+    }
+    t = { key, kind, node, avatar, ini, ring, name, sub, about, tagText, wire, drawn: false }
+    tiles.set(key, t)
+    return t
   }
+  function drop(t) {
+    tiles.delete(t.key)
+    t.node.remove()
+    if (t.wire) t.wire.remove()
+  }
+  function fill(t, name, sub, about) {
+    put(t.ini, (Array.from(name.trim())[0] || '?').toUpperCase())
+    put(t.name, name)
+    put(t.sub, sub)
+    put(t.about, about)
+    const full = [name, sub, about].filter(Boolean).join(' \xB7 ')
+    if (t.node.title !== full) t.node.title = full
+  }
+  // \uC120\uC744 \uB2E4\uC2DC \uAE0B\uB294\uB2E4. \uB113\uC73C\uBA74 \uC606\uC73C\uB85C \uD718\uC5B4 \uC787\uACE0, \uC881\uC544\uC11C \uC138\uC158\uC774 \uC544\uB798\uB85C \uB0B4\uB824\uAC00\uBA74 \uB098\uBB47\uAC00\uC9C0\uCC98\uB7FC \uAEBE\uC5B4 \uC787\uB294\uB2E4.
+  // \uC790\uB9AC\uB294 \uD55C\uAEBC\uBC88\uC5D0 \uC7AC\uACE0, \uADF8 \uB4A4\uC5D0 \uD55C\uAEBC\uBC88\uC5D0 \uADF8\uB9B0\uB2E4.
   function layout() {
-    const me = nodes.get(ME)
-    if (!me) return
-    const peers = shown, n = peers.length
-    W = Math.max(280, box.clientWidth)
-    H = n > 6 ? 340 : n > 2 ? 290 : 190
-    net.setAttribute('viewBox', '0 0 ' + W + ' ' + H)
-    net.setAttribute('height', H)
-    const cy = H / 2 - 14
-    me.tx = n === 1 ? W * .28 : W / 2
-    me.ty = cy
-    if (n === 1) {
-      peers[0].tx = W * .72
-      peers[0].ty = cy
-      peers[0].sign = -1
-    } else {
-      const rx = Math.min(W * .38, 340), ry = H * .3
-      peers.forEach((p, i) => {
-        const a = (n === 2 ? Math.PI : -Math.PI / 2) + (i * 2 * Math.PI) / n
-        p.tx = W / 2 + Math.cos(a) * rx
-        p.ty = cy + Math.sin(a) * ry
-        p.sign = i % 2 ? 1 : -1
-      })
-    }
-    // \uC0C8\uB85C \uC0DD\uAE34 \uC138\uC158\uC740 \uC774 \uC138\uC158 \uC790\uB9AC\uC5D0\uC11C \uD280\uC5B4\uB098\uC628\uB2E4.
-    const still = !moving()
-    for (const p of [me].concat(peers))
-      if (isNaN(p.x) || still) {
-        const from = p === me || still || isNaN(me.x) ? p : me
-        p.x = from === p ? p.tx : me.x
-        p.y = from === p ? p.ty : me.y
+    const me = tiles.get(ME)
+    if (!me || !box.clientWidth) return
+    const tree = peersBox.offsetTop >= me.node.offsetTop + me.node.offsetHeight - 2
+    const hx = me.node.offsetLeft + me.avatar.offsetLeft + me.avatar.offsetWidth / 2, hy = me.node.offsetTop + me.avatar.offsetTop + me.avatar.offsetHeight + 7
+    const sx = me.node.offsetLeft + me.node.offsetWidth + 12, sy = me.node.offsetTop + me.node.offsetHeight / 2
+    const jobs = []
+    for (const t of tiles.values()) if (t.wire) jobs.push([t, t.node.offsetLeft + t.avatar.offsetLeft - 8, t.node.offsetTop + t.avatar.offsetTop + t.avatar.offsetHeight / 2])
+    const f = n => n.toFixed(1)
+    for (const [t, x2, y2] of jobs) {
+      let d = ''
+      if (tree) {
+        const r = Math.max(0, Math.min(10, x2 - hx, y2 - hy))
+        d = 'M' + f(hx) + ' ' + f(hy) + 'V' + f(y2 - r) + 'Q' + f(hx) + ' ' + f(y2) + ' ' + f(hx + r) + ' ' + f(y2) + 'H' + f(x2)
+      } else if (x2 > sx) {
+        const k = (x2 - sx) * .5
+        d = 'M' + f(sx) + ' ' + f(sy) + 'C' + f(sx + k) + ' ' + f(sy) + ' ' + f(x2 - k) + ' ' + f(y2) + ' ' + f(x2) + ' ' + f(y2)
       }
-    kick()
-  }
-  function ctrl(a, b) {
-    const dx = b.x - a.x, dy = b.y - a.y
-    return { x: (a.x + b.x) / 2 - dy * .16 * b.sign, y: (a.y + b.y) / 2 + dx * .16 * b.sign }
-  }
-  function draw() {
-    const me = nodes.get(ME)
-    for (const n of nodes.values()) {
-      n.g.style.transform = 'translate(' + n.x.toFixed(1) + 'px,' + n.y.toFixed(1) + 'px)'
-      if (!n.lk || !me) continue
-      const c = ctrl(me, n)
-      const d = 'M' + me.x.toFixed(1) + ' ' + me.y.toFixed(1) + 'Q' + c.x.toFixed(1) + ' ' + c.y.toFixed(1) + ' ' + n.x.toFixed(1) + ' ' + n.y.toFixed(1)
-      for (const p of n.lk.paths) p.setAttribute('d', d)
-    }
-  }
-  function pulse(n) {
-    const rip = mk('circle', 'rip', { r: n.r })
-    n.g.insertBefore(rip, n.g.children[1])
-    const a = fx(rip, [{ scale: 1, opacity: .8 }, { scale: 2.6, opacity: 0 }], { duration: 750, easing: 'ease-out' })
-    if (a) a.finished.then(() => rip.remove(), () => rip.remove())
-    else rip.remove()
-    fx(n.core, [{ scale: 1 }, { scale: 1.28 }, { scale: 1 }], { duration: 520, easing: 'ease-out' })
-  }
-  function fly(p, now) {
-    const me = nodes.get(ME), raw = (now - p.t0) / 900
-    if (raw < 0) return true
-    if (raw >= 1.2 || !me || !nodes.has(p.peer.key)) {
-      for (const d of p.dots) d.remove()
-      if (!p.hit) pulse(p.to)
-      return false
-    }
-    const c = ctrl(me, p.peer)
-    p.dots.forEach((d, i) => {
-      let t = Math.min(1, Math.max(0, raw - i * .035))
-      t = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
-      if (!p.out) t = 1 - t
-      const u = 1 - t
-      d.setAttribute('cx', (u * u * me.x + 2 * u * t * c.x + t * t * p.peer.x).toFixed(1))
-      d.setAttribute('cy', (u * u * me.y + 2 * u * t * c.y + t * t * p.peer.y).toFixed(1))
-      d.style.display = ''
-    })
-    if (raw >= 1 && !p.hit) {
-      p.hit = true
-      pulse(p.to)
-    }
-    return true
-  }
-  function tick(now) {
-    raf = 0
-    let busy = false
-    const glide = moving()
-    for (const n of nodes.values()) {
-      const dx = n.tx - n.x, dy = n.ty - n.y
-      if (glide && (Math.abs(dx) > .4 || Math.abs(dy) > .4)) {
-        n.x += dx * .13
-        n.y += dy * .13
-        busy = true
-      } else {
-        n.x = n.tx
-        n.y = n.ty
+      if (t.wire.getAttribute('d') !== d) t.wire.setAttribute('d', d)
+      // \uC0C8\uB85C \uC774\uC5B4\uC9C4 \uC138\uC158\uC740 \uC120\uC774 \uD55C \uBC88 \uADF8\uC5B4\uC9C0\uBA70 \uB098\uD0C0\uB09C\uB2E4.
+      if (d && !t.drawn) {
+        t.drawn = true
+        const length = t.wire.getTotalLength()
+        fx(t.wire, [{ strokeDasharray: length + ' ' + length, strokeDashoffset: length }, { strokeDasharray: length + ' ' + length, strokeDashoffset: 0 }], { duration: 700, easing: EASE })
       }
     }
-    draw()
-    packets = packets.filter(p => fly(p, now))
-    if (busy || packets.length) raf = requestAnimationFrame(tick)
-  }
-  function kick() {
-    if (!raf) raf = requestAnimationFrame(tick)
   }
   new ResizeObserver(layout).observe(box)
 
   return {
+    tone: toneOf,
     update(data, convs) {
-      const me = node(ME, 'me'), want = new Set([ME]), act = new Map()
+      const me = tile(ME, 'me'), want = new Set([ME]), act = new Map(), order = []
+      // \uB204\uAC00 \uB2F5\uD560 \uCC28\uB840\uC778\uC9C0(think), \uB204\uAC00 \uC0AC\uB78C\uC5D0\uAC8C \uBB3B\uB294 \uC911\uC778\uC9C0(human), \uADF8\uB9AC\uACE0 \uADF8 \uC77C\uC774 \uC120\uC758 \uC5B4\uB290 \uCABD\uC5D0 \uAC00 \uC788\uB294\uC9C0(toward: \uC0C1\uB300 \uCABD\uC774\uBA74 fwd, \uC774\uCABD\uC774\uBA74 back).
+      const toward = new Map()
       const flag = (key, what) => act.set(key, Object.assign(act.get(key) || {}, { [what]: true }))
       for (const c of convs) {
         const ph = phase(c)
@@ -27975,160 +27842,224 @@ const stage = (() => {
         else if (ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice') flag(ME, 'think')
         else if (ph === 'checking_with_your_human') flag(ME, 'human')
         else if (ph === 'peer_checking_with_their_human') flag(c.peer, 'human')
+        if (ph === 'waiting_for_peer' || ph === 'peer_checking_with_their_human') toward.set(c.peer, 'fwd')
+        else if (WAIT[ph] && !toward.has(c.peer)) toward.set(c.peer, 'back')
       }
-      label(me, data.me.name, data.me.open ? '\uC774 \uC138\uC158 \xB7 \uD3EC\uD2B8 ' + data.me.port : '\uC774 \uC138\uC158 \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798')
-      me.g.classList.toggle('closed', !data.me.open)
-      shown = []
-      const said = []
-      for (const l of (data.links || []).slice(0, 12)) {
-        const n = node(l.key, 'peer'), down = l.state !== 'connected'
+      const who = about => (about ? [about.app, about.model, about.effort].filter(Boolean).join(' \xB7 ') : '')
+      fill(me, data.me.name, data.me.open ? '\uC774 \uC138\uC158 \xB7 \uD3EC\uD2B8 ' + data.me.port : '\uC774 \uC138\uC158 \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798', who(data.me.about))
+      me.node.classList.toggle('closed', !data.me.open)
+      for (const l of (data.links || []).slice(0, 16)) {
+        const t = tile(l.key, 'peer'), down = l.state !== 'connected'
         want.add(l.key)
-        shown.push(n)
-        n.g.classList.toggle('down', down)
-        n.lk.g.classList.toggle('down', down)
-        const sub = down ? '\uB2E4\uC2DC \uBD99\uB294 \uC911' : l.via === 'relay' ? '\uC911\uACC4\uB85C \uC5F0\uACB0\uB428' : l.via === 'pickup' ? '\uC0C1\uB300\uAC00 \uAC00\uC838\uAC00\uB294 \uC911' : '\uC5F0\uACB0\uB428'
-        label(n, l.name, sub, down ? l.since : '')
-        said.push(l.name + ' ' + sub)
+        order.push(t)
+        t.node.classList.toggle('down', down)
+        t.wire.classList.toggle('down', down)
+        const state = down ? '\uB2E4\uC2DC \uBD99\uB294 \uC911' : l.via === 'relay' ? '\uC911\uACC4\uB85C \uC5F0\uACB0\uB428' : l.via === 'pickup' ? '\uC0C1\uB300\uAC00 \uAC00\uC838\uAC00\uB294 \uC911' : '\uC5F0\uACB0\uB428'
+        fill(t, l.name, [state, who(l.about)].filter(Boolean).join(' \xB7 '), '')
       }
       for (const c of (data.connecting || []).slice(0, 4)) {
-        const key = ':in:' + c.name, n = node(key, 'ghost')
+        const key = ':in:' + c.name, t = tile(key, 'ghost')
         want.add(key)
-        shown.push(n)
-        label(n, c.name, '\uC18C\uAC1C\uBC1B\uB294 \uC911')
-        said.push(c.name + ' \uC18C\uAC1C\uBC1B\uB294 \uC911')
+        order.push(t)
+        fill(t, c.name, '\uC18C\uAC1C\uBC1B\uB294 \uC911', '')
       }
-      for (const n of [...nodes.values()]) {
-        const a = act.get(n.key) || {}
-        n.g.classList.toggle('think', !!a.think)
-        n.g.classList.toggle('human', !!a.human)
-        if (!want.has(n.key)) drop(n)
+      for (const t of [...tiles.values()]) {
+        if (!want.has(t.key)) {
+          drop(t)
+          continue
+        }
+        const a = act.get(t.key) || {}
+        t.node.classList.toggle('human', !!a.human)
+        t.node.classList.toggle('think', !!a.think && !a.human)
+        put(t.tagText, a.human ? '\uC0AC\uB78C \uD655\uC778 \uC911' : a.think ? '\uB2F5\uD560 \uCC28\uB840' : '')
+        if (t.wire) {
+          t.wire.classList.toggle('fwd', toward.get(t.key) === 'fwd')
+          t.wire.classList.toggle('back', toward.get(t.key) === 'back')
+        }
       }
-      net.setAttribute('aria-label', said.length ? '\uC5F0\uACB0\uB41C \uC138\uC158 ' + said.length + '\uAC1C: ' + said.join(', ') : '\uC5F0\uACB0\uB41C \uC138\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4')
+      // \uC904 \uC120 \uCC28\uB840\uB97C \uB9DE\uCD98\uB2E4. \uB2EC\uB77C\uC9C4 \uAC83\uB9CC \uC62E\uAE34\uB2E4(\uC62E\uAE30\uBA74 \uB204\uB974\uB358 \uB2E8\uCD94\uAC00 \uCD08\uC810\uC744 \uC783\uB294\uB2E4).
+      let at = peersBox.firstElementChild
+      for (const t of order) {
+        if (t.node === at) at = at.nextElementSibling
+        else peersBox.insertBefore(t.node, at)
+      }
+      nopeer.hidden = order.length > 0
       layout()
     },
-    // \uAE00 \uD558\uB098\uAC00 from \uC5D0\uC11C to \uB85C \uB0A0\uC544\uAC04\uB2E4.
+    // \uAE00 \uD558\uB098\uAC00 from \uC5D0\uC11C to \uB85C \uAC74\uB108\uAC04\uB2E4. \uB2FF\uC73C\uBA74 \uBC1B\uC740 \uCABD \uB458\uB808\uC5D0 \uACE0\uB9AC\uAC00 \uD55C \uBC88 \uD37C\uC9C4\uB2E4.
     send(from, to, kind, delay) {
-      const a = nodes.get(from), b = nodes.get(to), me = nodes.get(ME)
-      if (!a || !b || !me || a === b) return
-      if (!moving()) return
-      const dots = []
-      for (let i = 0; i < 6; i++) {
-        const c = mk('circle', 'pkt k-' + kindOf(kind), { r: (5.5 - i * .8).toFixed(1) })
-        c.style.opacity = String(1 - i * .16)
-        c.style.display = 'none'
-        packetLayer.append(c)
-        dots.push(c)
+      const target = tiles.get(to), via = tiles.get(from === ME ? to : from)
+      if (!target || !moving()) return
+      const color = 'var(--' + (kind === 'answer' ? 'out-b' : kind === 'agreement' ? 'agree-b' : kind === 'question' ? 'in-b' : 'note-b') + ')'
+      const land = () => {
+        target.ring.style.setProperty('--c', color)
+        fx(target.ring, [{ opacity: .75, scale: 1 }, { opacity: 0, scale: 1.75 }], { duration: 700, easing: 'ease-out' })
       }
-      packets.push({ peer: a === me ? b : a, out: a === me, to: b, t0: performance.now() + (delay || 0), dots })
-      kick()
+      const wire = via && via.wire
+      if (!wire || !wire.getAttribute('d')) return void setTimeout(land, delay || 0)
+      const length = wire.getTotalLength(), steps = 14, frames = []
+      for (let i = 0; i <= steps; i++) {
+        const p = wire.getPointAtLength(length * (from === ME ? i / steps : 1 - i / steps))
+        // \uB5A0\uB0A0 \uB54C \uB098\uD0C0\uB098\uACE0, \uB2FF\uAE30 \uC870\uAE08 \uC804\uBD80\uD130 \uC605\uC5B4\uC9C4\uB2E4.
+        frames.push({ transform: 'translate(' + p.x.toFixed(1) + 'px, ' + p.y.toFixed(1) + 'px)', opacity: i === 0 || i === steps ? 0 : i === steps - 1 ? .5 : 1 })
+      }
+      const dot = document.createElementNS(NS, 'circle')
+      dot.setAttribute('class', 'spark')
+      dot.setAttribute('r', '3.5')
+      dot.style.setProperty('--c', color)
+      wires.append(dot)
+      // \uC2DC\uC791 \uC804\uACFC \uB05D\uB09C \uB4A4\uC5D0\uB294 \uBCF4\uC774\uC9C0 \uC54A\uAC8C \uC591\uCABD \uB05D \uBAA8\uC2B5\uC744 \uBD99\uB4E4\uC5B4 \uB454\uB2E4(fill: both). \uB05D\uB098\uBA74 \uC810\uC744 \uC9C0\uC6B4\uB2E4.
+      const run = dot.animate(frames, { duration: 800, delay: delay || 0, easing: 'cubic-bezier(.45, 0, .2, 1)', fill: 'both' })
+      let landed = false
+      const done = () => {
+        if (landed) return
+        landed = true
+        dot.remove()
+        land()
+      }
+      run.finished.then(done, done)
+      // \uB05D\uB0AC\uB2E4\uB294 \uC54C\uB9BC\uC774 \uC624\uC9C0 \uC54A\uC544\uB3C4 \uC810\uC774 \uB0A8\uC9C0 \uC54A\uAC8C \uD55C\uB2E4. \uD654\uBA74\uC774 \uAC00\uB824\uC838 \uC6C0\uC9C1\uC784\uC774 \uB2A6\uAC8C \uC2DC\uC791\uD560 \uC218 \uC788\uC73C\uBBC0\uB85C \uB109\uB109\uD788 \uAE30\uB2E4\uB9B0\uB2E4.
+      setTimeout(done, (delay || 0) + 4000)
     },
-    center() {
-      const r = box.getBoundingClientRect()
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
-    },
-    // \uACE8\uB77C \uB454 \uC138\uC158\uC5D0 \uD14C\uB450\uB9AC\uB97C \uB450\uB978\uB2E4.
+    // \uACE8\uB77C \uB454 \uC138\uC158\uACFC \uADF8 \uC120\uC744 \uB3C4\uB4DC\uB77C\uC9C0\uAC8C \uD55C\uB2E4.
     select(key) {
-      for (const n of nodes.values()) {
-        n.g.classList.toggle('sel', !!key && n.key === key)
-        if (n.kind === 'peer') n.g.setAttribute('aria-pressed', String(!!key && n.key === key))
+      for (const t of tiles.values()) {
+        const on = !!key && t.key === key
+        if (t.kind === 'peer') t.node.setAttribute('aria-pressed', String(on))
+        if (t.wire) t.wire.classList.toggle('sel', on)
       }
     },
   }
 })()
 
-// \uC22B\uC790\uAC00 \uBC14\uB00C\uBA74 \uC790\uB9AC\uB9C8\uB2E4 \uAD74\uB7EC\uC11C \uBC14\uB010\uB2E4.
+// \uC22B\uC790 \uB760. \uAC12\uC774 \uBC14\uB00C\uBA74 \uC0C8 \uC22B\uC790\uAC00 \uC544\uB798\uC5D0\uC11C \uC0B4\uC9DD \uC62C\uB77C\uC628\uB2E4.
 const stats = (() => {
   const box = byId('stats'), made = {}
-  function stat(key, label) {
-    if (made[key]) return made[key]
-    const wrap = el('div', 'stat'), num = el('span', 'num'), plain = el('span', 'plain'), text = el('span', '', label)
-    num.setAttribute('aria-hidden', 'true')
-    wrap.append(num, plain, text)
-    box.append(wrap)
-    return (made[key] = { wrap, num, plain, text, value: '' })
-  }
   return {
     set(key, label, n, hot) {
-      const s = stat(key, label), value = String(n)
+      let s = made[key]
+      if (!s) {
+        s = made[key] = { wrap: el('div', 'stat'), text: el('span'), num: el('b', 'num'), value: null }
+        s.wrap.append(s.text, s.num)
+        box.append(s.wrap)
+      }
       put(s.text, label)
       s.wrap.classList.toggle('hot', !!hot)
+      const value = String(n)
       if (s.value === value) return
+      if (s.value !== null) fx(s.num, [{ opacity: 0, translate: '0 7px' }, { opacity: 1, translate: '0 0' }], { duration: 320, easing: EASE })
       s.value = value
-      // \uAD74\uB7EC\uAC00\uB294 \uC22B\uC790 \uB760\uC5D0\uB294 0\uBD80\uD130 9\uAE4C\uC9C0\uAC00 \uB2E4 \uB4E4\uC5B4 \uC788\uB2E4. \uBCF5\uC0AC\uD558\uBA74 \uADF8\uAC83\uC774 \uB2E4 \uB538\uB824 \uC624\uBBC0\uB85C, \uB760\uB294 \uAFB8\uBC08\uC73C\uB85C \uADF8\uB9AC\uACE0 \uAC12\uC740 \uB530\uB85C \uC801\uB294\uB2E4.
-      put(s.plain, value + ' ')
-      while (s.num.children.length < value.length) {
-        const dg = el('span', 'dg'), strip = el('span')
-        for (let d = 0; d < 10; d++) {
-          const one = el('i')
-          one.dataset.d = String(d)
-          strip.append(one)
-        }
-        dg.append(strip)
-        s.num.prepend(dg)
-      }
-      while (s.num.children.length > value.length) s.num.firstChild.remove()
-      // \uC790\uB9AC\uAC00 \uC0C8\uB85C \uC0DD\uACBC\uC73C\uBA74 0 \uC5D0\uC11C \uAD74\uB7EC \uC62C\uB77C\uC624\uAC8C \uD55C \uBC15\uC790 \uB4A4\uC5D0 \uAC12\uC744 \uB123\uB294\uB2E4.
-      requestAnimationFrame(() => {
-        for (let i = 0; i < value.length; i++) if (s.num.children[i]) s.num.children[i].firstChild.style.setProperty('--d', value[i])
-      })
+      s.num.textContent = value
     },
   }
 })()
 
-// \uC0C8 \uAE00\uC740 \uD55C \uB0B1\uB9D0\uC529 \uC368 \uB0B4\uB824\uAC04\uB2E4. \uC790\uB9AC\uB294 \uBBF8\uB9AC \uC7A1\uC544 \uB450\uC5B4\uC11C \uC4F0\uB294 \uB3D9\uC548 \uD654\uBA74\uC774 \uBC00\uB9AC\uC9C0 \uC54A\uB294\uB2E4.
-function cuts(text) {
-  const out = []
-  if (window.Intl && Intl.Segmenter) for (const s of new Intl.Segmenter('ko', { granularity: 'word' }).segment(text)) out.push(s.index + s.segment.length)
-  else {
-    // \uB0B1\uB9D0 \uB098\uB204\uAE30\uAC00 \uC5C6\uB294 \uBE0C\uB77C\uC6B0\uC800: \uBE48\uCE78\uACFC \uAE00\uC790\uAC00 \uBC14\uB00C\uB294 \uC790\uB9AC\uC5D0\uC11C \uB04A\uB294\uB2E4.
-    let gap = text.slice(0, 1).trim() === ''
-    for (let i = 1; i < text.length; i++) {
-      const g = text[i].trim() === ''
-      if (g !== gap) out.push(i)
-      gap = g
-    }
-    out.push(text.length)
-  }
-  if (!out.length) out.push(text.length)
-  return out
+// \uBAA9\uB85D\uC758 \uCC28\uB840\uAC00 \uBC14\uB00C\uBA74 \uC904\uC774 \uC61B \uC790\uB9AC\uC5D0\uC11C \uC0C8 \uC790\uB9AC\uB85C \uBBF8\uB044\uB7EC\uC838 \uC628\uB2E4. \uBC14\uAFB8\uAE30 \uC804\uC5D0 \uC790\uB9AC\uB97C \uC7AC \uB450\uACE0(measure), \uBC14\uAFBC \uB4A4\uC5D0 \uB9DE\uCD98\uB2E4(settle).
+// \uC7AC\uB294 \uC77C\uACFC \uC6C0\uC9C1\uC774\uB294 \uC77C\uC744 \uC11E\uC9C0 \uC54A\uB294\uB2E4: \uBA3C\uC800 \uB2E4 \uC7AC\uACE0, \uADF8 \uB4A4\uC5D0 \uB2E4 \uC6C0\uC9C1\uC778\uB2E4.
+function measure() {
+  const before = new Map()
+  if (moving())
+    for (const v of cards.values())
+      if (!v.item.hidden) {
+        const r = v.item.getBoundingClientRect()
+        before.set(v, [r.left, r.top])
+      }
+  return before
 }
-function typeIn(node, text) {
-  if (!moving() || document.hidden || text.length < 2 || text.length > 6000) return
-  const at = cuts(text), typed = document.createTextNode(''), rest = el('span', 'rest', text)
-  node.replaceChildren(typed, el('span', 'caret'), rest)
-  const length = Math.min(2800, Math.max(450, text.length * 14)), t0 = performance.now()
-  let last = -1
-  const finish = () => {
-    if (node.typing !== finish) return
-    node.typing = null
-    node.textContent = text
-  }
-  const step = now => {
-    if (node.typing !== finish) return
-    if (!node.isConnected || !moving()) return finish()
-    const p = Math.min(1, (now - t0) / length), i = Math.min(at.length - 1, Math.floor(p * at.length))
-    if (i !== last) {
-      last = i
-      typed.data = text.slice(0, at[i])
-      rest.textContent = text.slice(at[i])
+function settle(before) {
+  const moved = [], far = Math.max(innerWidth, innerHeight)
+  for (const v of before.keys()) if (v.slide) v.slide.cancel()
+  for (const [v, at] of before)
+    if (v.item.isConnected && !v.item.hidden) {
+      const r = v.item.getBoundingClientRect()
+      moved.push([v, at[0] - r.left, at[1] - r.top])
     }
-    if (p < 1) requestAnimationFrame(step)
-    else finish()
-  }
-  node.typing = finish
-  requestAnimationFrame(step)
+  // \uC544\uC8FC \uBA40\uB9AC \uAC00\uB294 \uC904\uC740 \uD654\uBA74 \uD06C\uAE30\uB9CC\uD07C\uB9CC \uBBF8\uB044\uB7EC\uC9C4\uB2E4.
+  const cap = n => Math.max(-far, Math.min(far, n)).toFixed(1)
+  for (const [v, dx, dy] of moved)
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) v.slide = v.item.animate([{ translate: cap(dx) + 'px ' + cap(dy) + 'px' }, { translate: '0 0' }], { duration: 480, easing: EASE })
 }
+// \uBAA9\uB85D\uC758 \uC904\uC744 \uC815\uD55C \uCC28\uB840\uB300\uB85C \uB193\uB294\uB2E4. \uC788\uB294 \uC904\uC740 \uB2E4\uC2DC \uB9CC\uB4E4\uC9C0 \uC54A\uACE0 \uC790\uB9AC\uB9CC \uC62E\uAE34\uB2E4.
+// moveBefore \uB85C \uC62E\uAE30\uBA74 \uCD08\uC810\uACFC \uB3CC\uB358 \uC6C0\uC9C1\uC784\uC774 \uADF8\uB300\uB85C \uB0A8\uB294\uB2E4. \uADF8\uAC83\uC774 \uC5C6\uB294 \uBE0C\uB77C\uC6B0\uC800\uC5D0\uC11C\uB294 \uB5BC\uC5C8\uB2E4 \uBD99\uC774\uBBC0\uB85C,
+// \uB098\uD0C0\uB098\uB294 \uC6C0\uC9C1\uC784\uC774 \uB2E4\uC2DC \uB3CC\uC9C0 \uC54A\uAC8C \uD45C\uC2DC(still)\uB97C \uC7A0\uAE50 \uBD99\uC774\uACE0 \uCD08\uC810\uC744 \uB418\uB3CC\uB9B0\uB2E4.
+function place(order) {
+  const held = document.activeElement, canMove = Object.hasOwn(Element.prototype, 'moveBefore'), stills = []
+  let at = rooms.firstElementChild
+  for (const item of order) {
+    if (item === at) {
+      at = at.nextElementSibling
+      continue
+    }
+    if (item.parentNode !== rooms) rooms.insertBefore(item, at)
+    else if (canMove) rooms.moveBefore(item, at)
+    else {
+      item.classList.add('still')
+      stills.push(item)
+      rooms.insertBefore(item, at)
+    }
+  }
+  // \uB2E4\uC2DC \uBD99\uC778 \uC904\uC758 \uC2A4\uD0C0\uC77C\uC744 \uC5EC\uAE30\uC11C \uD55C \uBC88 \uACC4\uC0B0\uD558\uAC8C \uD55C\uB2E4. \uADF8\uB7EC\uBA74 \uCD9C\uBC1C \uBAA8\uC2B5\uC744 \uADF8 \uC790\uB9AC\uC5D0\uC11C \uC9C0\uB098\uAC00\uBBC0\uB85C \uD45C\uC2DC\uB97C \uBC14\uB85C \uB5C4 \uC218 \uC788\uB2E4.
+  for (const item of stills) getComputedStyle(item).opacity
+  for (const item of stills) item.classList.remove('still')
+  if (held && held !== document.activeElement && rooms.contains(held)) held.focus({ preventScroll: true })
+}
+// \uBAA9\uB85D \uC548\uC5D0\uC11C\uB9CC \uAD74\uB824\uC11C \uADF8 \uC904\uC774 \uBCF4\uC774\uAC8C \uD55C\uB2E4. \uD654\uBA74 \uC804\uCCB4\uB294 \uAC74\uB4DC\uB9AC\uC9C0 \uC54A\uB294\uB2E4.
+function showItem(item) {
+  const a = item.getBoundingClientRect(), b = rooms.getBoundingClientRect()
+  const dx = a.left < b.left ? a.left - b.left : a.right > b.right ? a.right - b.right : 0
+  const dy = a.top < b.top ? a.top - b.top : a.bottom > b.bottom ? a.bottom - b.bottom : 0
+  if (dx || dy) rooms.scrollBy({ left: dx, top: dy, behavior: moving() ? 'smooth' : 'auto' })
+}
+// \uC624\uB978\uCABD\uC5D0 \uC5F4 \uB300\uD654\uB97C \uACE0\uB978\uB2E4. \uC5F4\uB9AC\uB294 \uB300\uD654\uB294 \uCE74\uB4DC\uB9CC \uB5A0\uC624\uB974\uACE0, \uC548\uC758 \uAE00\uC740 \uB530\uB85C \uC6C0\uC9C1\uC774\uC9C0 \uC54A\uB294\uB2E4.
+// byHand: \uC0AC\uB78C\uC774 \uBAA9\uB85D\uC5D0\uC11C \uACE8\uB790\uB2E4. \uAE34 \uB300\uD654\uB97C \uC77D\uB2E4\uAC00 \uB2E4\uB978 \uB300\uD654\uB85C \uAC00\uB3C4 \uCC98\uC74C\uBD80\uD130 \uBCF4\uC774\uAC8C \uD654\uBA74\uC744 \uC62C\uB9B0\uB2E4.
+function activate(id, byHand) {
+  const next = cards.get(id)
+  if (!next) return
+  active = id
+  for (const v of cards.values()) {
+    const on = v === next
+    v.item.setAttribute('aria-current', String(on))
+    if (on && v.wrap.hidden) {
+      v.wrap.classList.add('quiet')
+      v.wrap.hidden = false
+      for (const node of v.msgs.children) getComputedStyle(node).opacity
+      v.wrap.classList.remove('quiet')
+    } else if (!on && !v.wrap.hidden) v.wrap.hidden = true
+  }
+  if (next.unseen) {
+    next.unseen = false
+    next.item.classList.remove('unseen')
+  }
+  showItem(next.item)
+  if (byHand) {
+    const top = next.wrap.getBoundingClientRect().top
+    if (top < 60) scrollBy({ top: top - 76, behavior: moving() ? 'smooth' : 'auto' })
+  }
+}
+// \uB300\uD654\uB97C \uB9E8 \uC704\uC5D0 \uACE0\uC815\uD558\uAC70\uB098 \uD47C\uB2E4. \uC138\uC158\uC774 \uAE30\uC5B5\uD558\uACE0, \uBC14\uB010 \uCC28\uB840\uB294 \uC138\uC158\uC774 \uBC00\uC5B4 \uC8FC\uB294 \uC0C8 \uB0B4\uC6A9\uC73C\uB85C \uADF8\uB824\uC9C4\uB2E4.
+// \uC77D\uC5B4 \uC8FC\uB294 \uD504\uB85C\uADF8\uB7A8\uC5D0\uB294 \uACB0\uACFC\uB97C \uD55C \uBC88\uB9CC \uC54C\uB9B0\uB2E4.
+const said = byId('said')
+async function togglePin(v) {
+  const want = !v.pinned
+  let ok = false
+  try {
+    const res = await fetch(location.pathname + '/pin', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ threads: v.threads, pinned: want }) })
+    ok = res.ok
+  } catch (e) {}
+  said.textContent = !ok ? '\uACE0\uC815\uC744 \uBC14\uAFB8\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.' : '\u300C' + v.subject.textContent + '\u300D \uB300\uD654' + (want ? '\uB97C \uB9E8 \uC704\uC5D0 \uACE0\uC815\uD588\uC2B5\uB2C8\uB2E4.' : '\uC758 \uACE0\uC815\uC744 \uD480\uC5C8\uC2B5\uB2C8\uB2E4.')
+}
+const PIN_PATH = 'M5.5 2h5v1.2l-1 .8v3.2l2 1.8v1H8.6V14L8 15.2 7.4 14v-4H4.5V9l2-1.8V4l-1-.8z'
 
 function toast(n) {
   const b = el('button', 'toast')
   b.type = 'button'
   b.append(
     el('span', 'tk k-' + (n.m.noAnswer ? 'note' : kindOf(n.m.kind)), '\uC0C8 ' + (n.m.noAnswer ? '\uC54C\uB9BC' : KIND[n.m.kind] ?? n.m.kind)),
-    el('span', 'tw', n.m.from === 'me' ? '\uB098 \u2192 ' + n.c.peerName : n.c.peerName + ' \u2192 \uB098'),
+    el('span', 'tw', (n.m.from === 'me' ? '\uB098 \u2192 ' + n.c.peerName : n.c.peerName + ' \u2192 \uB098') + (n.c.category ? ' \xB7 ' + n.c.category : '')),
     el('span', 'ts', n.c.subject),
-    el('i', 'life'),
   )
   b.addEventListener('click', () => {
+    activate(n.v.id, false)
     reveal(n.node)
     dismiss(b)
   })
@@ -28144,58 +28075,78 @@ async function dismiss(b) {
   if (running.length) await Promise.race([Promise.allSettled(running.map(a => a.finished)), new Promise(r => setTimeout(r, 900))])
   b.remove()
 }
-async function leave(wrap) {
-  wrap.classList.add('gone')
-  const running = wrap.firstChild.getAnimations ? wrap.firstChild.getAnimations() : []
-  if (moving() && running.length) await Promise.race([Promise.allSettled(running.map(a => a.finished)), new Promise(r => setTimeout(r, 900))])
-  wrap.remove()
-}
-
-function makeCard() {
+function makeCard(id) {
   const wrap = el('div', 'wrap'), card = el('section', 'conv'), head = el('div', 'head')
-  const badge = el('span', 'badge'), subject = el('h2', 'subject'), status = el('span', 'status'), stext = el('span'), agoEl = el('span', 'ago')
-  const SVG = 'http://www.w3.org/2000/svg', ck = document.createElementNS(SVG, 'svg'), tick = document.createElementNS(SVG, 'path')
-  ck.setAttribute('class', 'ck')
-  ck.setAttribute('viewBox', '0 0 16 16')
-  ck.setAttribute('aria-hidden', 'true')
-  tick.setAttribute('d', 'M3 8.5l3.2 3L13 4.5')
-  ck.append(tick)
+  const cat = el('span', 'cat'), subject = el('h2', 'subject'), status = el('span', 'status'), stext = el('span'), agoEl = el('span', 'ago')
+  const SVG = 'http://www.w3.org/2000/svg'
+  const icon = (cls, d) => {
+    const svg = document.createElementNS(SVG, 'svg'), path = document.createElementNS(SVG, 'path')
+    if (cls) svg.setAttribute('class', cls)
+    svg.setAttribute('viewBox', '0 0 16 16')
+    svg.setAttribute('aria-hidden', 'true')
+    path.setAttribute('d', d)
+    svg.append(path)
+    return svg
+  }
+  const ck = icon('ck', 'M3 8.5l3.2 3L13 4.5')
   status.append(el('i', 'sdot'), ck, stext, agoEl)
-  head.append(badge, subject, status)
-  const meta = el('div', 'meta'), msgs = el('ol', 'msgs'), typing = el('div', 'typing'), dots = el('span', 'dots'), tlabel = el('span'), timer = el('span', 'timer')
+  // \uB9E8 \uC704\uC5D0 \uACE0\uC815\uD558\uB294 \uB2E8\uCD94. \uC774\uB984\uC740 \uADF8\uB300\uB85C \uB450\uACE0, \uB20C\uB9B0 \uC0C1\uD0DC\uB85C \uC9C0\uAE08 \uACE0\uC815\uB3FC \uC788\uB294\uC9C0\uB97C \uC54C\uB9B0\uB2E4.
+  const pin = el('button', 'pin')
+  pin.type = 'button'
+  pin.setAttribute('aria-pressed', 'false')
+  pin.title = '\uB9E8 \uC704\uC5D0 \uACE0\uC815'
+  pin.append(icon('', PIN_PATH), el('span', '', '\uACE0\uC815'))
+  head.append(cat, subject, status, pin)
+  const sub = el('div', 'sub'), badge = el('span', 'badge'), meta = el('span', 'meta')
+  sub.append(badge, meta)
+  const people = el('div', 'people'), msgs = el('ol', 'msgs'), typing = el('div', 'typing'), dots = el('span', 'dots'), tlabel = el('span'), timer = el('span', 'timer')
   dots.append(el('i'), el('i'), el('i'))
   dots.setAttribute('aria-hidden', 'true')
   typing.append(dots, tlabel, timer)
-  const glow = el('div', 'fxl'), shine = el('i', 'shine'), people = el('div', 'people')
-  glow.setAttribute('aria-hidden', 'true')
-  glow.append(shine)
-  card.append(glow, head, meta, people, msgs, typing)
+  card.append(head, sub, people, msgs, typing)
   wrap.append(card)
-  return { wrap, card, badge, subject, status, stext, tick, shine, ago: agoEl, meta, people, msgs, typing, tlabel, timer, seen: new Map(), st: undefined, label: '', peers: [] }
+  wrap.hidden = true
+  // \uC67C\uCABD \uBAA9\uB85D\uC758 \uD55C \uC904: \uBD84\uB958\uC640 \uC81C\uBAA9, \uB9C8\uC9C0\uB9C9 \uAE00\uC758 \uB54C, \uC0C1\uD0DC, \uC0C1\uB300, \uADF8\uB9AC\uACE0 \uACE0\uC815\uD588\uB294\uC9C0\uC640 \uC0C8 \uAE00\uC774 \uC654\uB294\uC9C0. \uB204\uB974\uBA74 \uC774 \uB300\uD654\uAC00 \uC5F4\uB9B0\uB2E4.
+  const item = el('button', 'room'), ititle = el('span', 'rtitle'), icat = el('span', 'rcat'), isub = el('span', 'rsub'), iago = el('span', 'rago')
+  const istate = el('span', 'rstate'), ilabel = el('span', 'rlabel'), iwho = el('span', 'rwho'), imarks = el('span', 'rmarks'), ipin = el('span', 'rpin'), inew = el('span', 'rnew')
+  item.type = 'button'
+  item.dataset.id = id
+  item.setAttribute('aria-current', 'false')
+  ititle.append(icat, isub)
+  iago.dataset.pre = ''
+  istate.append(el('i', 'sdot'), ilabel, iwho)
+  ipin.append(icon('', PIN_PATH), el('span', 'plain', '\uACE0\uC815\uB428'))
+  inew.append(el('span', 'plain', '\uC0C8 \uAE00'))
+  imarks.append(ipin, inew)
+  item.append(ititle, iago, istate, imarks)
+  const v = { id, wrap, card, badge, cat, subject, status, stext, tick: ck.firstChild, pin, ago: agoEl, meta, people, msgs, typing, tlabel, timer, item, icat, isub, iago, ilabel, iwho, unseen: false, seen: new Map(), st: undefined, label: '', peers: [], category: '', threads: [], pinned: false }
+  pin.addEventListener('click', () => togglePin(v))
+  item.addEventListener('click', () => activate(id, true))
+  return v
 }
 function bubble(c, m, everyone) {
   const cls = m.kind === 'agreement' ? 'agreement' : m.kind === 'note' || m.kind === 'closed' ? 'note' : m.from === 'me' ? 'mine' : 'peer'
   const li = el('li', 'msg ' + cls), b = el('div', 'bubble'), who = el('div', 'who'), at = el('time', 'time', shortTime(m.at))
   at.dateTime = m.at
   at.title = time(m.at)
-  // \uC5EC\uB7FF\uC774 \uC788\uB294 \uBC29\uC5D0\uC11C\uB294 \uB204\uAC00 \uD55C \uB9D0\uC778\uC9C0 \uC5BC\uAD74(\uC774\uB984 \uCCAB \uAE00\uC790)\uC744 \uBD99\uC778\uB2E4.
-  if (everyone && m.from !== 'me') who.append(el('span', 'av', (Array.from(c.peerName.trim())[0] || '?').toUpperCase()))
+  // \uC5EC\uB7FF\uC774 \uC788\uB294 \uBC29\uC5D0\uC11C\uB294 \uB204\uAC00 \uD55C \uB9D0\uC778\uC9C0 \uC774\uB984 \uCCAB \uAE00\uC790\uB97C \uBD99\uC778\uB2E4. \uBE5B\uAE54\uC740 \uC5F0\uACB0 \uADF8\uB9BC\uC758 \uADF8 \uC138\uC158\uACFC \uAC19\uB2E4.
+  if (everyone && m.from !== 'me') {
+    const av = el('span', 'av', (Array.from(c.peerName.trim())[0] || '?').toUpperCase())
+    av.style.setProperty('--tone', net.tone(c.peer))
+    who.append(av)
+  }
   who.append(el('span', '', m.noAnswer ? '\uC54C\uB9BC \xB7 \uB2F5 \uD544\uC694 \uC5C6\uC74C' : KIND[m.kind] ?? m.kind))
   if (m.human) who.append(el('span', 'hum', '\uC0AC\uB78C\uC774 \uC815\uD568'))
   const shared = everyone && m.from === 'me' && m.kind === 'question'
   who.append(el('span', 'dir', shared ? '\uB098 \u2192 ' + everyone.join(', ') : m.from === 'me' ? '\uB098 \u2192 ' + c.peerName : c.peerName + ' \u2192 \uB098'), at)
   const text = el('div', 'text', m.text)
   b.append(who, text)
-  if (m.kind === 'agreement') b.append(el('span', 'stamp', '\uD569\uC758'))
   if (m.context) {
     const d = el('details')
     d.append(el('summary', '', '\uD568\uAED8 \uBCF4\uB0B8 \uBC30\uACBD'), el('div', 'text', m.context))
     b.append(d)
   }
   li.append(b)
-  li.body = text
-  // \uC368 \uB0B4\uB824\uAC00\uB294 \uC911\uC5D0 \uB204\uB974\uBA74 \uBC14\uB85C \uB05D\uAE4C\uC9C0 \uBCF4\uC5EC \uC900\uB2E4.
-  li.addEventListener('click', () => text.typing && text.typing())
   return li
 }
 // \uC5EC\uB7EC \uC138\uC158\uC5D0 \uD55C \uBC88\uC5D0 \uBCF4\uB0B8 \uC9C8\uBB38\uC740 \uBC29 \uD558\uB098\uB85C \uBB36\uB294\uB2E4. \uB2E8\uCCB4 \uB300\uD654\uBC29\uCC98\uB7FC \uC9C8\uBB38\uC740 \uD55C \uBC88\uB9CC \uBCF4\uC774\uACE0, \uB2F5\uC740 \uC628 \uCC28\uB840\uB300\uB85C \uD55C \uBC29\uC5D0 \uC313\uC778\uB2E4
@@ -28232,10 +28183,24 @@ function paint(v, room, live, index, news) {
   const mine = c.startedBy === 'me', first = c.messages[0]
   const names = convs.map(one => one.peerName)
   v.peers = convs.map(one => one.peer)
+  v.category = c.category || ''
+  put(v.cat, v.category)
+  // \uACE0\uC815\uC740 \uBC29 \uC804\uCCB4\uC5D0 \uAC74\uB2E4. \uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 \uC9C8\uBB38\uC740 \uADF8 \uB300\uD654\uB4E4\uC744 \uD55C \uBC88\uC5D0 \uACE0\uC815\uD55C\uB2E4.
+  v.threads = convs.map(one => one.id)
+  if (v.pinned !== !!room.pinned) {
+    v.pinned = !!room.pinned
+    v.card.classList.toggle('pinned', v.pinned)
+    v.item.classList.toggle('pinned', v.pinned)
+    v.pin.setAttribute('aria-pressed', String(v.pinned))
+    v.pin.title = v.pinned ? '\uACE0\uC815 \uD480\uAE30' : '\uB9E8 \uC704\uC5D0 \uACE0\uC815'
+  }
   const what = first && first.noAnswer ? '\uC54C\uB9BC' : '\uC9C8\uBB38'
   put(v.badge, group ? '\uC5EC\uB7FF\uC5D0\uAC8C \uBCF4\uB0B8 ' + what : mine ? '\uBCF4\uB0B8 ' + what : '\uBC1B\uC740 ' + what)
   v.badge.classList.toggle('out', mine)
   put(v.subject, c.subject)
+  put(v.isub, c.subject)
+  put(v.icat, v.category)
+  put(v.iwho, names.join(', '))
   const where = convs.map(one => one.peerName + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
   const mode = c.ask ? ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
   const others = c.ask ? (group ? ' \xB7' + mode : ' \xB7 \uD568\uAED8 \uBC1B\uC740 \uC0AC\uB78C: ' + c.ask.to.join(', ') + mode) : ''
@@ -28252,14 +28217,15 @@ function paint(v, room, live, index, news) {
     v.card.dataset.st = PHASE[ph] ? ph : ''
     v.card.classList.toggle('act', !!WAIT[ph])
     put(v.stext, label)
+    put(v.ilabel, label)
+    v.item.dataset.st = PHASE[ph] ? ph : ''
+    v.item.classList.toggle('act', !!WAIT[ph])
     v.typing.classList.toggle('r', ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice' || ph === 'checking_with_your_human')
     if (live && was !== undefined) {
-      fx(v.status, [{ rotate: 'x 90deg', opacity: 0 }, { rotate: 'x 0deg', opacity: 1 }], { duration: 600, easing: SPRING })
-      // \uB2F5\uC774 \uC640\uC11C \uC9C8\uBB38\uACFC \uB2F5\uC774 \uB05D\uB0AC\uB2E4. \uAC00\uC7A5 \uD754\uD55C \uB05D\uC774\uBBC0\uB85C \uC5EC\uAE30\uC5D0\uB3C4 \uC791\uC740 \uB9C8\uBB34\uB9AC\uB97C \uB454\uB2E4: \uCCB4\uD06C\uAC00 \uADF8\uB824\uC9C0\uACE0 \uBE5B\uC774 \uD55C \uBC88 \uC9C0\uB098\uAC04\uB2E4.
-      if (changed && (ph === 'answered' || ph === 'answered_by_me')) {
-        fx(v.tick, [{ strokeDashoffset: 16 }, { strokeDashoffset: 0 }], { duration: 600, delay: 300, easing: 'ease-out', fill: 'backwards' })
-        fx(v.shine, [{ translate: '-130% 0' }, { translate: '330% 0' }], { duration: 1100, easing: 'ease-in-out' })
-      }
+      // \uC0C1\uD0DC\uAC00 \uBC14\uB00C\uBA74 \uC774\uB984\uD45C\uAC00 \uC544\uB798\uC5D0\uC11C \uC62C\uB77C\uC624\uBA70 \uBC14\uB010\uB2E4.
+      fx(v.status, [{ opacity: 0, translate: '0 5px' }, { opacity: 1, translate: '0 0' }], { duration: 320, easing: EASE })
+      // \uB2F5\uC774 \uC640\uC11C \uC9C8\uBB38\uACFC \uB2F5\uC774 \uB05D\uB0AC\uB2E4. \uAC00\uC7A5 \uD754\uD55C \uB05D\uC774\uB2E4: \uCCB4\uD06C\uAC00 \uD55C \uBC88 \uADF8\uB824\uC9C4\uB2E4.
+      if (changed && (ph === 'answered' || ph === 'answered_by_me' || ph === 'agreed')) fx(v.tick, [{ strokeDashoffset: 16 }, { strokeDashoffset: 0 }], { duration: 450, delay: 180, easing: 'ease-out', fill: 'backwards' })
     }
   }
   put(v.tlabel, !WAIT[ph] ? '' : group ? WAIT[ph] + ': ' + pending.map(one => one.peerName).join(', ') : WAIT[ph])
@@ -28291,6 +28257,8 @@ function paint(v, room, live, index, news) {
   if (newest && v.ago.dataset.ago !== newest) {
     v.ago.dataset.ago = newest
     v.ago.textContent = '\xB7 ' + ago(Date.now() - Date.parse(newest))
+    v.iago.dataset.ago = newest
+    v.iago.textContent = ago(Date.now() - Date.parse(newest))
   }
   const ids = new Set(items.map(it => it.id))
   for (const [id, node] of v.seen)
@@ -28304,7 +28272,6 @@ function paint(v, room, live, index, news) {
     let node = v.seen.get(it.id)
     if (!node) {
       node = bubble(it.c, it.m, group ? names : null)
-      if (!live) node.style.setProperty('--i', Math.min(index + i + 1, 10))
       v.seen.set(it.id, node)
       v.msgs.insertBefore(node, after)
       if (live) news.unshift({ c: it.c, m: it.m, v, node })
@@ -28314,36 +28281,51 @@ function paint(v, room, live, index, news) {
 }
 
 // \uC5EC\uB7EC \uC138\uC158\uACFC \uC774\uC5B4\uC838 \uC788\uC73C\uBA74 \uC138\uC158\uC744 \uACE8\uB77C \uADF8 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uB9CC \uBCF8\uB2E4. \uC5F0\uACB0 \uADF8\uB9BC\uC758 \uC138\uC158\uC744 \uB20C\uB7EC\uB3C4 \uB41C\uB2E4.
-const filters = byId('filters')
+const filters = byId('filters'), cats = byId('cats')
 let filter = ''
+// \uBD84\uB958\uB85C\uB3C4 \uACE8\uB77C \uBCF8\uB2E4. \uBE44\uBA74 \uC804\uCCB4, ':none' \uC774\uBA74 \uBD84\uB958\uAC00 \uC5C6\uB294 \uB300\uD654\uB2E4.
+let catFilter = ''
+const filtered = v => (!!filter && !v.peers.includes(filter)) || (!!catFilter && (catFilter === ':none' ? v.category !== '' : v.category !== catFilter))
 function setFilter(key) {
   filter = filter === key ? '' : key
   applyFilter(true)
 }
+function setCat(key) {
+  catFilter = catFilter === key ? '' : key
+  applyFilter(true)
+}
 function applyFilter(byPerson) {
-  const slide = byPerson && moving(), before = new Map()
-  if (slide) for (const v of cards.values()) if (!v.wrap.hidden) before.set(v, v.wrap.getBoundingClientRect().top)
+  const before = byPerson ? measure() : null
   let count = 0
   for (const v of cards.values()) {
-    const hide = !!filter && !v.peers.includes(filter)
-    if (v.wrap.hidden !== hide) v.wrap.hidden = hide
+    const hide = filtered(v)
+    if (v.item.hidden !== hide) v.item.hidden = hide
     if (!hide) count++
   }
+  board.hidden = count === 0
   empty.hidden = count > 0
-  put(byId('emptyText'), filter ? '\uC774 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uAC00 \uC544\uC9C1 \uC5C6\uC2B5\uB2C8\uB2E4.' : '\uC544\uC9C1 \uC8FC\uACE0\uBC1B\uC740 \uC9C8\uBB38\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.')
-  if (slide)
-    for (const [v, top] of before) {
-      if (v.wrap.hidden) continue
-      if (v.slide) v.slide.cancel()
-      const dy = top - v.wrap.getBoundingClientRect().top
-      if (Math.abs(dy) > 1) v.slide = v.wrap.animate([{ translate: '0 ' + dy.toFixed(1) + 'px' }, { translate: '0 0' }], { duration: 700, easing: SPRING })
-    }
-  for (const b of filters.children) {
-    const on = (b.dataset.key || '') === filter
-    b.classList.toggle('sel', on)
-    b.setAttribute('aria-pressed', String(on))
+  put(byId('emptyText'), filter ? '\uC774 \uC138\uC158\uACFC \uB098\uB208 \uB300\uD654\uAC00 \uC544\uC9C1 \uC5C6\uC2B5\uB2C8\uB2E4.' : catFilter ? '\uC774 \uBD84\uB958\uC758 \uB300\uD654\uAC00 \uC544\uC9C1 \uC5C6\uC2B5\uB2C8\uB2E4.' : '\uC544\uC9C1 \uC8FC\uACE0\uBC1B\uC740 \uC9C8\uBB38\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.')
+  // \uC5F4\uC5B4 \uB454 \uB300\uD654\uAC00 \uBAA9\uB85D\uC5D0\uC11C \uBE60\uC84C\uC73C\uBA74 \uBAA9\uB85D\uC758 \uCCAB \uB300\uD654\uB97C \uC5F0\uB2E4.
+  const open = cards.get(active)
+  if (!open || open.item.hidden) {
+    let top = ''
+    for (const node of rooms.children)
+      if (!node.hidden) {
+        top = node.dataset.id
+        break
+      }
+    active = ''
+    for (const v of cards.values()) if (!v.wrap.hidden) v.wrap.hidden = true
+    if (top) activate(top, false)
   }
-  stage.select(filter)
+  if (before) settle(before)
+  for (const [row, picked] of [[filters, filter], [cats, catFilter]])
+    for (const b of row.children) {
+      const on = (b.dataset.key || '') === picked
+      b.classList.toggle('sel', on)
+      b.setAttribute('aria-pressed', String(on))
+    }
+  net.select(filter)
 }
 function syncFilters(groups, links) {
   const seen = new Map()
@@ -28369,6 +28351,33 @@ function syncFilters(groups, links) {
   }
   filters.replaceChildren(chip('', '\uC804\uCCB4', groups.length), ...[...seen].map(([key, one]) => chip(key, one.name, one.n)))
 }
+// \uBD84\uB958 \uC774\uB984\uD45C. \uBD84\uB958\uAC00 \uD558\uB098\uB77C\uB3C4 \uC788\uC744 \uB54C\uB9CC \uBCF4\uC778\uB2E4.
+function syncCats(groups) {
+  const seen = new Map()
+  let none = 0
+  for (const room of groups) {
+    const label = room.convs[0].category || ''
+    if (label) seen.set(label, (seen.get(label) || 0) + 1)
+    else none++
+  }
+  if (catFilter && catFilter !== ':none' && !seen.has(catFilter)) catFilter = ''
+  if (catFilter === ':none' && !none) catFilter = ''
+  cats.hidden = seen.size === 0
+  const sig = JSON.stringify([[...seen], none])
+  if (cats.dataset.sig === sig) return
+  cats.dataset.sig = sig
+  const chip = (key, name, n) => {
+    const b = el('button', 'chip')
+    b.type = 'button'
+    b.dataset.key = key
+    b.append(el('span', '', name), el('b', '', String(n)))
+    b.addEventListener('click', () => setCat(key))
+    return b
+  }
+  const all = [chip('', '\uBAA8\uB4E0 \uBD84\uB958', groups.length), ...[...seen].map(([label, n]) => chip(label, label, n))]
+  if (none) all.push(chip(':none', '\uBD84\uB958 \uC5C6\uC74C', none))
+  cats.replaceChildren(...all)
+}
 
 // \uC811\uADFC\uD0A4(\uC5F0\uACB0 \uCF54\uB4DC)\uB97C \uD654\uBA74\uC5D0\uC11C \uB9CC\uB4E0\uB2E4. \uC0AC\uB78C\uC744 \uB354\uD560 \uB54C, \uADF8\uB9AC\uACE0 \uB04A\uAE34 \uC0C1\uB300\uAC00 \uB2E4\uC2DC \uB4E4\uC5B4\uC624\uAC8C \uD560 \uB54C \uC4F4\uB2E4.
 const keybox = byId('keybox'), keycode = byId('keycode'), keycopy = byId('keycopy'), issueButton = byId('issue')
@@ -28388,7 +28397,7 @@ async function issueKey(name) {
     hasKey = true
     put(keycode, made.code)
     put(byId('keyinfo'), '\uD55C \uC0AC\uB78C\uB9CC, \uD55C \uBC88\uB9CC \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4. ' + shortTime(made.expires) + '\uAE4C\uC9C0 \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4.')
-    fx(keycode, [{ scale: .96, opacity: .3 }, { scale: 1, opacity: 1 }], { duration: 500, easing: SPRING })
+    fx(keycode, [{ opacity: .2 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' })
   } catch (e) {
     put(keycode, '')
     put(byId('keyinfo'), e.message === '409' ? '\uBE0C\uB9BF\uC9C0\uAC00 \uB2EB\uD600 \uC788\uC5B4\uC11C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. AI\uC5D0\uAC8C \u300C\uBE0C\uB9BF\uC9C0 \uC5F4\uC5B4\uC918\u300D\uB77C\uACE0 \uD558\uC138\uC694.' : e.message === '429' ? '\uC7A0\uC2DC \uB4A4\uC5D0 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.' : '\uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.')
@@ -28434,32 +28443,35 @@ function syncDowns(links) {
 }
 
 let follow = saved.get('coworker.follow') !== 'off'
-let touched = 0
-// \uC0C8\uB85C \uC628 \uAE00\uC744 \uC54C\uB9B0\uB2E4: \uC5F0\uACB0 \uADF8\uB9BC\uC5D0 \uBE5B\uC774 \uB0A0\uC544\uAC00\uACE0, \uAE00\uC774 \uC368 \uB0B4\uB824\uAC00\uACE0, \uC54C\uB9BC\uC774 \uB72C\uB2E4. \uD569\uC758\uBB38\uC774\uBA74 \uC0C9\uC885\uC774\uAC00 \uD130\uC9C4\uB2E4.
+// \uC0C8\uB85C \uC628 \uAE00\uC744 \uC54C\uB9B0\uB2E4: \uC5F0\uACB0\uC120\uC744 \uB530\uB77C \uC810\uC774 \uAC74\uB108\uAC00\uACE0, \uC0C8 \uAE00\uC5D0 \uD14C\uB450\uB9AC\uAC00 \uC7A0\uAE50 \uB458\uB9B0\uB2E4.
+// \u300C\uC0C8 \uAE00 \uB530\uB77C\uAC00\uAE30\u300D\uB97C \uCF30\uC73C\uBA74 \uADF8 \uAE00\uC774 \uC628 \uB300\uD654\uB97C \uC5B8\uC81C\uB098 \uC5F0\uB2E4(2026-11-17, \uC0AC\uB78C\uC774 \uC815\uD568: \u300C\uC2E0\uADDC \uC9C8\uB2F5\uC774 \uC624\uBA74 \uADF8 \uCC3D\uC774 \uD65C\uC131\uD654 \uB418\uAC8C\u300D).
+// \uAED0\uC73C\uBA74 \uC5F4\uC5B4 \uB454 \uB300\uD654\uB97C \uADF8\uB300\uB85C \uB454\uB2E4. \uC5F4\uC5B4 \uB450\uC9C0 \uC54A\uC740 \uB300\uD654\uC5D0 \uC628 \uAE00\uC740 \uBAA9\uB85D\uC5D0 \uD45C\uC2DC\uD558\uACE0 \uC54C\uB9BC\uC73C\uB85C \uB744\uC6B4\uB2E4.
 function announce(news) {
-  const few = news.length <= 4
+  const newest = news[news.length - 1], jump = follow
+  if (jump) activate(newest.v.id, false)
   news.forEach((n, i) => {
     const recent = i >= news.length - 3
-    if (i < 8) stage.send(n.m.from === 'me' ? ME : n.c.peer, n.m.from === 'me' ? n.c.peer : ME, n.m.kind, i * 140)
-    if (few || recent) typeIn(n.node.body, n.m.text)
-    if (recent) toast(n)
-    if (n.m.kind === 'agreement' && recent) {
-      const stamp = n.node.querySelector('.stamp')
-      if (stamp) fx(stamp, [{ scale: 2.8, opacity: 0, rotate: '-24deg' }, { scale: 1, opacity: 1, rotate: '-6deg' }], { duration: 800, easing: SPRING })
-      const r = n.node.getBoundingClientRect()
-      confetti.burst(Math.min(innerWidth - 20, Math.max(20, r.left + r.width / 2)), Math.min(innerHeight - 20, Math.max(20, r.top + 20)))
+    if (i < 6) net.send(n.m.from === 'me' ? ME : n.c.peer, n.m.from === 'me' ? n.c.peer : ME, n.m.kind, i * 180)
+    if (recent) mark(n.node)
+    if (n.v.id === active) return
+    if (!n.v.unseen) {
+      n.v.unseen = true
+      n.v.item.classList.add('unseen')
     }
+    if (recent) toast(n)
   })
-  const c = stage.center()
-  sky.wave(c.x, c.y)
-  const newest = news[news.length - 1]
-  // \uB530\uB77C\uAC00\uAE30\uB97C \uCF30\uC73C\uBA74 \uC0C8 \uAE00\uC774 \uBCF4\uC774\uAC8C \uC62E\uAE34\uB2E4. \uC0AC\uB78C\uC774 \uBC29\uAE08 \uD654\uBA74\uC744 \uB9CC\uC84C\uC73C\uBA74 \uAC74\uB4DC\uB9AC\uC9C0 \uC54A\uB294\uB2E4.
-  if (follow && Date.now() - touched > 3000) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
+  if (jump) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
 }
 
 let first = true
 let lastData = null
 let nextFlip = 0
+// \uBC29\uC5D0\uC11C \uAC00\uC7A5 \uC0C8 \uAE00\uC758 \uC2DC\uAC01.
+function newestAt(room) {
+  let at = ''
+  for (const c of room.convs) for (const m of c.messages) if (m.at > at) at = m.at
+  return at
+}
 function render(data) {
   const live = !first
   first = false
@@ -28482,52 +28494,49 @@ function render(data) {
     const at = Date.parse(asked.at) + QUIET_MS + 500
     if (!nextFlip || at < nextFlip) nextFlip = at
   }
+  // \uCC28\uB840\uB294 \uB300\uD654\uBC29 \uBAA9\uB85D\uCC98\uB7FC \uD55C\uB2E4(2026-11-17, \uC0AC\uB78C\uC774 \uC815\uD568: \u300C\uACE0\uC815, \uCD5C\uC2E0 \uC9C8\uB2F5, \uC21C\u300D).
+  // \uACE0\uC815\uD55C \uB300\uD654\uAC00 \uBA3C\uC800\uACE0, \uADF8 \uC548\uC5D0\uC11C\uB294 \uB9C8\uC9C0\uB9C9 \uAE00\uC774 \uC0C8\uB85C\uC6B4 \uB300\uD654\uAC00 \uBA3C\uC800\uB2E4.
+  const groups = roomsOf(convs).map(room => Object.assign(room, { pinned: room.convs.some(c => c.pinned), at: newestAt(room) }))
+  groups.sort((a, b) => (a.pinned !== b.pinned ? (a.pinned ? -1 : 1) : a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
   stats.set('links', up < links.length ? '\uC5F0\uACB0 (\uB04A\uAE40 ' + (links.length - up) + ')' : '\uC5F0\uACB0', up, false)
-  const groups = roomsOf(convs)
   stats.set('convs', '\uB300\uD654', groups.length, false)
   stats.set('msgs', '\uAE00', convs.reduce((n, c) => n + c.messages.length, 0), false)
   stats.set('open', '\uB2F5 \uAE30\uB2E4\uB9BC', unanswered, false)
   stats.set('humans', '\uC0AC\uB78C \uACB0\uC815 \uB300\uAE30', asking, asking > 0)
-  stage.update(data, convs)
+  net.update(data, convs)
   issueButton.disabled = !me.open
   syncDowns(links)
 
-  // \uCE74\uB4DC\uAC00 \uBC00\uB824\uB098\uB294 \uAC83\uC744 \uBD80\uB4DC\uB7FD\uAC8C \uC787\uB294\uB2E4: \uBC14\uAFB8\uAE30 \uC804 \uC790\uB9AC\uB97C \uC7AC \uB450\uACE0, \uBC14\uAFBC \uB4A4 \uADF8 \uCC28\uC774\uB9CC\uD07C \uBBF8\uB044\uB7EC\uC838 \uC624\uAC8C \uD55C\uB2E4.
-  const slide = live && moving()
-  const before = new Map()
-  if (slide) for (const v of cards.values()) before.set(v, v.wrap.getBoundingClientRect().top)
-  const news = [], keep = new Set()
-  let prev = null
+  // \uBAA9\uB85D\uC758 \uCC28\uB840\uAC00 \uBC14\uB00C\uB294 \uAC83\uC744 \uBD80\uB4DC\uB7FD\uAC8C \uC787\uB294\uB2E4: \uBC14\uAFB8\uAE30 \uC804 \uC790\uB9AC\uB97C \uC7AC \uB450\uACE0, \uBC14\uAFBC \uB4A4 \uADF8 \uCC28\uC774\uB9CC\uD07C \uBBF8\uB044\uB7EC\uC838 \uC624\uAC8C \uD55C\uB2E4.
+  const before = live ? measure() : new Map()
+  const news = [], keep = new Set(), order = []
   groups.forEach((room, i) => {
     keep.add(room.id)
     let v = cards.get(room.id)
     if (!v) {
-      v = makeCard()
+      v = makeCard(room.id)
       cards.set(room.id, v)
+      pane.append(v.wrap)
+      // \uCC98\uC74C \uC5F4 \uB54C\uB294 \uBAA9\uB85D\uC774 \uC704\uC5D0\uC11C\uBD80\uD130 \uCC28\uB840\uB85C \uB4E4\uC5B4\uC628\uB2E4.
       if (!live) {
-        v.card.style.setProperty('--i', Math.min(i, 8))
-        setTimeout(() => v.card.style.removeProperty('--i'), 2000)
+        v.item.style.setProperty('--i', Math.min(i, 8))
+        setTimeout(() => v.item.style.removeProperty('--i'), 1500)
       }
-      list.insertBefore(v.wrap, prev ? prev.nextSibling : list.firstChild)
     }
     paint(v, room, live, i, news)
-    if (filter && !v.peers.includes(filter)) v.wrap.hidden = true
-    prev = v.wrap
+    order.push(v.item)
   })
   for (const [id, v] of [...cards])
     if (!keep.has(id)) {
       cards.delete(id)
-      leave(v.wrap)
+      v.wrap.remove()
+      v.item.remove()
     }
+  place(order)
   syncFilters(groups, links)
+  syncCats(groups)
   applyFilter(false)
-  if (slide)
-    for (const [v, top] of before) {
-      if (!v.wrap.isConnected) continue
-      if (v.slide) v.slide.cancel()
-      const dy = top - v.wrap.getBoundingClientRect().top
-      if (Math.abs(dy) > 1) v.slide = v.wrap.animate([{ translate: '0 ' + dy.toFixed(1) + 'px' }, { translate: '0 0' }], { duration: 700, easing: SPRING })
-    }
+  settle(before)
   if (news.length) announce(news)
 }
 
@@ -28539,43 +28548,15 @@ setInterval(() => {
     const from = Date.parse(n.dataset.since)
     if (!isNaN(from)) put(n, (n.dataset.pre || '') + clock(now - from))
   }
-  for (const n of document.querySelectorAll('[data-ago]')) put(n, '\xB7 ' + ago(now - Date.parse(n.dataset.ago)))
+  for (const n of document.querySelectorAll('[data-ago]')) put(n, (n.dataset.pre ?? '\xB7 ') + ago(now - Date.parse(n.dataset.ago)))
   if (nextFlip && now >= nextFlip && lastData) render(lastData)
 }, 1000)
 
-// \uCE74\uB4DC \uC704\uC5D0\uC11C \uB9C8\uC6B0\uC2A4\uB97C \uC6C0\uC9C1\uC774\uBA74 \uCE74\uB4DC\uAC00 \uC0B4\uC9DD \uAE30\uC6B8\uACE0 \uBE5B\uC774 \uB530\uB77C\uC628\uB2E4. \uAE34 \uCE74\uB4DC\uB294 \uB35C \uAE30\uC6B4\uB2E4.
-const fine = matchMedia('(hover: hover) and (pointer: fine)')
-let tilt = null
-list.addEventListener('pointermove', e => {
-  if (!moving() || !fine.matches) return
-  const card = e.target.closest ? e.target.closest('.conv') : null
-  if (!card) return
-  const go = !tilt
-  tilt = { card, x: e.clientX, y: e.clientY }
-  if (go)
-    requestAnimationFrame(() => {
-      const t = tilt
-      tilt = null
-      const r = t.card.getBoundingClientRect(), x = (t.x - r.left) / r.width, y = (t.y - r.top) / r.height, k = Math.min(1, 420 / r.height)
-      t.card.style.setProperty('--mx', (x * 100).toFixed(1) + '%')
-      t.card.style.setProperty('--my', (y * 100).toFixed(1) + '%')
-      t.card.style.setProperty('--ry', ((x - .5) * 2.4).toFixed(2) + 'deg')
-      t.card.style.setProperty('--rx', ((.5 - y) * 2.4 * k).toFixed(2) + 'deg')
-    })
-})
-list.addEventListener('pointerout', e => {
-  const card = e.target.closest ? e.target.closest('.conv') : null
-  if (!card || (e.relatedTarget && card.contains(e.relatedTarget))) return
-  card.style.removeProperty('--rx')
-  card.style.removeProperty('--ry')
-})
-for (const name of ['wheel', 'touchstart', 'keydown', 'pointerdown']) addEventListener(name, () => { touched = Date.now() }, { passive: true })
 
 const motionButton = byId('motion'), followButton = byId('follow')
 function applyMotion() {
   root.classList.toggle('on', moving())
   put(motionButton, moving() ? '\uBAA8\uC158 \uB044\uAE30' : '\uBAA8\uC158 \uCF1C\uAE30')
-  sky.run()
 }
 motionButton.addEventListener('click', () => {
   motionPref = moving() ? 'off' : 'on'
@@ -28591,6 +28572,9 @@ followButton.addEventListener('click', () => {
   saved.set('coworker.follow', follow ? 'on' : 'off')
   applyFollow()
 })
+// \uCC98\uC74C \uC5F4\uB9B4 \uB54C \uD55C \uBC88, \uC704\uCABD \uCE78\uC774 \uB5A0\uC624\uB974\uBA70 \uB098\uD0C0\uB09C\uB2E4.
+root.classList.add('boot')
+setTimeout(() => root.classList.remove('boot'), 1500)
 applyMotion()
 applyFollow()
 
@@ -28636,7 +28620,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) release()
   else {
     connect()
-    sky.run()
   }
 })
 if (!document.hidden) connect()
@@ -28711,13 +28694,26 @@ class Viewer {
       }
     }
     const me = this.bridge.describe();
-    return { name: me.name, open: me.open, links: this.bridge.links().map((l) => ({ name: l.name, state: l.state })), connecting: this.bridge.connecting().length, waiting };
+    const threads = [...this.bridge.threads.values()];
+    const counts = { conversations: new Set(threads.map((t) => t.ask && t.startedBy === "me" ? `ask:${t.ask.id}` : t.id)).size, messages: threads.reduce((n, t) => n + t.messages.length, 0) };
+    const recent = threads.flatMap((t) => t.messages.map((m) => ({ id: m.id, thread: t.id, at: m.at, from: m.from, peer: t.peerName, kind: m.kind, text: m.text.slice(0, RECENT_TEXT), category: t.category, noAnswer: m.noAnswer || undefined, human: m.human || undefined }))).sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : 0).slice(-RECENT);
+    return { name: me.name, about: me.about, open: me.open, links: this.bridge.links().map((l) => ({ name: l.name, state: l.state, about: l.about })), connecting: this.bridge.connecting().length, waiting, counts, recent };
   }
-  issue(req, headers) {
+  mine(req) {
     const origin = req.headers.get("origin");
     const site = req.headers.get("sec-fetch-site");
     const here = origin === null || [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`].includes(origin);
-    if (req.headers.get("x-coworker-viewer") !== "1" || !here || site !== null && site !== "same-origin")
+    return req.headers.get("x-coworker-viewer") === "1" && here && (site === null || site === "same-origin");
+  }
+  async introduce(req, headers) {
+    if (!this.mine(req))
+      return new Response("forbidden", { status: 403 });
+    const body = await req.json().catch(() => null);
+    this.bridge.setAbout({ ...typeof body?.model === "string" ? { model: body.model } : {}, ...typeof body?.effort === "string" ? { effort: body.effort } : {} });
+    return Response.json({ about: this.bridge.describe().about ?? {} }, { headers });
+  }
+  issue(req, headers) {
+    if (!this.mine(req))
       return new Response("forbidden", { status: 403 });
     if (!this.bridge.isOpen)
       return Response.json({ error: "the bridge is closed" }, { status: 409, headers });
@@ -28726,6 +28722,16 @@ class Viewer {
       return Response.json({ error: "too many requests" }, { status: 429, headers });
     this.issuedAt = now;
     return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers });
+  }
+  async pin(req, headers) {
+    if (!this.mine(req))
+      return new Response("forbidden", { status: 403 });
+    const body = await req.json().catch(() => null);
+    const threads = body?.threads;
+    const ok = Array.isArray(threads) && threads.length > 0 && threads.length <= 64 && threads.every((id) => typeof id === "string" && id.length <= 200);
+    if (!ok || typeof body?.pinned !== "boolean")
+      return Response.json({ error: "expected { threads: string[], pinned: boolean }" }, { status: 400, headers });
+    return Response.json({ changed: this.bridge.pin(threads, body.pinned) }, { headers });
   }
   get listening() {
     return this.listener !== undefined;
@@ -28750,6 +28756,10 @@ class Viewer {
       return Response.json(this.status(), { headers });
     if (req.method === "POST" && path === `/${this.token}/code`)
       return this.issue(req, headers);
+    if (req.method === "POST" && path === `/${this.token}/about`)
+      return this.introduce(req, headers);
+    if (req.method === "POST" && path === `/${this.token}/pin`)
+      return this.pin(req, headers);
     if (req.method === "GET" && path === `/${this.token}/events`)
       return this.events(req, headers);
     if (req.method === "GET" && path === `/${this.token}/next`)
@@ -28850,6 +28860,8 @@ class Viewer {
     return new Response(body, { headers: { ...headers, "content-type": "text/event-stream; charset=utf-8" } });
   }
 }
+var RECENT = 8;
+var RECENT_TEXT = 400;
 var ISSUE_TTL_MS = 60 * 60000;
 var ISSUE_GAP_MS = 1000;
 var LISTENING_ITSELF = "coworker: this session is listening by itself now. Nothing to do.";
@@ -28955,8 +28967,10 @@ function createSession(opts) {
 
   Answer what is settled, ask your human what needs deciding
   - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
+  - When you open a bridge or connect, say which model you are and your reasoning effort (model, effort) if you know them. The other side sees them, and you see theirs under about in the connected event and list_connections. Do not guess.
+  - Give each question a category with send_question: a short topic label, so the humans can sort the conversations. Look at the labels already in use (inbox shows them) and reuse one when it fits.
   - A message with no_answer_needed: true is a notice. Tell your human what it says. You do not have to answer it; reply only when you have something to add or correct.
-  - To tell the other side something that needs no answer, call send_question with no_answer_needed: true. Do not write "no answer needed" only in the text: the other side then cannot tell, and it keeps showing as a question that waits. Do not wait for an answer to a notice and do not write an agreement for it.
+  - To tell the other side something that needs no answer, call send_question with no_answer_needed: true. A question whose text plainly says so (for example "no reply needed" or "\uB2F5 \uD544\uC694 \uC5C6\uC2B5\uB2C8\uB2E4") and has no question mark is also sent and shown as a notice, but only a few plain phrases are recognized, so set no_answer_needed yourself. Do not wait for an answer to a notice and do not write an agreement for it.
   - If the question needs a decision nobody has made yet (choosing between options, priorities, scope, schedule, anything your human would want a say in), do not decide it yourself. Call check_with_human with the question for your human, 2 to 6 options in their language, and the one you recommend. It tells the other side you are asking and opens a question window on your human's screen, where they pick a number or write their own answer. Their decision then goes to the other side by itself, marked as your human's decision, and you get a decision event; tell your human in one line what was sent. Do not leave a decision as plain text only.
   - Never answer the other side with only "I passed it to my human" or "I will let you know after checking"; reply refuses such an answer. Use check_with_human: it shows a desktop notification with sound, reminds your human every few minutes until they answer, opens a closed window again, and lets the other side see that you are asking, since when, and whether the window was seen.
   - When the other side is checking with its human, list_connections and inbox show it under their_human (since when, for how many minutes, and the state of their question window). If it takes long, you get a peer_human_slow event (after 30 minutes, then every 30 minutes) and your human gets a desktop notification: tell your human, so they can reach the other person by phone or messenger.
@@ -28996,6 +29010,10 @@ ${text}` : "";
     return name || "AI";
   }
   const isCodex = () => clientLabel() === "Codex";
+  function introduce(b, model, effort) {
+    const app = clientLabel();
+    b.setAbout({ ...app === "AI" ? {} : { app }, ...model ? { model } : {}, ...effort ? { effort } : {} });
+  }
   const background = () => !channel && clientLabel() === "Claude Code";
   const listenCommand = () => background() ? viewerOf().listenCommand() : undefined;
   const tellFirst = () => background() && !viewer?.listening ? " Write all of this to your human in your reply first, and only then start listening." : "";
@@ -29308,12 +29326,15 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       port: number2().int().min(1024).max(65535).optional().describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range).`),
       name: string2().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>".'),
       private: boolean2().optional().describe("true: the code links only this session and the one who joins; they are not connected with the rest of the group."),
+      model: string2().min(1).max(60).optional().describe("The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess."),
+      effort: string2().min(1).max(60).optional().describe("Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess."),
       expires_minutes: number2().int().min(0).max(MAX_CODE_MINUTES).optional().describe(`How many minutes the code can be used. Default ${DEFAULT_CODE_MINUTES}. 0: no time limit; the code works until this bridge closes. Either way the code works only once.`),
       resume: string2().min(1).max(200).optional().describe("To continue a bridge from an earlier session on this PC: after coworker restarted, or when your human moved this work to a new session. Give its session_id (from an earlier result, or from list_connections, which lists the bridges on this PC) or its name. It comes back with the same identity, connections and conversations, without a new code; if it is still running in that other session, it moves here and stops there. Leave it out to open a bridge normally.")
     }
-  }, tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume }) => {
+  }, tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume, model, effort }) => {
     if (resume) {
       const b = await resumeBridge(resume.trim());
+      introduce(b, model, effort);
       reopenWindows(b);
       const { relay: relayInfo, warn = "" } = await relayStatus(b);
       const connected = [...b.peers.values()].map((p) => p.name);
@@ -29337,6 +29358,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     const b = getBridge();
     if (name)
       b.name = name;
+    introduce(b, model, effort);
     b.open(port);
     const { relay: relayInfo, warn = "" } = await relayStatus(b);
     const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60000).toISOString();
@@ -29361,14 +29383,17 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     description: "Connect this session to a coworker's session using the connection code their AI produced with open_bridge. Opens this session's bridge too, so answers can come back.",
     inputSchema: {
       code: string2().min(10).describe('The whole connection code, starting with "cw1."'),
-      name: string2().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>".')
+      name: string2().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>".'),
+      model: string2().min(1).max(60).optional().describe("The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess."),
+      effort: string2().min(1).max(60).optional().describe("Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess.")
     }
-  }, tool(async ({ code, name }) => {
+  }, tool(async ({ code, name, model, effort }) => {
     await resolveFolder();
     freshIfMoved();
     const b = getBridge();
     if (name)
       b.name = name;
+    introduce(b, model, effort);
     if (!b.isOpen)
       b.open();
     const { relay: relayInfo, warn = "" } = await relayStatus(b);
@@ -29430,12 +29455,16 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       context: string2().max(20000).optional().describe("What you already know or tried, so the other AI does not repeat it."),
       to: union([string2(), array(string2()).min(1)]).optional().describe('Who to ask: a session name, a list of names, or "everyone". Leave it out when only one session is connected.'),
       answers: _enum(["all", "one"]).optional().describe('Only when asking several: "all" (default) to get an answer from each, or "one" when the first answer is enough; the others are then told they need not answer.'),
-      no_answer_needed: boolean2().optional().describe("true when this is a notice: something the other side should know that needs no answer. They do not have to answer, though they may. Do not wait for an answer to it.")
+      no_answer_needed: boolean2().optional().describe("true when this is a notice: something the other side should know that needs no answer. They do not have to answer, though they may. Do not wait for an answer to it."),
+      category: string2().max(MAX_CATEGORY).optional().describe("A short topic label for this conversation, one to three words in your human's language (for example \uBC30\uD3EC, \uBCF4\uC548, \uC77C\uC815). The humans sort and filter conversations by it. Reuse a label this bridge already uses when one fits; inbox shows them as category.")
     }
-  }, tool(async ({ question, context, to, answers, no_answer_needed }) => ({
-    ...await getBridge().askMany(to, question, context, answers, no_answer_needed === true),
-    next: no_answer_needed ? `Tell your human what you told whom. It is a notice: do not wait for an answer to it and do not write an agreement for it. ${listen()}` : `Tell your human what you asked and whom. ${listen()}`
-  })));
+  }, tool(async ({ question, context, to, answers, no_answer_needed, category }) => {
+    const notice = no_answer_needed === true || saysNoAnswer(question);
+    return {
+      ...await getBridge().askMany(to, question, context, answers, notice, category),
+      next: notice ? `Tell your human what you told whom. It is a notice: do not wait for an answer to it and do not write an agreement for it. ${listen()}` : `Tell your human what you asked and whom. ${listen()}`
+    };
+  }));
   server.registerTool("reply", {
     title: "Reply",
     annotations: { readOnlyHint: false, openWorldHint: true },
