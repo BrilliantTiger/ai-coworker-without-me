@@ -36,11 +36,11 @@ function world(on: On, answers: Record<string, Answer>): World {
   return w
 }
 
-const message = (id: string, from: 'me' | 'peer', kind: string, text: string, more: Record<string, unknown> = {}) => ({ id, thread: 't1', at: `2026-11-17T03:00:${id.padStart(2, '0')}.000Z`, from, peer: '민수 · Codex', kind, text, ...more })
+const message = (id: string, from: 'me' | 'peer', kind: string, text: string, more: Record<string, unknown> = {}) => ({ id, thread: 't1', at: `2026-11-17T03:00:${id.padStart(2, '0')}.000Z`, from, peer: '동료A · Codex', kind, text, ...more })
 const summary = (more: Record<string, unknown> = {}) => ({
-  name: '연규 · Claude Code',
+  name: '나 · Claude Code',
   open: true,
-  links: [{ name: '민수 · Codex', state: 'connected', about: { app: 'Codex', model: 'GPT-5.5', effort: 'high' } }],
+  links: [{ name: '동료A · Codex', state: 'connected', about: { app: 'Codex', model: 'GPT-5.5', effort: 'high' } }],
   connecting: 0,
   waiting: { yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 },
   counts: { conversations: 3, messages: 12 },
@@ -55,8 +55,8 @@ test('the card shows who is connected and what they run, the counts, what waits,
       status: 200,
       body: summary({
         links: [
-          { name: '민수 · Codex', state: 'connected', about: { app: 'Codex', model: 'GPT-5.5', effort: 'high' } },
-          { name: '지현 · Claude Code', state: 'reconnecting' },
+          { name: '동료A · Codex', state: 'connected', about: { app: 'Codex', model: 'GPT-5.5', effort: 'high' } },
+          { name: '동료B · Claude Code', state: 'reconnecting' },
         ],
         connecting: 1,
         waiting: { yours: 1, theirs: 0, yourHuman: 2, theirHuman: 0 },
@@ -69,9 +69,9 @@ test('the card shows who is connected and what they run, the counts, what waits,
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
 
-    expect((await ui.find({ type: 'Text', text: /^민수/ }))?.text).toBe('민수 · Codex')
+    expect((await ui.find({ type: 'Text', text: /^동료A/ }))?.text).toBe('동료A · Codex')
     expect((await ui.find({ type: 'Text', text: /GPT-5.5/ }))?.text).toBe('‹Codex · GPT-5.5 · high›')
-    expect((await ui.find({ type: 'Text', text: /지현/ }))?.text).toBe('지현 · Claude Code (다시 붙는 중)')
+    expect((await ui.find({ type: 'Text', text: /동료B/ }))?.text).toBe('동료B · Claude Code (다시 붙는 중)')
     expect((await ui.find({ type: 'Text', text: /소개받는 중/ }))?.text).toBe('소개받는 중 1')
     expect((await ui.find({ type: 'Text', text: /^대화/ }))?.text).toBe('대화 3 · 글 12')
     expect((await ui.find({ type: 'Text', text: /사람 결정 필요/ }))?.text).toBe('사람 결정 필요 2')
@@ -87,7 +87,7 @@ test('the card shows who is connected and what they run, the counts, what waits,
 test('a narrow card counts the sessions instead of naming them', async ($, on) => {
   const clock = mock.clock(on)
   world(on, {
-    [`${VIEWER}/status`]: { status: 200, body: summary({ links: [{ name: '민수 · Codex', state: 'connected' }, { name: '지현', state: 'reconnecting' }] }) },
+    [`${VIEWER}/status`]: { status: 200, body: summary({ links: [{ name: '동료A · Codex', state: 'connected' }, { name: '동료B', state: 'reconnecting' }] }) },
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
@@ -95,7 +95,7 @@ test('a narrow card counts the sessions instead of naming them', async ($, on) =
 
   expect((await ui.find({ type: 'Text', text: /^연결/ }))?.text).toBe('연결 1')
   expect((await ui.find({ type: 'Text', text: /다시 붙는 중/ }))?.text).toBe('다시 붙는 중 1')
-  expect(await ui.find({ type: 'Text', text: /민수/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /동료A/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -119,7 +119,7 @@ test('a question or an answer that arrives makes the card grow, then shrink to o
   await clock.advance(4000)
   expect((await ui.find({ type: 'Text', text: /^새 답/ }))?.text).toBe('새 답')
   expect((await ui.find({ type: 'Text', text: /^\[API\]/ }))?.text).toBe('[API]')
-  expect((await ui.find({ type: 'Text', text: /→ 나/ }))?.text).toBe('민수 · Codex → 나 · 방금')
+  expect((await ui.find({ type: 'Text', text: /→ 나/ }))?.text).toBe('동료A · Codex → 나 · 방금')
   expect((await ui.find({ type: 'Text', text: /사람이 정함/ }))?.text).toBe('사람이 정함')
   // 처음에는 머리줄만 있고, 박자마다 글이 한 줄씩 자란다.
   expect(await ui.find({ type: 'Text', text: /18081/ })).toBeUndefined()
@@ -130,7 +130,7 @@ test('a question or an answer that arrives makes the card grow, then shrink to o
   // 얼마 뒤 한 줄로 줄어든다.
   await clock.advance(21_000)
   expect(await ui.find({ type: 'Text', text: /^새 답/ })).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: /^↳/ }))?.text).toContain('↳ 새 답 [API] · 민수 · Codex → 나')
+  expect((await ui.find({ type: 'Text', text: /^↳/ }))?.text).toContain('↳ 새 답 [API] · 동료A · Codex → 나')
   // 몇 분 뒤에는 사라진다.
   await clock.advance(180_000)
   expect(await ui.find({ type: 'Text', text: /^↳/ })).toBeUndefined()
@@ -185,7 +185,7 @@ const PAGE = {
 }
 
 for (const [name, status] of [
-  ['a server before 0.11 has no counts in /status, so the card counts from the page data', { status: 200, body: { name: 'A', open: true, links: [{ name: '민수 · Codex', state: 'connected' }], connecting: 0, waiting: {} } }],
+  ['a server before 0.11 has no counts in /status, so the card counts from the page data', { status: 200, body: { name: 'A', open: true, links: [{ name: '동료A · Codex', state: 'connected' }], connecting: 0, waiting: {} } }],
   ['a server before 0.9 has no /status at all, so the card counts from the page data', { status: 404 }],
 ] as const)
   test(name, async ($, on) => {

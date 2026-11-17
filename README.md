@@ -438,6 +438,8 @@ GitHub판으로 설치되는 것은 `plugin/` 폴더뿐이다. 매니페스트(`
 
 https://brillianttigercorp.com/ai-coworker-without-me/ 는 `gh-pages` 브랜치에 있다. 플러그인 폴더에 웹사이트 파일이 섞이지 않게 main과 따로 둔다. 고칠 때는 `git worktree add ../coworker-pages gh-pages`로 꺼내 고치고 그 브랜치에 push하면 GitHub Pages가 바로 다시 올린다.
 
+사이트의 대화 화면 데모(`demo/`)는 진짜 대화 화면에 꾸민 대화를 넣어 만든 파일 하나다. 서버 없이 브라우저 안에서만 돌고, 아무것도 밖으로 보내지 않는다. 화면(`src/page.ts`)이나 꾸민 대화(`scripts/demo-scenario.ts`)를 고쳤으면 `bun scripts/demo-static.ts ../coworker-pages/demo/index.html`로 다시 만들어 올린다. 꾸민 대화의 이름은 익명(A, B, C)이고, 미리보기 서버(`bun scripts/viewer-demo.ts`)도 같은 대화를 쓴다.
+
 ## 시험
 
 ```
