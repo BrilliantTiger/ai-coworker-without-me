@@ -19780,7 +19780,7 @@ import { platform as platform4 } from "os";
 import { basename as basename2, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.12.0";
+var version2 = "0.12.1";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -27697,7 +27697,7 @@ button.sess:hover { background: var(--soft); }
 .pane { grid-column: 2; grid-row: 1; min-width: 0; }
 .wrap { position: relative; }
 .rooms { grid-column: 1; grid-row: 1; position: sticky; top: 68px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 84px); overflow-y: auto; padding: 3px; margin: -3px; scrollbar-width: thin; overscroll-behavior: contain; }
-.room { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; flex: none; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); cursor: pointer; --ring: var(--muted); }
+.room { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; flex: none; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); cursor: pointer; --ring: var(--muted); }
 .on .room { transition: opacity .35s ease-out, translate .45s var(--ease), background-color .15s, border-color .2s; transition-delay: calc(var(--i, 0) * 45ms), calc(var(--i, 0) * 45ms), 0s, 0s; }
 .room:hover { border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
 .room[aria-current=true] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
@@ -27767,7 +27767,10 @@ button.sess:hover { background: var(--soft); }
 .pp.human { color: var(--note-b); border-color: color-mix(in srgb, var(--note-b) 35%, var(--line)); }
 
 /* \uC8FC\uACE0\uBC1B\uC740 \uAE00 */
-.msgs { list-style: none; margin: 14px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+/* \uCC44\uD305 \uB0B4\uC6A9\uC774 \uAD6C\uB974\uB294 \uC790\uB9AC. \uB113\uC740 \uD654\uBA74\uC5D0\uC11C\uB294 \uC774 \uC548\uC5D0\uC11C\uB9CC \uAD6C\uB978\uB2E4. */
+.scroll { margin-top: 14px; border-top: 1px solid var(--line); }
+.scroll:focus-visible { outline-offset: -2px; }
+.msgs { list-style: none; margin: 0; padding: 14px 6px 6px 4px; display: flex; flex-direction: column; gap: 10px; }
 .msg { max-width: min(86%, 640px); min-width: 0; }
 .msg.peer { align-self: flex-start; }
 .msg.mine { align-self: flex-end; }
@@ -27838,6 +27841,30 @@ dialog h2 { margin: 0 0 6px; font-size: 16px; }
 dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
 .code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 3em; max-height: 180px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--soft); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
 .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* \uB113\uACE0 \uCDA9\uBD84\uD788 \uB192\uC740 \uD654\uBA74\uC5D0\uC11C\uB294 \uD654\uBA74 \uC804\uCCB4\uAC00 \uAD6C\uB974\uC9C0 \uC54A\uB294\uB2E4(2026-11-17, \uC0AC\uB78C\uC774 \uC815\uD568: \u300C\uB300\uD654 \uBAA9\uB85D\uACFC \uCC44\uD305 \uB0B4\uC6A9\uC774 \uAC01\uAC01 \uB530\uB85C \uC2A4\uD06C\uB864\u300D).
+   \uBA38\uB9AC\uC640 \uC5F0\uACB0 \uADF8\uB9BC\uC740 \uADF8\uB300\uB85C \uC788\uACE0, \uB300\uD654 \uBAA9\uB85D\uACFC \uCC44\uD305 \uB0B4\uC6A9\uC774 \uC800\uB9C8\uB2E4 \uB530\uB85C \uAD6C\uB978\uB2E4. \uC881\uAC70\uB098 \uB0AE\uC740 \uD654\uBA74\uC5D0\uC11C\uB294 \uC804\uCC98\uB7FC \uD654\uBA74 \uC804\uCCB4\uAC00 \uAD6C\uB978\uB2E4. */
+@media (min-width: 861px) and (min-height: 680px) {
+  body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+  .top { position: static; flex: none; border-bottom-color: var(--line); animation: none; }
+  main { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; padding-bottom: 16px; }
+  .panel, .info, .filterbar { flex: none; }
+  /* \uCC44\uD305 \uC790\uB9AC\uB97C \uB113\uD788\uB824\uACE0 \uC22B\uC790 \uC904\uC744 \uC5F0\uACB0 \uADF8\uB9BC \uC606\uC5D0 \uB454\uB2E4. \uC5F0\uACB0\uB41C \uC138\uC158\uC774 \uB9CE\uC73C\uBA74 \uC5F0\uACB0 \uADF8\uB9BC \uC548\uC5D0\uC11C \uAD6C\uB978\uB2E4. */
+  .panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .net { grid-column: 1; grid-row: 1; max-height: 30vh; overflow-y: auto; overscroll-behavior: contain; }
+  .stats { grid-column: 2; grid-row: 1; grid-template-columns: repeat(2, minmax(104px, auto)); align-content: center; border-top: 0; border-left: 1px solid var(--line); }
+  .stat { padding: 8px 18px; }
+  .num { font-size: 17px; }
+  .downs { grid-column: 1 / -1; grid-row: 2; }
+  .board { flex: 1 1 auto; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr); }
+  .rooms { position: static; max-height: none; min-height: 0; scrollbar-gutter: stable; }
+  .pane { display: flex; min-height: 0; }
+  .wrap { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; }
+  .wrap[hidden] { display: none; }
+  .conv { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .head, .sub, .people, .typing { flex: none; }
+  .scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; }
+}
 
 /* \uCC98\uC74C \uB098\uD0C0\uB0A0 \uB54C\uC758 \uCD9C\uBC1C \uBAA8\uC2B5. \uB9E8 \uBC14\uAE65\uC5D0 \uB46C\uC57C \uBE0C\uB77C\uC6B0\uC800\uAC00 \uC77D\uB294\uB2E4. */
 @starting-style {
@@ -28297,7 +28324,26 @@ function showItem(item) {
   const dy = a.top < b.top ? a.top - b.top : a.bottom > b.bottom ? a.bottom - b.bottom : 0
   if (dx || dy) rooms.scrollBy({ left: dx, top: dy, behavior: moving() ? 'smooth' : 'auto' })
 }
-// \uC624\uB978\uCABD\uC5D0 \uC5F4 \uB300\uD654\uB97C \uACE0\uB978\uB2E4. \uC5F4\uB9AC\uB294 \uB300\uD654\uB294 \uCE74\uB4DC\uB9CC \uB5A0\uC624\uB974\uACE0, \uC548\uC758 \uAE00\uC740 \uB530\uB85C \uC6C0\uC9C1\uC774\uC9C0 \uC54A\uB294\uB2E4.
+// \uCC44\uD305 \uB0B4\uC6A9\uC744 \uB9E8 \uC544\uB798(\uAC00\uC7A5 \uC0C8 \uAE00)\uB85C \uB0B4\uB9B0\uB2E4. \uB113\uC740 \uD654\uBA74\uC5D0\uC11C\uB294 \uCC44\uD305 \uB0B4\uC6A9\uB9CC \uB530\uB85C \uAD6C\uB978\uB2E4.
+// \uD654\uBA74 \uC804\uCCB4\uAC00 \uAD6C\uB974\uB294 \uC881\uC740 \uD654\uBA74\uC5D0\uC11C\uB294, \uC0C8 \uAE00\uC774 \uC654\uC744 \uB54C(arrived)\uB9CC \uADF8 \uAE00\uC774 \uBCF4\uC774\uAC8C \uD654\uBA74\uC744 \uC62E\uAE34\uB2E4.
+// \uCC44\uD305 \uB0B4\uC6A9\uC774 \uADF8 \uC790\uB9AC \uC548\uC5D0\uC11C \uAD6C\uB974\uB294\uC9C0 \uBCF8\uB2E4. \uAD6C\uB97C \uAC83\uC774 \uC788\uC744 \uB54C\uB9CC \uD0A4\uBCF4\uB4DC\uB85C \uB2FF\uB294 \uC790\uB9AC\uB85C \uB454\uB2E4.
+function canScroll(v) {
+  const can = v.scroll.scrollHeight > v.scroll.clientHeight + 1
+  if (can) v.scroll.tabIndex = 0
+  else v.scroll.removeAttribute('tabindex')
+  return can
+}
+function toBottom(v, arrived) {
+  const how = arrived && moving() ? 'smooth' : 'auto'
+  if (canScroll(v)) v.scroll.scrollTo({ top: v.scroll.scrollHeight, behavior: how })
+  else if (arrived && v.msgs.lastElementChild) v.msgs.lastElementChild.scrollIntoView({ block: 'nearest', behavior: how })
+}
+// \uCC3D \uD06C\uAE30\uAC00 \uBC14\uB00C\uBA74 \uAD6C\uB974\uB294 \uC790\uB9AC\uAC00 \uC0DD\uAE30\uAC70\uB098 \uC5C6\uC5B4\uC9C4\uB2E4.
+addEventListener('resize', () => {
+  const v = cards.get(active)
+  if (v) canScroll(v)
+})
+// \uC624\uB978\uCABD\uC5D0 \uC5F4 \uB300\uD654\uB97C \uACE0\uB978\uB2E4. \uC5F4\uB9AC\uB294 \uB300\uD654\uB294 \uCE74\uB4DC\uB9CC \uB5A0\uC624\uB974\uACE0, \uC548\uC758 \uAE00\uC740 \uB530\uB85C \uC6C0\uC9C1\uC774\uC9C0 \uC54A\uB294\uB2E4. \uC5F4\uBA74 \uAC00\uC7A5 \uC0C8 \uAE00\uC774 \uBCF4\uC778\uB2E4.
 // byHand: \uC0AC\uB78C\uC774 \uBAA9\uB85D\uC5D0\uC11C \uACE8\uB790\uB2E4. \uAE34 \uB300\uD654\uB97C \uC77D\uB2E4\uAC00 \uB2E4\uB978 \uB300\uD654\uB85C \uAC00\uB3C4 \uCC98\uC74C\uBD80\uD130 \uBCF4\uC774\uAC8C \uD654\uBA74\uC744 \uC62C\uB9B0\uB2E4.
 function activate(id, byHand) {
   const next = cards.get(id)
@@ -28318,6 +28364,7 @@ function activate(id, byHand) {
     next.item.classList.remove('unseen')
   }
   showItem(next.item)
+  toBottom(next, false)
   if (byHand) {
     const top = next.wrap.getBoundingClientRect().top
     if (top < 60) scrollBy({ top: top - 76, behavior: moving() ? 'smooth' : 'auto' })
@@ -28390,7 +28437,12 @@ function makeCard(id) {
   dots.append(el('i'), el('i'), el('i'))
   dots.setAttribute('aria-hidden', 'true')
   typing.append(dots, tlabel, timer)
-  card.append(head, sub, people, msgs, typing)
+  // \uCC44\uD305 \uB0B4\uC6A9\uC774 \uAD6C\uB974\uB294 \uC790\uB9AC. \uB9E8 \uC544\uB798\uAC00 \uAC00\uC7A5 \uC0C8 \uAE00\uC774\uB2E4.
+  const scroll = el('div', 'scroll')
+  scroll.setAttribute('role', 'region')
+  scroll.setAttribute('aria-label', '\uC8FC\uACE0\uBC1B\uC740 \uAE00')
+  scroll.append(msgs)
+  card.append(head, sub, people, scroll, typing)
   wrap.append(card)
   wrap.hidden = true
   // \uC67C\uCABD \uBAA9\uB85D\uC758 \uD55C \uC904: \uBD84\uB958\uC640 \uC81C\uBAA9, \uB9C8\uC9C0\uB9C9 \uAE00\uC758 \uB54C, \uC0C1\uD0DC, \uC0C1\uB300, \uADF8\uB9AC\uACE0 \uACE0\uC815\uD588\uB294\uC9C0\uC640 \uC0C8 \uAE00\uC774 \uC654\uB294\uC9C0. \uB204\uB974\uBA74 \uC774 \uB300\uD654\uAC00 \uC5F4\uB9B0\uB2E4.
@@ -28406,7 +28458,7 @@ function makeCard(id) {
   inew.append(el('span', 'plain', '\uC0C8 \uAE00'))
   imarks.append(ipin, inew)
   item.append(ititle, iago, istate, imarks)
-  const v = { id, wrap, card, badge, cat, subject, status, stext, tick: ck.firstChild, pin, ago: agoEl, meta, people, msgs, typing, tlabel, timer, item, icat, isub, iago, ilabel, iwho, unseen: false, seen: new Map(), st: undefined, label: '', peers: [], category: '', threads: [], pinned: false }
+  const v = { id, wrap, card, badge, cat, subject, status, stext, tick: ck.firstChild, pin, ago: agoEl, meta, people, msgs, scroll, stuck: false, typing, tlabel, timer, item, icat, isub, iago, ilabel, iwho, unseen: false, seen: new Map(), st: undefined, label: '', peers: [], category: '', threads: [], pinned: false }
   pin.addEventListener('click', () => togglePin(v))
   item.addEventListener('click', () => activate(id, true))
   return v
@@ -28580,6 +28632,8 @@ function paint(v, room, live, index, news) {
     v.iago.dataset.ago = newest
     v.iago.textContent = ago(Date.now() - Date.parse(newest))
   }
+  // \uC5F4\uC5B4 \uB454 \uB300\uD654\uAC00 \uB9E8 \uC544\uB798\uAE4C\uC9C0 \uB0B4\uB824\uAC00 \uC788\uC5C8\uB294\uC9C0. \uADF8\uB7AC\uC73C\uBA74 \uC0C8 \uAE00\uC774 \uC640\uB3C4 \uB9E8 \uC544\uB798\uC5D0 \uBD99\uC5B4 \uC788\uAC8C \uD55C\uB2E4.
+  v.stuck = !v.wrap.hidden && v.scroll.scrollHeight - v.scroll.scrollTop - v.scroll.clientHeight < 40
   const ids = new Set(items.map(it => it.id))
   for (const [id, node] of v.seen)
     if (!ids.has(id)) {
@@ -28781,7 +28835,9 @@ function announce(news) {
     }
     if (recent) toast(n)
   })
-  if (jump) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
+  // \uC5F4\uC5B4 \uB454 \uB300\uD654\uC5D0 \uC0C8 \uAE00\uC774 \uC654\uC73C\uBA74 \uB9E8 \uC544\uB798(\uC0C8 \uAE00)\uB85C \uB0B4\uB9B0\uB2E4. \uB530\uB77C\uAC00\uAE30\uB97C \uAED0\uC5B4\uB3C4, \uB9E8 \uC544\uB798\uC5D0 \uC788\uC5C8\uC73C\uBA74 \uBD99\uC5B4 \uC788\uB294\uB2E4.
+  const open = cards.get(active)
+  if (open && news.some(n => n.v === open) && (follow || open.stuck)) toBottom(open, true)
 }
 
 let first = true
