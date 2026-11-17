@@ -541,3 +541,36 @@ main { position: relative; }
   .t-group line { stroke-dashoffset: 0; }
   .t-group circle.newbie { transform: none; }
 }
+
+/* ── 0.5 ~ 0.12 에서 더해진 기능의 그림 ── */
+.vfiles, .vnote, .vcats, .vcard, .vlink, .vup { width: 88%; font-size: 12.5px; color: var(--ink-2); }
+.vfiles { display: flex; flex-direction: column; gap: 8px; }
+.vfiles span { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 8px 11px; border-radius: 11px; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink); font-weight: 600; }
+.vfiles i { font-style: normal; grid-row: 1 / span 2; }
+.vfiles small { grid-column: 2; grid-row: 2; font-family: var(--mono); font-size: 10.5px; font-weight: 400; color: var(--muted); }
+.vfiles b { grid-column: 3; grid-row: 1 / span 2; font-size: 11px; font-weight: 600; color: var(--mint); }
+.vnote { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.vnote p { margin: 0; padding: 10px 13px; border-radius: 14px 14px 14px 5px; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink); font-size: 13px; }
+.vnote span { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 999px; color: var(--warn); background: rgba(255, 209, 102, 0.12); }
+.vcats { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; }
+.vcats span { padding: 6px 11px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel); font-size: 12px; color: var(--ink-2); }
+.vcats span.on { border-color: var(--coral); color: var(--coral-2); background: rgba(242, 132, 92, 0.12); font-weight: 600; }
+.vcats b { margin-left: 4px; font-weight: 600; color: var(--muted); }
+.vcard { font-family: var(--mono); font-size: 11.5px; border: 1px solid var(--line-2); border-radius: 10px; padding: 9px 12px; background: rgba(0, 0, 0, 0.25); display: flex; flex-direction: column; gap: 5px; }
+.vcard p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); font-size: 11.5px; }
+.vcard .row i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--mint); }
+.vcard b { color: var(--ink); font-weight: 600; margin: 0 7px; }
+.vcard small { color: var(--muted); font-size: 10.5px; }
+.vcard .dim { color: var(--muted); }
+.vcard .grow { color: var(--mint-2); }
+.vlink { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.vlink .pc { padding: 8px 11px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink); font-weight: 600; font-size: 12px; }
+.vlink .gap { display: flex; justify-content: space-around; align-items: center; height: 2px; background: linear-gradient(90deg, var(--coral), var(--mint)); border-radius: 2px; }
+.vlink .gap i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink); }
+.vlink p { grid-column: 1 / -1; margin: 4px 0 0; text-align: center; font-size: 11.5px; color: var(--muted); }
+.vup { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; font-family: var(--mono); }
+.vup span { padding: 7px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 13px; }
+.vup span.new { color: var(--mint); border-color: rgba(110, 231, 200, 0.45); background: rgba(110, 231, 200, 0.08); font-weight: 600; }
+.vup i { font-style: normal; color: var(--muted); }
+.vup p { flex-basis: 100%; margin: 2px 0 0; text-align: center; font-size: 11px; color: var(--muted); }
+.tile p a, .faq-list a { white-space: nowrap; }

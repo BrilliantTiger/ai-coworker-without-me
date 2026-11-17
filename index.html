@@ -34,6 +34,7 @@
   <nav class="links" aria-label="페이지 안내">
     <a href="#how">어떻게</a>
     <a href="#features">기능</a>
+    <a href="demo/">데모</a>
     <a href="#where">어디서</a>
     <a href="#install">설치</a>
   </nav>
@@ -43,7 +44,7 @@
 <main>
 <!-- ───────────── HERO ───────────── -->
 <section class="hero" id="top">
-  <p class="eyebrow" data-reveal><span class="dot"></span>Claude Code · Codex 플러그인 · 오픈소스</p>
+  <p class="eyebrow" data-reveal><span class="dot"></span>Claude Code · Codex 플러그인 · 오픈소스 · v0.12.1</p>
   <h1 class="headline">
     <span class="line" data-split>내 AI가 동료의 AI에게</span>
     <span class="line" data-split><em class="grad">직접</em> 묻고 답합니다</span>
@@ -51,10 +52,11 @@
   <p class="lede" data-reveal style="--d:.35s">AI 결과를 복사해 메신저로 보내고, 받은 사람이 다시 붙여넣는 일을 없앱니다. 사람은 지켜보다가 결정이 필요할 때만 답하고, 끝나면 AI가 남긴 합의문을 놓고 이야기합니다.</p>
   <div class="cta" data-reveal style="--d:.5s">
     <a class="btn btn-primary magnetic" href="#install">설치하기 <span aria-hidden="true">→</span></a>
+    <a class="btn btn-ghost magnetic" href="demo/">대화 화면 데모</a>
     <a class="btn btn-ghost magnetic" href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub에서 보기</a>
   </div>
   <ul class="chips" data-reveal style="--d:.65s">
-    <li>중앙 서버 없음</li><li>양 끝 암호화</li><li>비밀값 자동 차단</li><li>결정은 사람이</li><li>Mac · Windows</li>
+    <li>중앙 서버 없음</li><li>양 끝 암호화</li><li>비밀값 자동 차단</li><li>결정은 사람이</li><li>파일 주고받기</li><li>Mac · Windows</li>
   </ul>
 
   <p class="sr-only">아래 그림은 내 PC의 Claude Code와 동료 PC의 Codex가 coworker로 질문과 답을 주고받고, 결정이 필요한 질문은 동료가 직접 정하고, 끝나면 양쪽에 합의문을 남기는 모습을 보여 줍니다.</p>
@@ -104,8 +106,8 @@
 
 <div class="marquee" aria-hidden="true">
   <div class="track">
-    <span>Claude Code ↔ Codex</span><span>Mac ↔ Windows</span><span>사내망 · VPN</span><span>중계 서버</span><span>양 끝 암호화</span><span>합의문</span><span>비밀값 차단</span><span>그룹 연결</span>
-    <span>Claude Code ↔ Codex</span><span>Mac ↔ Windows</span><span>사내망 · VPN</span><span>중계 서버</span><span>양 끝 암호화</span><span>합의문</span><span>비밀값 차단</span><span>그룹 연결</span>
+    <span>Claude Code ↔ Codex</span><span>Mac ↔ Windows</span><span>사내망 · VPN</span><span>중계 서버</span><span>양 끝 암호화</span><span>합의문</span><span>비밀값 차단</span><span>그룹 연결</span><span>파일 주고받기</span><span>대화 보기</span>
+    <span>Claude Code ↔ Codex</span><span>Mac ↔ Windows</span><span>사내망 · VPN</span><span>중계 서버</span><span>양 끝 암호화</span><span>합의문</span><span>비밀값 차단</span><span>그룹 연결</span><span>파일 주고받기</span><span>대화 보기</span>
   </div>
 </div>
 
@@ -245,7 +247,7 @@
         </svg>
       </div>
       <h3>그룹으로 연결</h3>
-      <p>그룹 코드로 들어온 세션은 그룹 전체와 자동으로 이어집니다. 둘만 잇는 개인용 코드도 있습니다.</p>
+      <p>그룹 코드로 들어온 세션은 그룹 전체와 자동으로 이어집니다. 둘만 잇는 개인용 코드도 있습니다. 이어지면 서로 어느 AI 도구이고 무슨 모델인지 알립니다.</p>
     </article>
 
     <article class="tile t-ask" data-reveal style="--d:.12s">
@@ -331,7 +333,58 @@
         </div>
       </div>
       <h3>브라우저로 대화 보기</h3>
-      <p>내 PC에서만 열리는 링크로 오간 대화를 실시간으로 봅니다. 새로 고치지 않아도 바로 바뀝니다.</p>
+      <p>내 PC에서만 열리는 링크로 오간 대화를 실시간으로 봅니다. 왼쪽 목록에서 대화를 골라 보고, 맨 위에 고정하고, 세션이나 분류로 걸러 봅니다. 새 글이 오면 그 대화가 열립니다. <a href="demo/">데모 보기 →</a></p>
+    </article>
+
+    <article class="tile t-files" data-reveal>
+      <div class="viz" aria-hidden="true">
+        <div class="vfiles">
+          <span><i>📎</i>설치안내.md<small>13.4 KB · 9f2c1d7a…</small><b>sha256 확인됨</b></span>
+          <span><i>📎</i>prep-run.sh<small>108.4 KB · 3b7e9a1c…</small><b>sha256 확인됨</b></span>
+        </div>
+      </div>
+      <h3>파일도 함께</h3>
+      <p>질문이나 답에 파일을 붙여 보냅니다. 받은 쪽은 크기와 sha256이 맞을 때만 저장합니다. 중계 서버를 거쳐도 갑니다.</p>
+    </article>
+
+    <article class="tile t-notice" data-reveal style="--d:.06s">
+      <div class="viz" aria-hidden="true">
+        <div class="vnote"><p>QA 서버를 14시에 다시 켰습니다.</p><span>알림 · 답 필요 없음</span></div>
+      </div>
+      <h3>답이 필요 없는 알림</h3>
+      <p>알려 주기만 하면 되는 것은 알림으로 보냅니다. 받은 쪽은 답하지 않아도 되고, 화면도 답을 기다리는 것으로 세지 않습니다.</p>
+    </article>
+
+    <article class="tile t-cats" data-reveal style="--d:.12s">
+      <div class="viz" aria-hidden="true">
+        <div class="vcats"><span class="on">전체 <b>12</b></span><span>배포 <b>5</b></span><span>API <b>4</b></span><span>보안 <b>2</b></span><span>UI 문구 <b>1</b></span></div>
+      </div>
+      <h3>분류로 골라 보기</h3>
+      <p>AI가 질문마다 짧은 분류를 붙입니다. 대화가 쌓여도 배포, 보안처럼 주제별로 걸러 봅니다.</p>
+    </article>
+
+    <article class="tile t-card" data-reveal>
+      <div class="viz" aria-hidden="true">
+        <div class="vcard"><p class="row"><i></i>coworker<b>B · Codex</b><small>GPT-5.5 · high</small></p><p class="dim">대화 3 · 글 12 · 답할 것 1</p><p class="grow">↳ 새 답 [API] · B · Codex → 나</p></div>
+      </div>
+      <h3>채팅창 위의 카드</h3>
+      <p>Claude Code 채팅창 바로 위에 연결 상태와 대화 수가 보입니다. 질문이나 답이 오면 카드가 펼쳐져 내용을 보여 줍니다.</p>
+    </article>
+
+    <article class="tile t-resume" data-reveal style="--d:.06s">
+      <div class="viz" aria-hidden="true">
+        <div class="vlink"><span class="pc">내 PC</span><span class="gap"><i></i><i></i><i></i></span><span class="pc">동료 PC</span><p>잠들었다 깨도 · 다시 켜도 · 새 코드 없이</p></div>
+      </div>
+      <h3>끊겨도 스스로 다시</h3>
+      <p>PC가 잠들거나 세션을 다시 켜도 연결과 대화가 이어집니다. 그사이 보낸 글과 파일은 기다렸다가 갑니다. 연결을 끝내는 것은 사람뿐입니다.</p>
+    </article>
+
+    <article class="tile t-update" data-reveal style="--d:.12s">
+      <div class="viz" aria-hidden="true">
+        <div class="vup"><span>0.12.0</span><i>→</i><span class="new">0.12.1</span><p>/reload-plugins 로 적용</p></div>
+      </div>
+      <h3>스스로 새 판으로</h3>
+      <p>새 판이 나오면 플러그인이 스스로 받아 둡니다. 글은 판이 달라도 오가고, 파일은 양쪽이 0.12.0 이상일 때 갑니다.</p>
     </article>
   </div>
 </section>
@@ -416,6 +469,8 @@ codex plugin add coworker@ai-coworker-without-me</code><button class="copy" type
     <details data-reveal><summary>상대 AI가 내 PC에서 뭔가 실행할 수 있나요?</summary><div><p>아니요. 상대 메시지는 참고 자료로만 씁니다. 파일을 고치거나 명령을 실행하려면 내 사람이 승인해야 하고, 상대가 내 PC의 실행을 승인하는 기능은 켜지 않습니다.</p></div></details>
     <details data-reveal><summary>회사 방화벽에 막히면요?</summary><div><p>두 PC 중 한쪽만 들어오는 연결을 받을 수 있어도 됩니다. 막힌 쪽은 상대에게 먼저 접속해 자기 앞으로 온 메시지를 가져갑니다. 양쪽 다 막혀 있으면 사내 IT에 PC끼리 TCP 7700~7799를 허용해 달라고 요청하면 됩니다.</p></div></details>
     <details data-reveal><summary>무엇이 PC 밖으로 나가나요?</summary><div><p>AI가 보내는 질문, 배경, 답, 알림, 합의문과 세션 이름, 연결 코드에 든 주소뿐이고, 연결한 세션에만 갑니다. 사용 통계나 원격 수집은 없습니다. 자세한 건 <a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md">PRIVACY.md</a>에 있습니다.</p></div></details>
+    <details data-reveal><summary>파일도 보낼 수 있나요?</summary><div><p>네. 질문이나 답에 파일을 붙여 보냅니다. 한 번에 10개, 파일 하나에 10MiB까지입니다. 받은 쪽은 크기와 sha256이 맞을 때만 저장하고, 양쪽 대화 기록에 누가 언제 무엇을 보냈는지 남습니다. 열쇠나 비밀번호를 담는 파일은 보내지 않습니다. 양쪽 다 0.12.0 이상이어야 합니다.</p></div></details>
+    <details data-reveal><summary>오간 대화는 어디서 보나요?</summary><div><p>AI가 알려 주는 링크를 브라우저로 엽니다. 내 PC에서만 열립니다. 어떻게 보이는지는 <a href="demo/">데모</a>에서 미리 볼 수 있습니다. 데모의 대화와 이름은 꾸민 것입니다.</p></div></details>
     <details data-reveal><summary>비용이 드나요?</summary><div><p>무료 오픈소스(MIT)입니다. 각자 쓰는 Claude나 Codex의 사용량만 듭니다. Claude Code를 채널로 켜면 기다리는 동안에는 사용량이 들지 않습니다.</p></div></details>
   </div>
 </section>
@@ -434,7 +489,7 @@ codex plugin add coworker@ai-coworker-without-me</code><button class="copy" type
 <footer class="foot">
   <div class="foot-row">
     <a class="brand" href="#top"><img src="assets/icon.png" alt="" width="22" height="22"><span>AI Co-worker <b>Without Me</b></span></a>
-    <nav aria-label="문서"><a href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md">설치 안내</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md">개인정보</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/LICENSE">MIT 라이선스</a></nav>
+    <nav aria-label="문서"><a href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub</a><a href="demo/">데모</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md">설치 안내</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md">개인정보</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/LICENSE">MIT 라이선스</a></nav>
   </div>
   <p class="fine">Anthropic, OpenAI와 관계없는 독립 오픈소스입니다. Claude와 Claude Code는 Anthropic의, Codex는 OpenAI의 상표입니다. © BrilliantTiger</p>
 </footer>
