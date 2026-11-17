@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { version } from '../package.json'
-import { Bridge, defersToHuman, parsePorts, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
+import { Bridge, defersToHuman, MAX_CATEGORY, parsePorts, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
 import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
@@ -132,6 +132,8 @@ export function createSession(opts: SessionOptions) {
 
   Answer what is settled, ask your human what needs deciding
   - If the answer is already settled (it is in the code, the documents, a decision already recorded, or something your human already told you), answer right away with reply and say where it came from.
+  - When you open a bridge or connect, say which model you are and your reasoning effort (model, effort) if you know them. The other side sees them, and you see theirs under about in the connected event and list_connections. Do not guess.
+  - Give each question a category with send_question: a short topic label, so the humans can sort the conversations. Look at the labels already in use (inbox shows them) and reuse one when it fits.
   - A message with no_answer_needed: true is a notice. Tell your human what it says. You do not have to answer it; reply only when you have something to add or correct.
   - To tell the other side something that needs no answer, call send_question with no_answer_needed: true. Do not write "no answer needed" only in the text: the other side then cannot tell, and it keeps showing as a question that waits. Do not wait for an answer to a notice and do not write an agreement for it.
   - If the question needs a decision nobody has made yet (choosing between options, priorities, scope, schedule, anything your human would want a say in), do not decide it yourself. Call check_with_human with the question for your human, 2 to 6 options in their language, and the one you recommend. It tells the other side you are asking and opens a question window on your human's screen, where they pick a number or write their own answer. Their decision then goes to the other side by itself, marked as your human's decision, and you get a decision event; tell your human in one line what was sent. Do not leave a decision as plain text only.
@@ -179,6 +181,12 @@ export function createSession(opts: SessionOptions) {
   }
 
   const isCodex = () => clientLabel() === 'Codex'
+  // 이 세션이 어느 AI 도구이고 무슨 모델을 어떤 강도로 쓰는지 브릿지에 적는다. 상대에게 인사할 때 함께 간다.
+  // 도구는 MCP 클라이언트 이름에서 알고, 모델과 강도는 AI가 아는 만큼 적는다(Claude Code 에서는 채팅창 위 띠가 모델을 대신 알려 준다).
+  function introduce(b: Bridge, model?: string, effort?: string) {
+    const app = clientLabel()
+    b.setAbout({ ...(app === 'AI' ? {} : { app }), ...(model ? { model } : {}), ...(effort ? { effort } : {}) })
+  }
   // 채널 없이 켠 Claude Code 는 백그라운드 명령으로 기다린다. 명령을 걸어 두고 차례를 끝내므로, 기다리는 동안에도 사람이 바로 말을 걸 수 있다.
   // 소식이 오면 명령이 끝나고 Claude Code 가 AI를 깨운다(2026-11-10). wait_for_message 는 2분 동안 차례를 붙잡고 있었다.
   // Codex 는 백그라운드 명령이 끝나도 AI를 깨우지 않아서 wait_for_message 로 기다린다.
@@ -558,6 +566,8 @@ export function createSession(opts: SessionOptions) {
           .describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range).`),
         name: z.string().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> · <tool> @ <computer>".'),
         private: z.boolean().optional().describe('true: the code links only this session and the one who joins; they are not connected with the rest of the group.'),
+        model: z.string().min(1).max(60).optional().describe('The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess.'),
+        effort: z.string().min(1).max(60).optional().describe('Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess.'),
         expires_minutes: z
           .number()
           .int()
@@ -575,9 +585,10 @@ export function createSession(opts: SessionOptions) {
           ),
       },
     },
-    tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume }: { port?: number; name?: string; private?: boolean; expires_minutes?: number; resume?: string }) => {
+    tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume, model, effort }: { port?: number; name?: string; private?: boolean; expires_minutes?: number; resume?: string; model?: string; effort?: string }) => {
       if (resume) {
         const b = await resumeBridge(resume.trim())
+        introduce(b, model, effort)
         reopenWindows(b)
         const { relay: relayInfo, warn = '' } = await relayStatus(b)
         const connected = [...b.peers.values()].map(p => p.name)
@@ -600,6 +611,7 @@ export function createSession(opts: SessionOptions) {
       freshIfMoved()
       const b = getBridge()
       if (name) b.name = name
+      introduce(b, model, effort)
       b.open(port)
       const { relay: relayInfo, warn = '' } = await relayStatus(b)
       const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60_000).toISOString()
@@ -629,13 +641,16 @@ export function createSession(opts: SessionOptions) {
       inputSchema: {
         code: z.string().min(10).describe('The whole connection code, starting with "cw1."'),
         name: z.string().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> · <tool> @ <computer>".'),
+        model: z.string().min(1).max(60).optional().describe('The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess.'),
+        effort: z.string().min(1).max(60).optional().describe('Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess.'),
       },
     },
-    tool(async ({ code, name }: { code: string; name?: string }) => {
+    tool(async ({ code, name, model, effort }: { code: string; name?: string; model?: string; effort?: string }) => {
       await resolveFolder()
       freshIfMoved()
       const b = getBridge()
       if (name) b.name = name
+      introduce(b, model, effort)
       if (!b.isOpen) b.open()
       const { relay: relayInfo, warn = '' } = await relayStatus(b)
       const before = new Set(b.peers.keys())
@@ -723,10 +738,15 @@ export function createSession(opts: SessionOptions) {
           .boolean()
           .optional()
           .describe('true when this is a notice: something the other side should know that needs no answer. They do not have to answer, though they may. Do not wait for an answer to it.'),
+        category: z
+          .string()
+          .max(MAX_CATEGORY)
+          .optional()
+          .describe('A short topic label for this conversation, one to three words in your human\'s language (for example 배포, 보안, 일정). The humans sort and filter conversations by it. Reuse a label this bridge already uses when one fits; inbox shows them as category.'),
       },
     },
-    tool(async ({ question, context, to, answers, no_answer_needed }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one'; no_answer_needed?: boolean }) => ({
-      ...(await getBridge().askMany(to, question, context, answers, no_answer_needed === true)),
+    tool(async ({ question, context, to, answers, no_answer_needed, category }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one'; no_answer_needed?: boolean; category?: string }) => ({
+      ...(await getBridge().askMany(to, question, context, answers, no_answer_needed === true, category)),
       next: no_answer_needed
         ? `Tell your human what you told whom. It is a notice: do not wait for an answer to it and do not write an agreement for it. ${listen()}`
         : `Tell your human what you asked and whom. ${listen()}`,

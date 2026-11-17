@@ -64,7 +64,7 @@ export class Viewer {
     return { me: this.bridge.describe(), links: this.bridge.links(), connecting: this.bridge.connecting(), unread: this.bridge.unreadThreads(), conversations: [...this.bridge.threads.values()] }
   }
 
-  // Claude Code 의 채팅창 위 띠(plugin/claude/band.tsx)가 몇 초마다 읽는 짧은 요약. 대화 글은 넣지 않는다.
+  // Claude Code 의 채팅창 위 띠(plugin/claude/band.tsx)가 몇 초마다 읽는 짧은 요약. 대화 전체는 넣지 않고, 수와 최근 글 몇 개의 앞부분만 넣는다.
   // 대화는 대개 합의문 없이 질문과 답으로 끝난다(2026-11-16, 사람이 정함). 그래서 「차례」가 아니라 답을 빚진 대화만 센다.
   // yours: 상대가 물었고 이쪽이 아직 답하지 않았다. theirs: 이쪽이 물었고 상대가 아직 답하지 않았다.
   // 답이 필요 없는 알림도 질문으로 온다(2026-11-16, 사람이 지적함: 「답할 필요 없다는데 이쪽 AI가 답할 차례 이게 계속 뜨냐」).
@@ -87,7 +87,32 @@ export class Viewer {
       }
     }
     const me = this.bridge.describe()
-    return { name: me.name, open: me.open, links: this.bridge.links().map(l => ({ name: l.name, state: l.state })), connecting: this.bridge.connecting().length, waiting }
+    const threads = [...this.bridge.threads.values()]
+    // 대화 수는 화면과 같게 센다: 여럿에게 한 번에 보낸 질문은 하나다.
+    const counts = { conversations: new Set(threads.map(t => (t.ask && t.startedBy === 'me' ? `ask:${t.ask.id}` : t.id))).size, messages: threads.reduce((n, t) => n + t.messages.length, 0) }
+    // 가장 최근에 오간 글 몇 개. 띠가 새로 받은 질문과 답을 펼쳐 보인다(2026-11-17). 글은 앞부분만 준다.
+    const recent = threads
+      .flatMap(t => t.messages.map(m => ({ id: m.id, thread: t.id, at: m.at, from: m.from, peer: t.peerName, kind: m.kind, text: m.text.slice(0, RECENT_TEXT), category: t.category, noAnswer: m.noAnswer || undefined, human: m.human || undefined })))
+      .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
+      .slice(-RECENT)
+    return { name: me.name, about: me.about, open: me.open, links: this.bridge.links().map(l => ({ name: l.name, state: l.state, about: l.about })), connecting: this.bridge.connecting().length, waiting, counts, recent }
+  }
+
+  // 이 화면(또는 이 PC의 채팅창 위 띠)에서 온 요청인지. 표시 헤더가 있어야 하고, 브라우저가 알려 주는 출처가 이 화면이어야 한다.
+  private mine(req: Request) {
+    const origin = req.headers.get('origin')
+    const site = req.headers.get('sec-fetch-site')
+    const here = origin === null || [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`].includes(origin)
+    return req.headers.get('x-coworker-viewer') === '1' && here && (site === null || site === 'same-origin')
+  }
+
+  // Claude Code 의 채팅창 위 띠가 이 세션의 모델과 강도(effort)를 알려 준다. AI가 스스로 모를 때가 있어서 Claude Code 에서 읽은 것을 받는다.
+  // 브릿지가 그것을 기억하고, 상대에게 인사할 때 함께 전한다. 글자만, 한 줄, 60자까지 받는다.
+  private async introduce(req: Request, headers: Record<string, string>): Promise<Response> {
+    if (!this.mine(req)) return new Response('forbidden', { status: 403 })
+    const body = (await req.json().catch(() => null)) as { model?: unknown; effort?: unknown } | null
+    this.bridge.setAbout({ ...(typeof body?.model === 'string' ? { model: body.model } : {}), ...(typeof body?.effort === 'string' ? { effort: body.effort } : {}) })
+    return Response.json({ about: this.bridge.describe().about ?? {} }, { headers })
   }
 
   // 사람이 화면에서 접근키(연결 코드)를 새로 만든다. 사람을 더할 때, 그리고 끊긴 상대가 다시 들어오게 할 때 쓴다
@@ -97,10 +122,7 @@ export class Viewer {
   // 화면이 붙이는 표시 헤더가 있어야 하고(다른 사이트가 붙이면 브라우저가 먼저 허락을 묻는데, 이 서버는 허락하지 않는다),
   // 브라우저가 알려 주는 출처가 이 화면이어야 한다.
   private issue(req: Request, headers: Record<string, string>): Response {
-    const origin = req.headers.get('origin')
-    const site = req.headers.get('sec-fetch-site')
-    const here = origin === null || [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`].includes(origin)
-    if (req.headers.get('x-coworker-viewer') !== '1' || !here || (site !== null && site !== 'same-origin')) return new Response('forbidden', { status: 403 })
+    if (!this.mine(req)) return new Response('forbidden', { status: 403 })
     // 브릿지가 닫혀 있으면 만들지 않는다. 화면에서 누른 것으로 닫힌 브릿지를 다시 열지 않는다.
     if (!this.bridge.isOpen) return Response.json({ error: 'the bridge is closed' }, { status: 409, headers })
     const now = Date.now()
@@ -134,6 +156,7 @@ export class Viewer {
     if (req.method === 'GET' && path === `/${this.token}/data`) return Response.json(this.data(), { headers })
     if (req.method === 'GET' && path === `/${this.token}/status`) return Response.json(this.status(), { headers })
     if (req.method === 'POST' && path === `/${this.token}/code`) return this.issue(req, headers)
+    if (req.method === 'POST' && path === `/${this.token}/about`) return this.introduce(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/events`) return this.events(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/next`) return this.next(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/wake`) return this.wake(req, headers)
@@ -232,6 +255,10 @@ export class Viewer {
     return new Response(body, { headers: { ...headers, 'content-type': 'text/event-stream; charset=utf-8' } })
   }
 }
+
+// 요약에 넣는 최근 글의 수와, 글마다 주는 길이.
+const RECENT = 8
+const RECENT_TEXT = 400
 
 // 화면에서 만든 접근키를 쓸 수 있는 시간과, 다시 만들 수 있는 간격.
 const ISSUE_TTL_MS = 60 * 60_000

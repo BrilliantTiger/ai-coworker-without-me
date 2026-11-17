@@ -29,7 +29,7 @@ export const PAGE = `<!doctype html>
   --in: #e7eefe; --in-b: #2f5bd3; --out: #e3f4e7; --out-b: #17703c; --note: #fcf2d7; --note-b: #8f5c0e; --agree: #f0e8ff; --agree-b: #6f42c9;
   --accent: #2f5bd3; --accent2: #7c4ddb; --warn: #b3261e;
   --shadow: 0 1px 2px rgba(20, 20, 30, .06), 0 8px 24px rgba(20, 20, 30, .07);
-  --aur1: #9db8ff; --aur2: #c9b3ff; --aur3: #9fe3c0; --aur-o: .55;
+  --aur1: #9db8ff; --aur2: #c9b3ff; --aur3: #9fe3c0; --aur-o: .7;
   --spring: cubic-bezier(.34, 1.56, .64, 1); --bounce: cubic-bezier(.34, 1.56, .64, 1);
   --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
 }
@@ -45,7 +45,7 @@ export const PAGE = `<!doctype html>
     --in: #162242; --in-b: #8aa8ff; --out: #12301e; --out-b: #62d28d; --note: #32280e; --note-b: #f0b84a; --agree: #281d47; --agree-b: #b9a0ff;
     --accent: #8aa8ff; --accent2: #b9a0ff; --warn: #ff8a80;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .35);
-    --aur1: #2b4fb8; --aur2: #5a36b0; --aur3: #17694a; --aur-o: .42;
+    --aur1: #2b4fb8; --aur2: #5a36b0; --aur3: #17694a; --aur-o: .6;
   }
 }
 * { box-sizing: border-box; }
@@ -62,9 +62,9 @@ button:focus-visible, .node:focus-visible, summary:focus-visible { outline: 2px 
 .aurora i:nth-child(1) { left: -12vmax; top: -16vmax; background: radial-gradient(circle, var(--aur1), transparent 65%); }
 .aurora i:nth-child(2) { right: -14vmax; top: 4vmax; background: radial-gradient(circle, var(--aur2), transparent 65%); }
 .aurora i:nth-child(3) { left: 22vmax; bottom: -26vmax; background: radial-gradient(circle, var(--aur3), transparent 65%); }
-.on .aurora i:nth-child(1) { animation: drift1 26s ease-in-out infinite alternate; }
-.on .aurora i:nth-child(2) { animation: drift2 32s ease-in-out infinite alternate; }
-.on .aurora i:nth-child(3) { animation: drift3 38s ease-in-out infinite alternate; }
+.on .aurora i:nth-child(1) { animation: drift1 11s ease-in-out infinite alternate; }
+.on .aurora i:nth-child(2) { animation: drift2 14s ease-in-out infinite alternate; }
+.on .aurora i:nth-child(3) { animation: drift3 17s ease-in-out infinite alternate; }
 @keyframes drift1 { to { translate: 14vmax 10vmax; scale: 1.25; } }
 @keyframes drift2 { to { translate: -16vmax 12vmax; scale: .85; } }
 @keyframes drift3 { to { translate: -10vmax -14vmax; scale: 1.3; } }
@@ -90,11 +90,17 @@ button.chip { cursor: pointer; transition: scale .5s var(--spring), border-color
 button.chip:hover { border-color: var(--accent); }
 .on button.chip:hover { scale: 1.06; }
 .on button.chip:active { scale: .94; }
-.live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--out-b); position: relative; flex: none; }
-.on .live .dot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: inherit; animation: ping 1.8s ease-out infinite; }
-@keyframes ping { from { scale: 1; opacity: .7; } to { scale: 3.2; opacity: 0; } }
+.eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; flex: none; }
+.eq b { width: 3px; height: 100%; border-radius: 1px; background: var(--out-b); transform-origin: 50% 100%; scale: 1 .45; }
+.on .eq b { animation: eq .9s ease-in-out infinite alternate; }
+.on .eq b:nth-child(2) { animation-duration: .6s; }
+.on .eq b:nth-child(3) { animation-duration: 1.1s; }
+.on .eq b:nth-child(4) { animation-duration: .75s; }
+@keyframes eq { from { scale: 1 .25; } to { scale: 1 1; } }
 .live.off { color: var(--warn); border-color: var(--warn); }
-.live.off .dot { background: var(--warn); }
+.live.off .eq b { background: var(--warn); animation: none; scale: 1 .2; }
+/* 새 글이 오면 화면을 가로지르는 빛줄기 */
+.sweep { position: fixed; inset: 0; z-index: 25; pointer-events: none; opacity: 0; translate: -100% 0; background: linear-gradient(100deg, transparent 32%, var(--sw, var(--accent)) 50%, transparent 68%); }
 @supports ((animation-timeline: scroll()) and (animation-range: entry)) {
   .on .bar { animation: grow auto linear both; animation-timeline: scroll(root); }
   .on .top { animation: tuck auto linear both; animation-timeline: scroll(root); animation-range: 0px 140px; }
@@ -108,53 +114,72 @@ main { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding
 .refresh { margin: 2px 0 16px; }
 .offline .refresh { color: var(--warn); font-weight: 600; }
 
-/* 연결 그림 */
+/* 연결 무대: 세션마다 얼굴이 있는 캐릭터가 서 있다. 선을 따라 빛 알갱이가 흐르고, 글을 보내면 입을 움직이며 말풍선을 띄운다 */
 .stage { position: relative; border: 1px solid var(--line); border-radius: 18px; background: color-mix(in srgb, var(--card) 62%, transparent); box-shadow: var(--shadow); overflow: hidden; margin-bottom: 12px; }
-.stage::before { content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .4; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 28px 28px; -webkit-mask-image: radial-gradient(ellipse at center, #000 15%, transparent 72%); mask-image: radial-gradient(ellipse at center, #000 15%, transparent 72%); }
-.on .stage::before { animation: grid 14s linear infinite; }
-@keyframes grid { to { background-position: 28px 28px, 28px 28px; } }
+#flow { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 #net { display: block; width: 100%; position: relative; }
 #net text { font: 600 12px/1 var(--font); fill: var(--text); text-anchor: middle; paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; }
 #net .sub { font-weight: 400; font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
-#net .ini { fill: #fff; stroke: none; font-size: 15px; font-weight: 700; }
-.link { fill: none; stroke: var(--line); stroke-width: 2; }
-.flow { fill: none; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 1 15; opacity: .9; }
-.flow.a { stroke: var(--out-b); } .flow.b { stroke: var(--in-b); }
-.on .flow.a { animation: dash-a 1.8s linear infinite; }
-.on .flow.b { animation: dash-b 2.6s linear infinite; }
-@keyframes dash-a { to { stroke-dashoffset: -16; } }
-@keyframes dash-b { to { stroke-dashoffset: 16; } }
-.lk.down .link { stroke: var(--warn); stroke-dasharray: 6 8; }
-.lk.down .flow, .lk.ghost .flow { display: none; }
+#net .ab { font-weight: 500; font-size: 10.5px; fill: var(--muted); }
+.link { fill: none; stroke: var(--line); stroke-width: 1.5; opacity: .7; }
+.lk.down .link { stroke: var(--warn); stroke-dasharray: 6 8; opacity: 1; }
 .on .lk.down .link { animation: blink 1.8s ease-in-out infinite; }
 @keyframes blink { 50% { opacity: .3; } }
-.lk.ghost .link { stroke-dasharray: 3 7; opacity: .7; }
+.lk.ghost .link { stroke-dasharray: 3 7; }
 .node { cursor: pointer; outline-offset: 6px; }
 .node.me { cursor: default; }
-.node .core { fill: var(--in-b); stroke: var(--card); stroke-width: 2; }
-.node.me .core { fill: url(#gme); }
-.node.ghost .core { fill: var(--muted); stroke-dasharray: 3 3; opacity: .7; }
-.node.down .core, .node.closed .core { fill: var(--muted); }
-.node .halo { fill: var(--in-b); opacity: .14; }
-.node.me .halo { fill: var(--accent2); }
+.node .core { stroke: var(--card); stroke-width: 2; }
+.node .core-r, .node.sq .core-c { display: none; }
+.node.sq .core-r { display: inline; }
+.node.ghost .body { opacity: .55; }
+.node.down .body, .node.closed .body { filter: grayscale(1) brightness(.85); }
+.node .halo { fill: var(--tone, var(--in-b)); opacity: .16; }
 .node.down .halo { fill: var(--warn); }
-.on .node .halo { animation: halo 3.2s ease-in-out infinite; }
-@keyframes halo { 50% { scale: 1.28; opacity: .04; } }
-.on .node .fl { animation: float var(--fd, 5s) ease-in-out var(--fo, 0s) infinite alternate; }
-@keyframes float { from { translate: 0 -3px; } to { translate: 0 4px; } }
-.orbit, .hb { display: none; }
-.orbit circle { fill: var(--out-b); }
-.node.think .orbit { display: inline; }
-.on .node.think .orbit { animation: rot 1.4s linear infinite; }
-.node.human .hb { display: inline; }
+.node .spin { fill: none; stroke: var(--accent2); stroke-width: 1.5; stroke-dasharray: 4 7; opacity: .85; }
+.node.sel .core { stroke: var(--accent2); stroke-width: 4; }
+.eye { fill: #fff; }
+.pupil { fill: #1b1d2a; }
+.mouth { fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.omouth { fill: #fff; display: none; }
+.xeyes { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; display: none; }
+#net .zz { display: none; fill: var(--muted); stroke: none; font-size: 12px; font-weight: 800; }
+.node.down .eyes { display: none; }
+.node.down .xeyes, .node.down .zz { display: inline; }
+.node.talk .mouth, .node.wow .mouth { display: none; }
+.node.talk .omouth, .node.wow .omouth { display: inline; }
+.node.think .pupil { translate: -1.6px -2.2px; }
+.node.joy .mouth { stroke-width: 3.2; }
+.hb, .dots3 { display: none; }
+.node.human .hb, .node.think .dots3 { display: inline; }
 .hb circle { fill: var(--note-b); stroke: var(--card); stroke-width: 2; }
 #net .hb text { fill: var(--card); stroke: none; font-size: 11px; font-weight: 800; }
+.dots3 circle { fill: var(--tone, var(--out-b)); }
+.on .node .fl { animation: float var(--fd, 5s) ease-in-out var(--fo, 0s) infinite alternate; }
+@keyframes float { from { translate: 0 -4px; } to { translate: 0 5px; } }
+.on .node .body { animation: breathe 3.2s ease-in-out var(--fo, 0s) infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+@keyframes breathe { 50% { scale: 1.06 .95; } }
+.on .node .halo { animation: halo 2.6s ease-in-out infinite; }
+@keyframes halo { 50% { scale: 1.35; opacity: .05; } }
+.on .node .spin { animation: rot 7s linear infinite; }
+.on .node .eyes { animation: blink-eye var(--bd, 4.4s) var(--fo, 0s) infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes blink-eye { 0%, 91%, 100% { scale: 1 1; } 95% { scale: 1 .1; } }
+.on .node.talk .omouth { animation: chat .24s ease-in-out infinite alternate; transform-box: fill-box; transform-origin: center; }
+@keyframes chat { from { scale: 1 .3; } to { scale: 1 1; } }
+.on .node.joy .fl { animation: hop .45s var(--spring) 3; }
+@keyframes hop { 50% { translate: 0 -14px; } }
+.on .node.wow .body { animation: jolt .4s ease-out; transform-box: fill-box; transform-origin: center; }
+@keyframes jolt { 30% { scale: 1.18; } }
 .on .node.human .hb circle { animation: beat 1.4s ease-in-out infinite; }
-.rip { fill: none; stroke: var(--accent); stroke-width: 2; }
-.pkt { fill: var(--in-b); filter: drop-shadow(0 0 5px var(--in-b)); }
-.pkt.k-answer { fill: var(--out-b); filter: drop-shadow(0 0 5px var(--out-b)); }
-.pkt.k-note, .pkt.k-closed { fill: var(--note-b); filter: drop-shadow(0 0 5px var(--note-b)); }
-.pkt.k-agreement { fill: var(--agree-b); filter: drop-shadow(0 0 6px var(--agree-b)); }
+.on .dots3 circle { animation: hop3 1s ease-in-out infinite; }
+.on .dots3 circle:nth-child(2) { animation-delay: .15s; }
+.on .dots3 circle:nth-child(3) { animation-delay: .3s; }
+@keyframes hop3 { 0%, 60%, 100% { translate: 0 0; opacity: .5; } 30% { translate: 0 -4px; opacity: 1; } }
+.on #net .zz { animation: snore 2.4s ease-in-out infinite; }
+@keyframes snore { from { translate: 0 0; opacity: 0; } 30% { opacity: 1; } to { translate: 9px -15px; opacity: 0; } }
+/* 말풍선 */
+#talk { position: absolute; inset: 0; pointer-events: none; }
+.say { position: absolute; max-width: min(240px, 46%); translate: -50% -100%; transform-origin: 50% 100%; padding: 6px 10px; border-radius: 12px; font-size: 12px; line-height: 1.35; background: var(--card); color: var(--text); border: 1.5px solid var(--b, var(--in-b)); box-shadow: var(--shadow); overflow-wrap: anywhere; }
+.say::after { content: ''; position: absolute; left: 50%; bottom: -6px; width: 9px; height: 9px; translate: -50% 0; rotate: 45deg; background: var(--card); border-right: 1.5px solid var(--b, var(--in-b)); border-bottom: 1.5px solid var(--b, var(--in-b)); }
 .stats { position: relative; display: flex; gap: 10px 30px; flex-wrap: wrap; justify-content: center; align-items: flex-start; padding: 4px 12px 14px; }
 .stat { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 52px; font-size: 12px; line-height: 1.3; color: var(--muted); text-align: center; }
 .stat.hot { color: var(--note-b); }
@@ -168,7 +193,6 @@ main { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding
 .dg i { display: block; height: 1.2em; font-style: normal; }
 .dg i::before { content: attr(data-d); }
 .on .dg > span { transition: translate .8s var(--spring); }
-.stage .key { position: absolute; top: 10px; right: 10px; z-index: 2; }
 button.chip:disabled { opacity: .5; cursor: not-allowed; }
 .downs { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 0 12px 12px; }
 .downs:empty { display: none; }
@@ -208,6 +232,9 @@ button.chip:disabled { opacity: .5; cursor: not-allowed; }
 .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .badge { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 99px; background: var(--in); color: var(--in-b); white-space: nowrap; }
 .badge.out { background: var(--out); color: var(--out-b); }
+/* 질문에 붙은 분류 */
+.cat { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 99px; border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--line)); color: var(--accent2); white-space: nowrap; }
+.cat:empty { display: none; }
 .subject { font-size: 15px; font-weight: 650; margin: 0; overflow-wrap: anywhere; flex: 1 1 220px; min-width: 0; }
 .status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; color: var(--ring); background: color-mix(in srgb, var(--ring) 12%, transparent); }
 .sdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
@@ -217,6 +244,9 @@ button.chip:disabled { opacity: .5; cursor: not-allowed; }
 .conv[data-st^=answered] .ck, .conv[data-st=agreed] .ck { display: inline; }
 .conv[data-st^=answered] .sdot, .conv[data-st=agreed] .sdot { display: none; }
 .fxl { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; }
+.on .shine { animation: sheen 9s ease-in-out infinite; animation-delay: calc(var(--n, 0) * -1.7s); }
+@keyframes sheen { 0%, 84% { translate: -130% 0; } 100% { translate: 330% 0; } }
+.on .conv:hover { box-shadow: 0 2px 4px rgba(0, 0, 0, .12), 0 18px 44px rgba(0, 0, 0, .22); }
 .shine { position: absolute; top: 0; bottom: 0; left: 0; width: 45%; translate: -130% 0; background: linear-gradient(100deg, transparent, color-mix(in srgb, var(--ring) 30%, transparent), transparent); }
 @keyframes beat { 50% { scale: 1.6; opacity: .5; } }
 .ago { font-weight: 400; opacity: .85; font-variant-numeric: tabular-nums; }
@@ -329,21 +359,24 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
     <h1>Coworker <span>대화</span></h1>
   </div>
   <div class="chips">
-    <span class="chip live" id="live"><i class="dot"></i><span id="liveText">연결하는 중</span></span>
+    <span class="chip live" id="live"><i class="eq" aria-hidden="true"><b></b><b></b><b></b><b></b></i><span id="liveText">연결하는 중</span></span>
+    <button class="chip" id="issue" type="button">접근키 발급</button>
     <button class="chip" id="follow" type="button">새 글 따라가기 끄기</button>
     <button class="chip" id="motion" type="button">모션 끄기</button>
   </div>
 </header>
 <main>
   <section class="stage" id="stage" aria-label="연결 상태">
-    <button class="chip key" id="issue" type="button">접근키 발급</button>
+    <canvas id="flow" aria-hidden="true"></canvas>
     <svg id="net" role="img" aria-label="세션 연결 그림"></svg>
+    <div id="talk" aria-hidden="true"></div>
     <div class="stats" id="stats"></div>
     <div class="downs" id="downs"></div>
   </section>
   <p class="me" id="me"></p>
   <p class="refresh" id="refresh" role="status"></p>
   <div class="filters" id="filters" role="group" aria-label="세션을 골라 보기" hidden></div>
+  <div class="filters" id="cats" role="group" aria-label="분류를 골라 보기" hidden></div>
   <div id="list"></div>
   <div class="empty" id="empty" hidden><div class="radar" aria-hidden="true"></div><div id="emptyText">아직 주고받은 질문이 없습니다.</div></div>
 </main>
@@ -359,6 +392,7 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
   </div>
 </dialog>
 <div id="toasts" role="log" aria-live="polite"></div>
+<div class="sweep" id="sweep" aria-hidden="true"></div>
 <canvas id="fx" aria-hidden="true"></canvas>
 <script>
 const KIND = { question: '질문', answer: '답', note: '알림', closed: '마감', agreement: '합의문' }
@@ -465,7 +499,7 @@ function fx(node, frames, options) {
 const sky = (() => {
   const canvas = byId('sky')
   const ctx = canvas.getContext('2d')
-  let w = 0, h = 0, points = [], waves = [], raf = 0, px = -1e4, py = -1e4, rgb = '120,150,255'
+  let w = 0, h = 0, points = [], waves = [], shoots = [], nextShoot = 0, raf = 0, px = -1e4, py = -1e4, rgb = '120,150,255'
   const make = () => ({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - .5) * .28, vy: (Math.random() - .5) * .28, r: Math.random() * 1.5 + .6, p: Math.random() * 6.28 })
   function tone() {
     const m = /^#([0-9a-f]{6})$/i.exec(getComputedStyle(root).getPropertyValue('--accent').trim())
@@ -524,6 +558,28 @@ const sky = (() => {
       ctx.lineWidth = 2
       ctx.beginPath()
       ctx.arc(v.x, v.y, v.r, 0, 6.2832)
+      ctx.stroke()
+    }
+    // 가끔 별똥별이 지나간다.
+    if (step && now > nextShoot) {
+      nextShoot = now + 2200 + Math.random() * 3800
+      shoots.push({ x: Math.random() * w * .8, y: Math.random() * h * .45, vx: 9 + Math.random() * 7, vy: 3 + Math.random() * 3, life: 0 })
+    }
+    shoots = shoots.filter(v => v.life < 46 && v.x < w + 80)
+    for (const v of shoots) {
+      if (step) {
+        v.x += v.vx
+        v.y += v.vy
+        v.life++
+      }
+      const tail = ctx.createLinearGradient(v.x, v.y, v.x - v.vx * 9, v.y - v.vy * 9)
+      tail.addColorStop(0, 'rgba(' + rgb + ',' + (.85 * (1 - v.life / 46)).toFixed(3) + ')')
+      tail.addColorStop(1, 'rgba(' + rgb + ',0)')
+      ctx.strokeStyle = tail
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(v.x, v.y)
+      ctx.lineTo(v.x - v.vx * 9, v.y - v.vy * 9)
       ctx.stroke()
     }
   }
@@ -612,56 +668,101 @@ function reveal(node) {
   fx(node, [{ scale: 1.03, filter: 'brightness(1.2)' }, { scale: 1, filter: 'brightness(1)' }], { duration: 800, easing: 'ease-out' })
 }
 
-// 연결 그림. 가운데가 이 세션이고 둘레가 연결된 세션이다. 글이 오가면 그 선을 따라 빛이 날아간다.
+// 연결 무대. 가운데가 이 세션이고 둘레가 연결된 세션이다. 세션마다 얼굴이 있는 캐릭터가 서 있다.
+// 평소에도 선을 따라 빛 알갱이가 흐르고 바닥 격자가 다가온다. 글을 보내면 입을 움직이며 말풍선을 띄우고,
+// 그 글이 빛덩이로 날아가 닿으면 불꽃이 튄다. 캐릭터는 눈을 깜빡이고, 생각할 때와 끊겼을 때 표정이 다르다.
 const ME = ':me'
 const stage = (() => {
-  const box = byId('stage'), net = byId('net'), NS = 'http://www.w3.org/2000/svg'
+  const box = byId('stage'), net = byId('net'), flow = byId('flow'), talk = byId('talk'), ctx = flow.getContext('2d')
+  const NS = 'http://www.w3.org/2000/svg'
   const mk = (tag, cls, attrs) => {
     const e = document.createElementNS(NS, tag)
     if (cls) e.setAttribute('class', cls)
     for (const k in attrs || {}) e.setAttribute(k, attrs[k])
     return e
   }
-  const defs = mk('defs'), grad = mk('radialGradient', '', { id: 'gme', cx: '35%', cy: '30%', r: '80%' })
-  const s1 = mk('stop', '', { offset: '0' }), s2 = mk('stop', '', { offset: '1' })
-  s1.style.stopColor = 'var(--accent2)'
-  s2.style.stopColor = 'var(--accent)'
-  grad.append(s1, s2)
-  defs.append(grad)
-  const linkLayer = mk('g'), packetLayer = mk('g'), nodeLayer = mk('g')
-  net.append(defs, linkLayer, packetLayer, nodeLayer)
-  const nodes = new Map()
-  let W = 0, H = 190, raf = 0, packets = [], shown = []
+  // 세션마다 다른 몸 빛깔. 마지막 것은 이 세션의 것이다.
+  const PALETTE = [['#9db8ff', '#4f6fe0'], ['#7fe0a6', '#2b9a62'], ['#ffd27a', '#d18a1c'], ['#ffa8ba', '#de5c7b'], ['#84e3f2', '#2a9db3'], ['#cdb8ff', '#8763e6'], ['#d8c4ff', '#6f8cff']]
+  const defs = mk('defs')
+  PALETTE.forEach((pair, i) => {
+    const g = mk('radialGradient', '', { id: 'g' + i, cx: '35%', cy: '28%', r: '85%' })
+    const a = mk('stop', '', { offset: '0' }), b = mk('stop', '', { offset: '1' })
+    a.style.stopColor = pair[0]
+    b.style.stopColor = pair[1]
+    g.append(a, b)
+    defs.append(g)
+  })
+  const linkLayer = mk('g'), nodeLayer = mk('g')
+  net.append(defs, linkLayer, nodeLayer)
+  const nodes = new Map(), hues = new Map()
+  let W = 0, H = 230, raf = 0, shown = [], comets = [], sparks = [], rings = [], seen = 0, visible = true
+  const rgb = { inb: '138,168,255', outb: '98,210,141', note: '240,184,74', agree: '185,160,255', warn: '255,138,128', accent: '138,168,255' }
+  function tone() {
+    const css = getComputedStyle(root)
+    const read = (name, key) => {
+      const m = /^#([0-9a-f]{6})$/i.exec(css.getPropertyValue(name).trim())
+      if (m) rgb[key] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)).join(',')
+    }
+    read('--in-b', 'inb')
+    read('--out-b', 'outb')
+    read('--note-b', 'note')
+    read('--agree-b', 'agree')
+    read('--warn', 'warn')
+    read('--accent', 'accent')
+  }
+  const colorOf = kind => (kind === 'answer' ? rgb.outb : kind === 'agreement' ? rgb.agree : kind === 'note' || kind === 'closed' ? rgb.note : rgb.inb)
 
-  // 세션을 누르면 그 세션과 나눈 대화만 보인다. 다시 누르면 모두 보인다.
+  // 세션을 누르면 그 세션이 들어 있는 대화만 보인다. 다시 누르면 모두 보인다.
   function open(key) {
     setFilter(key)
     byId('filters').scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
   }
+  const num = v => v.toFixed(1)
   function node(key, kind) {
     let n = nodes.get(key)
     if (n) return n
-    const r = kind === 'me' ? 26 : kind === 'ghost' ? 15 : 20
-    const g = mk('g', 'node ' + kind), fl = mk('g', 'fl'), tip = mk('title')
-    const core = mk('circle', 'core', { r }), ini = mk('text', 'ini', { dy: '.35em' })
-    const orbit = mk('g', 'orbit')
-    orbit.append(mk('circle', '', { cx: r + 8, r: 3.2 }), mk('circle', '', { cx: -(r + 8), r: 2.2 }))
-    const hb = mk('g', 'hb', { transform: 'translate(' + (r * .78).toFixed(1) + ' ' + (-r * .78).toFixed(1) + ')' })
-    const mark = mk('text', '', { dy: '.35em' })
+    const r = kind === 'me' ? 28 : kind === 'ghost' ? 16 : 22
+    if (kind !== 'me' && !hues.has(key)) hues.set(key, hues.size % (PALETTE.length - 1))
+    const fill = 'url(#g' + (kind === 'me' ? PALETTE.length - 1 : hues.get(key)) + ')'
+    const g = mk('g', 'node ' + kind), fl = mk('g', 'fl'), body = mk('g', 'body'), tip = mk('title')
+    const eyes = mk('g', 'eyes')
+    let cross = ''
+    for (const side of [-1, 1]) {
+      const cx = side * r * .34, cy = -r * .12, s = r * .13
+      eyes.append(mk('ellipse', 'eye', { cx: num(cx), cy: num(cy), rx: num(r * .15), ry: num(r * .2) }), mk('circle', 'pupil', { cx: num(cx), cy: num(cy + r * .03), r: num(r * .075) }))
+      cross += 'M' + num(cx - s) + ' ' + num(cy - s) + 'L' + num(cx + s) + ' ' + num(cy + s) + 'M' + num(cx + s) + ' ' + num(cy - s) + 'L' + num(cx - s) + ' ' + num(cy + s)
+    }
+    const mouth = mk('path', 'mouth'), snore = mk('text', 'zz', { x: num(r * .75), y: num(-r * .85) })
+    snore.textContent = 'z'
+    body.append(
+      mk('circle', 'core core-c', { r, fill }),
+      mk('rect', 'core core-r', { x: -r, y: -r, width: r * 2, height: r * 2, rx: num(r * .42), fill }),
+      eyes,
+      mk('path', 'xeyes', { d: cross }),
+      mouth,
+      mk('ellipse', 'omouth', { cx: 0, cy: num(r * .38), rx: num(r * .16), ry: num(r * .2) }),
+    )
+    const hb = mk('g', 'hb', { transform: 'translate(' + num(r * .8) + ' ' + num(-r * .8) + ')' }), mark = mk('text', '', { dy: '.35em' })
     mark.textContent = '?'
     hb.append(mk('circle', '', { r: 9 }), mark)
-    const nm = mk('text', 'nm', { y: r + 20 }), sub = mk('text', 'sub', { y: r + 35 })
-    fl.append(mk('circle', 'halo', { r: r + 9 }), orbit, core, ini, hb)
-    g.append(tip, fl, nm, sub)
-    fl.style.setProperty('--fd', (4 + Math.random() * 3).toFixed(1) + 's')
+    const dots3 = mk('g', 'dots3', { transform: 'translate(0 ' + num(-r - 12) + ')' })
+    dots3.append(mk('circle', '', { cx: -7, r: 2.4 }), mk('circle', '', { cx: 0, r: 2.4 }), mk('circle', '', { cx: 7, r: 2.4 }))
+    const nm = mk('text', 'nm', { y: r + 22 }), sub = mk('text', 'sub', { y: r + 37 }), ab = mk('text', 'ab', { y: r + 51 })
+    fl.append(mk('circle', 'halo', { r: r + 10 }))
+    if (kind === 'me') fl.append(mk('circle', 'spin', { r: r + 7 }))
+    fl.append(body, hb, dots3, snore)
+    g.append(tip, fl, nm, sub, ab)
+    fl.style.setProperty('--fd', (3.6 + Math.random() * 2.6).toFixed(1) + 's')
     fl.style.setProperty('--fo', (-Math.random() * 5).toFixed(1) + 's')
+    fl.style.setProperty('--bd', (3.6 + Math.random() * 2.4).toFixed(1) + 's')
+    if (kind !== 'me') g.style.setProperty('--tone', PALETTE[hues.get(key)][0])
     nodeLayer.append(g)
-    n = { key, kind, g, fl, core, ini, nm, sub, tip, r, x: NaN, y: NaN, tx: 0, ty: 0, sign: 1, lk: null }
+    n = { key, kind, g, fl, mouth, nm, sub, ab, tip, r, x: NaN, y: NaN, tx: 0, ty: 0, sign: 1, lk: null, off: Math.random() * 2600, timers: {}, say: null }
     if (kind !== 'me') {
-      const lg = mk('g', 'lk' + (kind === 'ghost' ? ' ghost' : '')), paths = [mk('path', 'link'), mk('path', 'flow a'), mk('path', 'flow b')]
-      lg.append(...paths)
+      const lg = mk('g', 'lk' + (kind === 'ghost' ? ' ghost' : '')), link = mk('path', 'link')
+      lg.append(link)
       linkLayer.append(lg)
-      n.lk = { g: lg, paths }
+      n.lk = { g: lg, link }
       g.setAttribute('tabindex', '0')
       g.setAttribute('role', 'button')
       g.addEventListener('click', () => open(key))
@@ -678,16 +779,30 @@ const stage = (() => {
   function drop(n) {
     nodes.delete(n.key)
     if (n.lk) n.lk.g.remove()
+    if (n.say) n.say.remove()
     const a = fx(n.g, [{ opacity: 1 }, { opacity: 0 }], { duration: 400, easing: 'ease-in' })
     if (a) a.finished.then(() => n.g.remove(), () => n.g.remove())
     else n.g.remove()
   }
-  function label(n, name, sub, since) {
+  // 표정. 끊기면 찡그리고, 생각하거나 사람에게 묻는 중이면 입을 다물고, 평소에는 웃는다.
+  function face(n) {
+    const r = n.r, c = n.g.classList
+    const d = c.contains('down')
+      ? 'M' + num(-r * .26) + ' ' + num(r * .5) + 'Q0 ' + num(r * .28) + ' ' + num(r * .26) + ' ' + num(r * .5)
+      : c.contains('think') || c.contains('human')
+        ? 'M' + num(-r * .2) + ' ' + num(r * .4) + 'H' + num(r * .2)
+        : 'M' + num(-r * .3) + ' ' + num(r * .3) + 'Q0 ' + num(r * .6) + ' ' + num(r * .3) + ' ' + num(r * .3)
+    if (n.mouth.getAttribute('d') !== d) n.mouth.setAttribute('d', d)
+  }
+  function label(n, name, sub, since, about) {
     const chars = Array.from(name)
     put(n.nm, chars.length > 18 ? chars.slice(0, 17).join('') + '…' : name)
-    put(n.ini, (Array.from(name.trim())[0] || '?').toUpperCase())
-    put(n.tip, name + ' · ' + sub)
-    n.g.setAttribute('aria-label', name + ', ' + sub)
+    const who = about ? [about.app, about.model, about.effort].filter(Boolean).join(' · ') : ''
+    put(n.ab, who)
+    // Codex 는 네모난 몸, 그 밖에는 둥근 몸이다.
+    n.g.classList.toggle('sq', !!about && /codex/i.test(about.app || ''))
+    put(n.tip, name + ' · ' + sub + (who ? ' · ' + who : ''))
+    n.g.setAttribute('aria-label', name + ', ' + sub + (who ? ', ' + who : ''))
     if (since) {
       n.sub.dataset.pre = sub + ' '
       if (n.sub.dataset.since !== since) {
@@ -704,10 +819,15 @@ const stage = (() => {
     if (!me) return
     const peers = shown, n = peers.length
     W = Math.max(280, box.clientWidth)
-    H = n > 6 ? 340 : n > 2 ? 290 : 190
+    H = n > 6 ? 420 : n > 2 ? 370 : 280
     net.setAttribute('viewBox', '0 0 ' + W + ' ' + H)
     net.setAttribute('height', H)
-    const cy = H / 2 - 14
+    const dpr = Math.min(devicePixelRatio || 1, 2), full = box.clientHeight || H
+    flow.width = Math.round(W * dpr)
+    flow.height = Math.round(full * dpr)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    // 머리 위에 말풍선이 뜰 자리를 남긴다.
+    const cy = H / 2 + (n > 2 ? 22 : 16)
     me.tx = n === 1 ? W * .28 : W / 2
     me.ty = cy
     if (n === 1) {
@@ -715,7 +835,7 @@ const stage = (() => {
       peers[0].ty = cy
       peers[0].sign = -1
     } else {
-      const rx = Math.min(W * .38, 340), ry = H * .3
+      const rx = Math.min(W * .38, 340), ry = H * .23
       peers.forEach((p, i) => {
         const a = (n === 2 ? Math.PI : -Math.PI / 2) + (i * 2 * Math.PI) / n
         p.tx = W / 2 + Math.cos(a) * rx
@@ -727,83 +847,223 @@ const stage = (() => {
     const still = !moving()
     for (const p of [me].concat(peers))
       if (isNaN(p.x) || still) {
-        const from = p === me || still || isNaN(me.x) ? p : me
-        p.x = from === p ? p.tx : me.x
-        p.y = from === p ? p.ty : me.y
+        const own = p === me || still || isNaN(me.x)
+        p.x = own ? p.tx : me.x
+        p.y = own ? p.ty : me.y
       }
-    kick()
+    place()
+    run()
   }
   function ctrl(a, b) {
     const dx = b.x - a.x, dy = b.y - a.y
     return { x: (a.x + b.x) / 2 - dy * .16 * b.sign, y: (a.y + b.y) / 2 + dx * .16 * b.sign }
   }
-  function draw() {
+  const bez = (a, c, b, t) => {
+    const u = 1 - t
+    return { x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y }
+  }
+  function place() {
     const me = nodes.get(ME)
     for (const n of nodes.values()) {
-      n.g.style.transform = 'translate(' + n.x.toFixed(1) + 'px,' + n.y.toFixed(1) + 'px)'
-      if (!n.lk || !me) continue
+      if (isNaN(n.x)) continue
+      n.g.style.transform = 'translate(' + num(n.x) + 'px,' + num(n.y) + 'px)'
+      if (n.say) {
+        n.say.style.left = num(Math.min(W - 126, Math.max(126, n.x))) + 'px'
+        n.say.style.top = num(n.y - n.r - 18) + 'px'
+      }
+      if (!n.lk || !me || isNaN(me.x)) continue
       const c = ctrl(me, n)
-      const d = 'M' + me.x.toFixed(1) + ' ' + me.y.toFixed(1) + 'Q' + c.x.toFixed(1) + ' ' + c.y.toFixed(1) + ' ' + n.x.toFixed(1) + ' ' + n.y.toFixed(1)
-      for (const p of n.lk.paths) p.setAttribute('d', d)
+      n.lk.link.setAttribute('d', 'M' + num(me.x) + ' ' + num(me.y) + 'Q' + num(c.x) + ' ' + num(c.y) + ' ' + num(n.x) + ' ' + num(n.y))
     }
   }
-  function pulse(n) {
-    const rip = mk('circle', 'rip', { r: n.r })
-    n.g.insertBefore(rip, n.g.children[1])
-    const a = fx(rip, [{ scale: 1, opacity: .8 }, { scale: 2.6, opacity: 0 }], { duration: 750, easing: 'ease-out' })
-    if (a) a.finished.then(() => rip.remove(), () => rip.remove())
-    else rip.remove()
-    fx(n.core, [{ scale: 1 }, { scale: 1.28 }, { scale: 1 }], { duration: 520, easing: 'ease-out' })
+  // 잠깐 짓는 표정(말하기, 놀람, 기쁨). 시간이 지나면 저절로 돌아온다.
+  function emote(n, cls, ms) {
+    n.g.classList.add(cls)
+    clearTimeout(n.timers[cls])
+    n.timers[cls] = setTimeout(() => n.g.classList.remove(cls), ms)
   }
-  function fly(p, now) {
-    const me = nodes.get(ME), raw = (now - p.t0) / 900
+  // 말풍선. 보낸 글의 앞부분을 잠깐 보여 준다.
+  function say(n, text, kind) {
+    if (!moving() || !text) return
+    if (n.say) n.say.remove()
+    const flat = text.split(String.fromCharCode(10)).join(' ').trim(), chars = Array.from(flat)
+    const d = el('div', 'say', chars.length > 46 ? chars.slice(0, 45).join('') + '…' : flat)
+    d.style.setProperty('--b', 'var(--' + (kind === 'answer' ? 'out-b' : kind === 'agreement' ? 'agree-b' : kind === 'note' || kind === 'closed' ? 'note-b' : 'in-b') + ')')
+    d.style.left = num(Math.min(W - 126, Math.max(126, n.x))) + 'px'
+    d.style.top = num(n.y - n.r - 18) + 'px'
+    talk.append(d)
+    n.say = d
+    fx(d, [{ scale: 0, opacity: 0 }, { scale: 1, opacity: 1 }], { duration: 480, easing: SPRING })
+    setTimeout(() => {
+      const gone = () => {
+        d.remove()
+        if (n.say === d) n.say = null
+      }
+      const a = fx(d, [{ opacity: 1 }, { opacity: 0, translate: '-50% -125%' }], { duration: 420, easing: 'ease-in' })
+      if (a) a.finished.then(gone, gone)
+      else gone()
+    }, 3800)
+  }
+
+  // 아래부터는 캔버스에 그리는 것: 다가오는 바닥 격자, 선을 따라 흐르는 빛 알갱이, 퍼지는 고리, 날아가는 빛덩이와 불꽃.
+  function dot(x, y, r, color, alpha) {
+    ctx.fillStyle = 'rgba(' + color + ',' + (alpha * .22).toFixed(3) + ')'
+    ctx.beginPath()
+    ctx.arc(x, y, r * 2.8, 0, 6.2832)
+    ctx.fill()
+    ctx.fillStyle = 'rgba(' + color + ',' + alpha.toFixed(3) + ')'
+    ctx.beginPath()
+    ctx.arc(x, y, r, 0, 6.2832)
+    ctx.fill()
+  }
+  function floor(now) {
+    const y0 = H * .66, rows = 9, shift = (now / 1700) % 1
+    ctx.lineWidth = 1
+    for (let k = 0; k < rows; k++) {
+      const u = (k + shift) / rows, y = y0 + (H - y0) * u * u
+      ctx.strokeStyle = 'rgba(' + rgb.accent + ',' + (.04 + u * .18).toFixed(3) + ')'
+      ctx.beginPath()
+      ctx.moveTo(0, y)
+      ctx.lineTo(W, y)
+      ctx.stroke()
+    }
+    ctx.strokeStyle = 'rgba(' + rgb.accent + ',.09)'
+    for (let j = -12; j <= 12; j++) {
+      ctx.beginPath()
+      ctx.moveTo(W / 2 + j * 16, y0)
+      ctx.lineTo(W / 2 + j * (W / 10), H)
+      ctx.stroke()
+    }
+  }
+  function stream(me, n, now) {
+    const c = ctrl(me, n), count = 13
+    const nx = -(n.y - me.y), ny = n.x - me.x, len = Math.hypot(nx, ny) || 1
+    for (let dir = 0; dir < 2; dir++) {
+      const color = dir ? rgb.inb : rgb.outb, span = dir ? 2700 : 2100
+      for (let i = 0; i < count; i++) {
+        const raw = (now / span + i / count) % 1, glow = Math.sin(Math.PI * raw)
+        const p = bez(me, c, n, dir ? 1 - raw : raw), sway = Math.sin(raw * 11 + i * 1.7 + now / 420) * 3.2 * (dir ? -1 : 1)
+        dot(p.x + (nx / len) * sway, p.y + (ny / len) * sway, 1.2 + glow * 1.5, color, glow * .95)
+      }
+    }
+  }
+  // 닿지 않는 선에는 가운데에서 붉은 불티가 튄다.
+  function broken(me, n, now) {
+    const c = ctrl(me, n)
+    for (let i = 0; i < 6; i++) {
+      const p = bez(me, c, n, .5 + Math.sin(now / 170 + i * 2.1) * .07), lit = .5 + .5 * Math.sin(now / 90 + i * 1.3)
+      dot(p.x + Math.sin(now / 210 + i * 4) * 9, p.y + Math.cos(now / 260 + i * 3) * 9, 1.4, rgb.warn, lit * .8)
+    }
+  }
+  function sonar(n, now, color) {
+    const u = ((now + n.off) % 2600) / 2600
+    ctx.strokeStyle = 'rgba(' + color + ',' + ((1 - u) * .38).toFixed(3) + ')'
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.arc(n.x, n.y, n.r + 8 + u * 40, 0, 6.2832)
+    ctx.stroke()
+  }
+  function burst(x, y, color, many) {
+    for (let i = 0; i < many; i++) {
+      const a = Math.random() * 6.2832, v = 1 + Math.random() * 4.2
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 26 + Math.random() * 22, max: 48, color })
+    }
+    rings.push({ x, y, r: 12, color })
+    rings.push({ x, y, r: -8, color })
+  }
+  function arrive(c) {
+    burst(c.to.x, c.to.y, colorOf(c.kind), 30)
+    emote(c.to, 'wow', 700)
+    if (c.kind === 'answer' || c.kind === 'agreement') setTimeout(() => emote(c.to, 'joy', 1500), 450)
+  }
+  function comet(c, now, dt) {
+    const me = nodes.get(ME), raw = (now - c.t0) / c.span
     if (raw < 0) return true
-    if (raw >= 1.2 || !me || !nodes.has(p.peer.key)) {
-      for (const d of p.dots) d.remove()
-      if (!p.hit) pulse(p.to)
+    if (!me || !nodes.has(c.peer.key)) return false
+    if (raw >= 1) {
+      arrive(c)
       return false
     }
-    const c = ctrl(me, p.peer)
-    p.dots.forEach((d, i) => {
-      let t = Math.min(1, Math.max(0, raw - i * .035))
-      t = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
-      if (!p.out) t = 1 - t
-      const u = 1 - t
-      d.setAttribute('cx', (u * u * me.x + 2 * u * t * c.x + t * t * p.peer.x).toFixed(1))
-      d.setAttribute('cy', (u * u * me.y + 2 * u * t * c.y + t * t * p.peer.y).toFixed(1))
-      d.style.display = ''
-    })
-    if (raw >= 1 && !p.hit) {
-      p.hit = true
-      pulse(p.to)
+    const k = ctrl(me, c.peer), color = colorOf(c.kind)
+    const ease = t => (t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+    for (let i = 16; i >= 0; i--) {
+      const t = ease(Math.max(0, raw - i * .012)), p = bez(me, k, c.peer, c.out ? t : 1 - t)
+      dot(p.x, p.y, 5.5 * (1 - i / 20), color, 1 - i / 17)
+      if (i === 0 && Math.random() < .7 * dt) sparks.push({ x: p.x, y: p.y, vx: (Math.random() - .5) * 2.4, vy: (Math.random() - .5) * 2.4, life: 16 + Math.random() * 14, max: 30, color })
     }
     return true
   }
+  function paint(now, dt) {
+    ctx.clearRect(0, 0, flow.width, flow.height)
+    if (!moving()) return
+    floor(now)
+    const me = nodes.get(ME)
+    if (me && !isNaN(me.x)) {
+      for (const n of shown) {
+        if (n.kind !== 'peer' || isNaN(n.x)) continue
+        if (n.g.classList.contains('down')) broken(me, n, now)
+        else {
+          stream(me, n, now)
+          sonar(n, now, rgb.inb)
+        }
+      }
+      sonar(me, now, rgb.agree)
+    }
+    comets = comets.filter(c => comet(c, now, dt))
+    rings = rings.filter(g => g.r < 90)
+    for (const g of rings) {
+      g.r += 3.2 * dt
+      if (g.r <= 0) continue
+      ctx.strokeStyle = 'rgba(' + g.color + ',' + ((1 - g.r / 90) * .7).toFixed(3) + ')'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.arc(g.x, g.y, g.r, 0, 6.2832)
+      ctx.stroke()
+    }
+    sparks = sparks.filter(s => s.life > 0)
+    for (const s of sparks) {
+      s.x += s.vx * dt
+      s.y += s.vy * dt
+      s.vy += .06 * dt
+      s.life -= dt
+      dot(s.x, s.y, 1.5, s.color, Math.max(0, s.life / s.max))
+    }
+  }
   function tick(now) {
     raf = 0
-    let busy = false
+    const dt = Math.min(3, (now - seen) / 16.7)
+    seen = now
     const glide = moving()
     for (const n of nodes.values()) {
       const dx = n.tx - n.x, dy = n.ty - n.y
       if (glide && (Math.abs(dx) > .4 || Math.abs(dy) > .4)) {
-        n.x += dx * .13
-        n.y += dy * .13
-        busy = true
+        n.x += dx * Math.min(1, .13 * dt)
+        n.y += dy * Math.min(1, .13 * dt)
       } else {
         n.x = n.tx
         n.y = n.ty
       }
     }
-    draw()
-    packets = packets.filter(p => fly(p, now))
-    if (busy || packets.length) raf = requestAnimationFrame(tick)
+    place()
+    paint(now, dt)
+    if (moving() && !document.hidden && visible) raf = requestAnimationFrame(tick)
   }
-  function kick() {
-    if (!raf) raf = requestAnimationFrame(tick)
+  function run() {
+    if (raf) return
+    seen = performance.now()
+    raf = requestAnimationFrame(tick)
   }
   new ResizeObserver(layout).observe(box)
+  // 무대가 화면 밖에 있으면 그리지 않는다.
+  new IntersectionObserver(entries => {
+    visible = entries[0].isIntersecting
+    if (visible) run()
+  }).observe(box)
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', tone)
+  tone()
 
   return {
+    run,
     update(data, convs) {
       const me = node(ME, 'me'), want = new Set([ME]), act = new Map()
       const flag = (key, what) => act.set(key, Object.assign(act.get(key) || {}, { [what]: true }))
@@ -814,7 +1074,7 @@ const stage = (() => {
         else if (ph === 'checking_with_your_human') flag(ME, 'human')
         else if (ph === 'peer_checking_with_their_human') flag(c.peer, 'human')
       }
-      label(me, data.me.name, data.me.open ? '이 세션 · 포트 ' + data.me.port : '이 세션 · 브릿지 닫힘')
+      label(me, data.me.name, data.me.open ? '이 세션 · 포트 ' + data.me.port : '이 세션 · 브릿지 닫힘', '', data.me.about)
       me.g.classList.toggle('closed', !data.me.open)
       shown = []
       const said = []
@@ -825,14 +1085,14 @@ const stage = (() => {
         n.g.classList.toggle('down', down)
         n.lk.g.classList.toggle('down', down)
         const sub = down ? '다시 붙는 중' : l.via === 'relay' ? '중계로 연결됨' : l.via === 'pickup' ? '상대가 가져가는 중' : '연결됨'
-        label(n, l.name, sub, down ? l.since : '')
+        label(n, l.name, sub, down ? l.since : '', l.about)
         said.push(l.name + ' ' + sub)
       }
       for (const c of (data.connecting || []).slice(0, 4)) {
         const key = ':in:' + c.name, n = node(key, 'ghost')
         want.add(key)
         shown.push(n)
-        label(n, c.name, '소개받는 중')
+        label(n, c.name, '소개받는 중', '', null)
         said.push(c.name + ' 소개받는 중')
       }
       for (const n of [...nodes.values()]) {
@@ -840,25 +1100,21 @@ const stage = (() => {
         n.g.classList.toggle('think', !!a.think)
         n.g.classList.toggle('human', !!a.human)
         if (!want.has(n.key)) drop(n)
+        else face(n)
       }
       net.setAttribute('aria-label', said.length ? '연결된 세션 ' + said.length + '개: ' + said.join(', ') : '연결된 세션이 없습니다')
       layout()
     },
-    // 글 하나가 from 에서 to 로 날아간다.
-    send(from, to, kind, delay) {
+    // 글 하나가 from 에서 to 로 날아간다. 보낸 쪽은 입을 움직이며 말풍선을 띄운다.
+    send(from, to, kind, delay, text) {
       const a = nodes.get(from), b = nodes.get(to), me = nodes.get(ME)
-      if (!a || !b || !me || a === b) return
-      if (!moving()) return
-      const dots = []
-      for (let i = 0; i < 6; i++) {
-        const c = mk('circle', 'pkt k-' + kindOf(kind), { r: (5.5 - i * .8).toFixed(1) })
-        c.style.opacity = String(1 - i * .16)
-        c.style.display = 'none'
-        packetLayer.append(c)
-        dots.push(c)
-      }
-      packets.push({ peer: a === me ? b : a, out: a === me, to: b, t0: performance.now() + (delay || 0), dots })
-      kick()
+      if (!a || !b || !me || a === b || !moving()) return
+      setTimeout(() => {
+        emote(a, 'talk', 1400)
+        say(a, text, kind)
+      }, delay || 0)
+      comets.push({ peer: a === me ? b : a, out: a === me, to: b, kind, t0: performance.now() + (delay || 0) + 250, span: 1000 })
+      run()
     },
     center() {
       const r = box.getBoundingClientRect()
@@ -962,7 +1218,7 @@ function toast(n) {
   b.type = 'button'
   b.append(
     el('span', 'tk k-' + (n.m.noAnswer ? 'note' : kindOf(n.m.kind)), '새 ' + (n.m.noAnswer ? '알림' : KIND[n.m.kind] ?? n.m.kind)),
-    el('span', 'tw', n.m.from === 'me' ? '나 → ' + n.c.peerName : n.c.peerName + ' → 나'),
+    el('span', 'tw', (n.m.from === 'me' ? '나 → ' + n.c.peerName : n.c.peerName + ' → 나') + (n.c.category ? ' · ' + n.c.category : '')),
     el('span', 'ts', n.c.subject),
     el('i', 'life'),
   )
@@ -999,7 +1255,8 @@ function makeCard() {
   tick.setAttribute('d', 'M3 8.5l3.2 3L13 4.5')
   ck.append(tick)
   status.append(el('i', 'sdot'), ck, stext, agoEl)
-  head.append(badge, subject, status)
+  const cat = el('span', 'cat')
+  head.append(badge, cat, subject, status)
   const meta = el('div', 'meta'), msgs = el('ol', 'msgs'), typing = el('div', 'typing'), dots = el('span', 'dots'), tlabel = el('span'), timer = el('span', 'timer')
   dots.append(el('i'), el('i'), el('i'))
   dots.setAttribute('aria-hidden', 'true')
@@ -1009,7 +1266,7 @@ function makeCard() {
   glow.append(shine)
   card.append(glow, head, meta, people, msgs, typing)
   wrap.append(card)
-  return { wrap, card, badge, subject, status, stext, tick, shine, ago: agoEl, meta, people, msgs, typing, tlabel, timer, seen: new Map(), st: undefined, label: '', peers: [] }
+  return { wrap, card, badge, cat, subject, status, stext, tick, shine, ago: agoEl, meta, people, msgs, typing, tlabel, timer, seen: new Map(), st: undefined, label: '', peers: [], category: '' }
 }
 function bubble(c, m, everyone) {
   const cls = m.kind === 'agreement' ? 'agreement' : m.kind === 'note' || m.kind === 'closed' ? 'note' : m.from === 'me' ? 'mine' : 'peer'
@@ -1070,6 +1327,8 @@ function paint(v, room, live, index, news) {
   const mine = c.startedBy === 'me', first = c.messages[0]
   const names = convs.map(one => one.peerName)
   v.peers = convs.map(one => one.peer)
+  v.category = c.category || ''
+  put(v.cat, v.category)
   const what = first && first.noAnswer ? '알림' : '질문'
   put(v.badge, group ? '여럿에게 보낸 ' + what : mine ? '보낸 ' + what : '받은 ' + what)
   v.badge.classList.toggle('out', mine)
@@ -1152,10 +1411,17 @@ function paint(v, room, live, index, news) {
 }
 
 // 여러 세션과 이어져 있으면 세션을 골라 그 세션과 나눈 대화만 본다. 연결 그림의 세션을 눌러도 된다.
-const filters = byId('filters')
+const filters = byId('filters'), cats = byId('cats')
 let filter = ''
+// 분류로도 골라 본다. 비면 전체, ':none' 이면 분류가 없는 대화다.
+let catFilter = ''
+const filtered = v => (!!filter && !v.peers.includes(filter)) || (!!catFilter && (catFilter === ':none' ? v.category !== '' : v.category !== catFilter))
 function setFilter(key) {
   filter = filter === key ? '' : key
+  applyFilter(true)
+}
+function setCat(key) {
+  catFilter = catFilter === key ? '' : key
   applyFilter(true)
 }
 function applyFilter(byPerson) {
@@ -1163,7 +1429,7 @@ function applyFilter(byPerson) {
   if (slide) for (const v of cards.values()) if (!v.wrap.hidden) before.set(v, v.wrap.getBoundingClientRect().top)
   let count = 0
   for (const v of cards.values()) {
-    const hide = !!filter && !v.peers.includes(filter)
+    const hide = filtered(v)
     if (v.wrap.hidden !== hide) v.wrap.hidden = hide
     if (!hide) count++
   }
@@ -1176,11 +1442,12 @@ function applyFilter(byPerson) {
       const dy = top - v.wrap.getBoundingClientRect().top
       if (Math.abs(dy) > 1) v.slide = v.wrap.animate([{ translate: '0 ' + dy.toFixed(1) + 'px' }, { translate: '0 0' }], { duration: 700, easing: SPRING })
     }
-  for (const b of filters.children) {
-    const on = (b.dataset.key || '') === filter
-    b.classList.toggle('sel', on)
-    b.setAttribute('aria-pressed', String(on))
-  }
+  for (const [row, picked] of [[filters, filter], [cats, catFilter]])
+    for (const b of row.children) {
+      const on = (b.dataset.key || '') === picked
+      b.classList.toggle('sel', on)
+      b.setAttribute('aria-pressed', String(on))
+    }
   stage.select(filter)
 }
 function syncFilters(groups, links) {
@@ -1206,6 +1473,33 @@ function syncFilters(groups, links) {
     return b
   }
   filters.replaceChildren(chip('', '전체', groups.length), ...[...seen].map(([key, one]) => chip(key, one.name, one.n)))
+}
+// 분류 이름표. 분류가 하나라도 있을 때만 보인다.
+function syncCats(groups) {
+  const seen = new Map()
+  let none = 0
+  for (const room of groups) {
+    const label = room.convs[0].category || ''
+    if (label) seen.set(label, (seen.get(label) || 0) + 1)
+    else none++
+  }
+  if (catFilter && catFilter !== ':none' && !seen.has(catFilter)) catFilter = ''
+  if (catFilter === ':none' && !none) catFilter = ''
+  cats.hidden = seen.size === 0
+  const sig = JSON.stringify([[...seen], none])
+  if (cats.dataset.sig === sig) return
+  cats.dataset.sig = sig
+  const chip = (key, name, n) => {
+    const b = el('button', 'chip')
+    b.type = 'button'
+    b.dataset.key = key
+    b.append(el('span', '', name), el('b', '', String(n)))
+    b.addEventListener('click', () => setCat(key))
+    return b
+  }
+  const all = [chip('', '모든 분류', groups.length), ...[...seen].map(([label, n]) => chip(label, label, n))]
+  if (none) all.push(chip(':none', '분류 없음', none))
+  cats.replaceChildren(...all)
 }
 
 // 접근키(연결 코드)를 화면에서 만든다. 사람을 더할 때, 그리고 끊긴 상대가 다시 들어오게 할 때 쓴다.
@@ -1278,18 +1572,31 @@ function announce(news) {
   const few = news.length <= 4
   news.forEach((n, i) => {
     const recent = i >= news.length - 3
-    if (i < 8) stage.send(n.m.from === 'me' ? ME : n.c.peer, n.m.from === 'me' ? n.c.peer : ME, n.m.kind, i * 140)
+    if (i < 8) stage.send(n.m.from === 'me' ? ME : n.c.peer, n.m.from === 'me' ? n.c.peer : ME, n.m.kind, i * 320, n.m.text)
     if (few || recent) typeIn(n.node.body, n.m.text)
     if (recent) toast(n)
+    // 카드가 한 번 부풀고 테두리에서 빛이 퍼진다.
+    if (recent) {
+      const glow = 'var(--' + (n.m.kind === 'answer' ? 'out-b' : n.m.kind === 'agreement' ? 'agree-b' : n.m.kind === 'question' ? 'in-b' : 'note-b') + ')'
+      fx(n.v.card, [{ scale: 1, boxShadow: '0 0 0 0 ' + glow }, { scale: 1.022, boxShadow: '0 0 0 10px transparent', offset: .45 }, { scale: 1, boxShadow: '0 0 0 0 transparent' }], { duration: 900, easing: 'ease-out' })
+    }
     if (n.m.kind === 'agreement' && recent) {
       const stamp = n.node.querySelector('.stamp')
       if (stamp) fx(stamp, [{ scale: 2.8, opacity: 0, rotate: '-24deg' }, { scale: 1, opacity: 1, rotate: '-6deg' }], { duration: 800, easing: SPRING })
       const r = n.node.getBoundingClientRect()
       confetti.burst(Math.min(innerWidth - 20, Math.max(20, r.left + r.width / 2)), Math.min(innerHeight - 20, Math.max(20, r.top + 20)))
+      // 합의는 드물다. 불꽃을 두 번 더 터뜨린다.
+      setTimeout(() => confetti.burst(innerWidth * .25, innerHeight * .4), 350)
+      setTimeout(() => confetti.burst(innerWidth * .75, innerHeight * .35), 700)
     }
   })
   const c = stage.center()
   sky.wave(c.x, c.y)
+  setTimeout(() => sky.wave(c.x, c.y), 260)
+  // 화면을 가로지르는 빛줄기. 가장 새 글의 종류에 맞는 빛깔이다.
+  const kind = news[news.length - 1].m.kind, sweep = byId('sweep')
+  sweep.style.setProperty('--sw', 'var(--' + (kind === 'answer' ? 'out-b' : kind === 'agreement' ? 'agree-b' : kind === 'question' ? 'in-b' : 'note-b') + ')')
+  fx(sweep, [{ translate: '-100% 0', opacity: 0 }, { opacity: .3, offset: .35 }, { translate: '100% 0', opacity: 0 }], { duration: 950, easing: 'ease-in-out' })
   const newest = news[news.length - 1]
   // 따라가기를 켰으면 새 글이 보이게 옮긴다. 사람이 방금 화면을 만졌으면 건드리지 않는다.
   if (follow && Date.now() - touched > 3000) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
@@ -1341,6 +1648,7 @@ function render(data) {
     let v = cards.get(room.id)
     if (!v) {
       v = makeCard()
+      v.card.style.setProperty('--n', String(cards.size % 5))
       cards.set(room.id, v)
       if (!live) {
         v.card.style.setProperty('--i', Math.min(i, 8))
@@ -1349,7 +1657,7 @@ function render(data) {
       list.insertBefore(v.wrap, prev ? prev.nextSibling : list.firstChild)
     }
     paint(v, room, live, i, news)
-    if (filter && !v.peers.includes(filter)) v.wrap.hidden = true
+    if (filtered(v)) v.wrap.hidden = true
     prev = v.wrap
   })
   for (const [id, v] of [...cards])
@@ -1358,6 +1666,7 @@ function render(data) {
       leave(v.wrap)
     }
   syncFilters(groups, links)
+  syncCats(groups)
   applyFilter(false)
   if (slide)
     for (const [v, top] of before) {
@@ -1397,8 +1706,8 @@ list.addEventListener('pointermove', e => {
       const r = t.card.getBoundingClientRect(), x = (t.x - r.left) / r.width, y = (t.y - r.top) / r.height, k = Math.min(1, 420 / r.height)
       t.card.style.setProperty('--mx', (x * 100).toFixed(1) + '%')
       t.card.style.setProperty('--my', (y * 100).toFixed(1) + '%')
-      t.card.style.setProperty('--ry', ((x - .5) * 2.4).toFixed(2) + 'deg')
-      t.card.style.setProperty('--rx', ((.5 - y) * 2.4 * k).toFixed(2) + 'deg')
+      t.card.style.setProperty('--ry', ((x - .5) * 5).toFixed(2) + 'deg')
+      t.card.style.setProperty('--rx', ((.5 - y) * 4.4 * k).toFixed(2) + 'deg')
     })
 })
 list.addEventListener('pointerout', e => {
@@ -1414,6 +1723,7 @@ function applyMotion() {
   root.classList.toggle('on', moving())
   put(motionButton, moving() ? '모션 끄기' : '모션 켜기')
   sky.run()
+  stage.run()
 }
 motionButton.addEventListener('click', () => {
   motionPref = moving() ? 'off' : 'on'
@@ -1475,6 +1785,7 @@ document.addEventListener('visibilitychange', () => {
   else {
     connect()
     sky.run()
+    stage.run()
   }
 })
 if (!document.hidden) connect()

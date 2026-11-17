@@ -41,14 +41,14 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   const claude = await session('claude-code')
   const codex = await session('codex-mcp-client')
 
-  const opened = await claude('open_bridge', {})
+  const opened = await claude('open_bridge', { model: 'Fable 5.2', effort: 'max' })
   expect(opened.name).toMatch(/ · Claude Code @ /)
   expect(opened.port).toBeGreaterThanOrEqual(7700)
   expect(opened.code).toStartWith('cw1.')
   expect(existsSync(join(home, 'bridges', `${opened.port}.json`))).toBe(true)
   expect(opened.viewer).toStartWith('http://127.0.0.1:')
 
-  const joined = await codex('connect', { code: opened.code })
+  const joined = await codex('connect', { code: opened.code, model: 'GPT-5.5' })
   expect(joined.connected).toBe(opened.name)
   expect(joined.myName).toMatch(/ · Codex @ /)
   expect(joined.myPort).not.toBe(opened.port)
@@ -58,13 +58,15 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   expect(opened.next).toContain(opened.viewer)
   expect(joined.next).toContain(joined.viewer)
 
-  expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'connected', peer: joined.myName })
+  // 이어지면 서로 어느 AI 도구이고 무슨 모델을 어떤 강도로 쓰는지 안다. 도구는 MCP 클라이언트에서 알고, 모델과 강도는 AI가 적은 것이다.
+  expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'connected', peer: joined.myName, about: { app: 'Codex', model: 'GPT-5.5' } })
+  expect((await codex('list_connections')).peers[0].about).toEqual({ app: 'Claude Code', model: 'Fable 5.2', effort: 'max' })
 
-  const asked = await codex('send_question', { question: 'What is 2+2?', context: 'just checking' })
+  const asked = await codex('send_question', { question: 'What is 2+2?', context: 'just checking', category: '산수' })
   expect(asked.delivery).toBe('delivered')
 
   const got = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
-  expect(got).toMatchObject({ type: 'message', kind: 'question', text: 'What is 2+2?', thread: asked.thread })
+  expect(got).toMatchObject({ type: 'message', kind: 'question', text: 'What is 2+2?', thread: asked.thread, category: '산수' })
 
   await claude('reply', { thread: got.thread, text: '4' })
   const answer = (await codex('wait_for_message', { timeout_sec: 5 })).events[0]

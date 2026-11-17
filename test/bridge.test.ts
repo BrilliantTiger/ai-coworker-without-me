@@ -733,14 +733,28 @@ describe('viewer', () => {
         expect.objectContaining({ id: sent.thread, startedBy: 'me', peerName: 'B · Codex', messages: [expect.objectContaining({ from: 'me', kind: 'question' })] }),
       ])
       // 연결 그림이 그리는 것: 연결된 세션마다 지금 닿는지. 대화의 peer 와 같은 key 로 이어 붙인다.
-      expect(data.links).toEqual([{ key: b.key, id: expect.any(String), name: 'B · Codex', state: 'connected', since: undefined, via: 'direct' }])
+      expect(data.links).toEqual([{ key: b.key, id: expect.any(String), name: 'B · Codex', about: undefined, state: 'connected', since: undefined, via: 'direct' }])
       expect(data.connecting).toEqual([])
       expect(data.conversations[0]!.peer).toBe(b.key)
-      // Claude Code 의 채팅창 위 띠가 읽는 짧은 요약. 누가 닿는지와 답을 기다리는 대화가 몇 개인지만 있고, 대화 글은 없다.
+      // Claude Code 의 채팅창 위 띠가 읽는 짧은 요약. 누가 닿는지, 답을 기다리는 대화가 몇 개인지, 대화와 글의 수, 최근 글 몇 개의 앞부분이 있다.
       // 받은 질문에는 이미 답했다. 질문과 답으로 끝난 대화는 세지 않는다. 보낸 질문 하나만 답을 기다린다.
       const status = await (await fetch(`${url}/status`)).json()
-      expect(status).toEqual({ name: 'A · Claude Code', open: true, links: [{ name: 'B · Codex', state: 'connected' }], connecting: 0, waiting: { yours: 0, theirs: 1, yourHuman: 0, theirHuman: 0 } })
-      expect(JSON.stringify(status)).not.toContain('Which port')
+      expect(status).toEqual({
+        name: 'A · Claude Code',
+        open: true,
+        links: [{ name: 'B · Codex', state: 'connected' }],
+        connecting: 0,
+        waiting: { yours: 0, theirs: 1, yourHuman: 0, theirHuman: 0 },
+        counts: { conversations: 2, messages: 3 },
+        // 띠가 새로 받은 글을 펼쳐 보이게, 가장 최근 글 몇 개의 앞부분을 온 차례대로 준다.
+        recent: [
+          { id: expect.any(String), thread: received.thread, at: expect.any(String), from: 'peer', peer: 'B · Codex', kind: 'question', text: 'Which port does the L2 API use?' },
+          { id: expect.any(String), thread: received.thread, at: expect.any(String), from: 'me', peer: 'B · Codex', kind: 'answer', text: '18001' },
+          { id: expect.any(String), thread: sent.thread, at: expect.any(String), from: 'me', peer: 'B · Codex', kind: 'question', text: 'And the database?' },
+        ],
+      })
+      // 함께 보낸 배경은 요약에 넣지 않는다.
+      expect(JSON.stringify(status)).not.toContain('compose mentions two')
       // 화면의 글은 한글 그대로 내려간다. \uXXXX 로 바뀐 글자가 없다.
       const html = await (await fetch(url)).text()
       expect(html).toContain('<h1>Coworker <span>대화</span></h1>')
@@ -789,6 +803,50 @@ describe('viewer', () => {
     } finally {
       viewer.stop()
     }
+  })
+
+  test('each session tells the other which AI tool, model and effort it runs, and tells again when that changes', async () => {
+    const a = make('A · Claude Code')
+    const b = make('B · Codex')
+    a.setAbout({ app: 'Claude Code', model: 'Fable 5.2', effort: 'max' })
+    b.setAbout({ app: 'Codex', model: 'GPT-5.5' })
+    a.open()
+    await b.connect(a.newCode())
+    // 이어질 때 서로 알린다. AI가 받는 소식과 화면 자료에 함께 나온다.
+    expect(await next(a, 'connected')).toMatchObject({ peer: 'B · Codex', about: { app: 'Codex', model: 'GPT-5.5' } })
+    expect(a.links()[0]!.about).toEqual({ app: 'Codex', model: 'GPT-5.5' })
+    expect(b.links()[0]!.about).toEqual({ app: 'Claude Code', model: 'Fable 5.2', effort: 'max' })
+    expect((await b.connections()).peers[0]!.about).toEqual({ app: 'Claude Code', model: 'Fable 5.2', effort: 'max' })
+    expect(a.describe().about).toEqual({ app: 'Claude Code', model: 'Fable 5.2', effort: 'max' })
+    // 모델이나 강도를 바꾸면 다시 인사해서 알린다. 준 것만 바뀐다.
+    a.setAbout({ effort: 'high' })
+    for (let i = 0; i < 50 && b.links()[0]!.about?.effort !== 'high'; i++) await Bun.sleep(20)
+    expect(b.links()[0]!.about).toEqual({ app: 'Claude Code', model: 'Fable 5.2', effort: 'high' })
+    // 상대가 보낸 것은 글자만, 한 줄, 60자까지 받는다. 모르는 항목은 버린다.
+    b.setAbout({ model: `  GPT\n5.5 ${'x'.repeat(100)}`, effort: 7 as unknown as string, extra: 'no' } as never)
+    for (let i = 0; i < 50 && !a.links()[0]!.about?.model?.startsWith('GPT 5.5'); i++) await Bun.sleep(20)
+    expect(a.links()[0]!.about).toEqual({ app: 'Codex', model: `GPT 5.5 ${'x'.repeat(52)}` })
+  })
+
+  test('a question carries a short category the humans sort by', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const sent = (await b.askMany(undefined, 'Can we deploy on Friday?', undefined, 'all', false, '  배포\n일정  ')) as { thread: string }
+    const got = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    // 한 줄로 다듬어 양쪽 대화에 붙고, 받은 AI의 소식과 대화 요약에도 나온다.
+    expect(got).toMatchObject({ kind: 'question', category: '배포 일정' })
+    expect(a.threads.get(got.thread)!.category).toBe('배포 일정')
+    expect(b.threads.get(sent.thread)!.category).toBe('배포 일정')
+    expect(a.threadSummaries()[0]).toMatchObject({ category: '배포 일정' })
+    // 답에도 그 대화의 분류가 따라온다.
+    await a.reply(got.thread, 'Yes, after 16:00.')
+    expect(await next(b, 'message')).toMatchObject({ kind: 'answer', category: '배포 일정' })
+    // 30자가 넘으면 자른다. 분류 없이 보낸 질문에는 없다.
+    const long = (await b.askMany(undefined, 'Another one?', undefined, 'all', false, 'x'.repeat(50))) as { thread: string }
+    expect(b.threads.get(long.thread)!.category).toBe('x'.repeat(30))
+    await b.ask(undefined, 'And one without?')
+    await next(a, 'message')
+    expect([...a.threads.values()].map(t => t.category)).toEqual(['배포 일정', 'x'.repeat(30), undefined])
   })
 
   test('a notice needs no answer: both sides know it, nothing waits for it, and the receiver may still answer', async () => {

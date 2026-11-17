@@ -56,9 +56,27 @@ const LINK_ERRORS: Record<LinkError, string> = {
 // lastSeen: 상대에게서 마지막으로 무엇이든 받은 때. lastError: 마지막으로 닿지 못한 까닭. retryAt: 다음에 다시 붙어 볼 때.
 // token: 상대가 이쪽을 잊었을 때 들고 다시 들어갈 토큰. 상대의 연결 코드에 있던 것이거나, 상대가 인사하며 건넨 것이다.
 // given: 이쪽이 상대에게 건넨 토큰. 이쪽이 상대를 잊어도 상대가 이것을 들고 다시 들어온다. 그래서 어느 쪽에서든 다시 붙는다.
+// 세션이 어느 AI 도구이고(app), 무슨 모델을(model), 어떤 강도로(effort) 쓰는지. 서로 인사할 때 알린다(2026-11-17, 사람이 정함:
+// 「AI이 어디꺼고, 모델이 뭔지 그리고 effort 가 뭔지 서로 알면 좋고」). 모르는 것은 비운다.
+export type About = { app?: string; model?: string; effort?: string }
+const MAX_ABOUT = 60
+// 상대가 보낸 것도, 이쪽 AI가 적은 것도 같은 규칙으로 다듬는다: 글자만, 한 줄, 60자까지.
+export function cleanAbout(value: unknown): About | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const out: About = {}
+  for (const key of ['app', 'model', 'effort'] as const) {
+    const v = (value as Record<string, unknown>)[key]
+    if (typeof v !== 'string') continue
+    const text = v.replace(/\s+/g, ' ').trim().slice(0, MAX_ABOUT)
+    if (text) out[key] = text
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
 export type Peer = {
   key: string
   name: string
+  about?: About
   addrs: string[]
   port: number
   lastAddr?: string
@@ -127,6 +145,8 @@ export type Thread = {
   startedBy: 'me' | 'peer'
   status: ThreadStatus
   ask?: AskInfo
+  // 질문을 보낸 쪽 AI가 붙인 분류(예: 배포, 보안). 사람이 화면에서 골라 본다(2026-11-17).
+  category?: string
   messages: ThreadMessage[]
   // 상대가 자기 사람에게 묻기 시작한 때. 「사람에게 확인 중」 알림을 받았거나, 답에 「사람에게 올렸다」고만 썼을 때다.
   humanSince?: string
@@ -155,7 +175,8 @@ export type AskProgress = { id: string; answers: AnswerMode; asked: string[]; an
 
 export type BridgeEvent =
   // again: 이미 이어져 있던 상대가 다시 켜져 돌아왔다.
-  | { type: 'connected'; peer: string; via?: string; again?: boolean; at: string }
+  // about: 그 세션이 어느 AI 도구이고 무슨 모델을 어떤 강도로 쓰는지. 상대가 알려 준 만큼만 있다.
+  | { type: 'connected'; peer: string; via?: string; again?: boolean; about?: About; at: string }
   | {
       type: 'message'
       thread: string
@@ -171,6 +192,8 @@ export type BridgeEvent =
       human?: boolean
       // 답이 필요 없는 알림이다. 답하지 않아도 되고, 덧붙일 것이 있으면 답해도 된다.
       no_answer_needed?: boolean
+      // 그 대화에 붙은 분류.
+      category?: string
       at: string
     }
   | { type: 'peer_closed'; peer: string; at: string }
@@ -221,7 +244,16 @@ type WireMessage = {
   human?: boolean
   // 답이 필요 없는 알림. 이 항목을 모르는 옛 판은 그냥 질문으로 받는다.
   noAnswer?: boolean
+  // 질문에 붙인 분류. 대화의 첫 글에만 쓴다.
+  category?: string
   at: string
+}
+
+// 분류는 사람이 골라 보는 짧은 이름표다. 한 줄, 30자까지만 받는다. 상대가 보낸 것도 같은 규칙으로 다듬는다.
+export const MAX_CATEGORY = 30
+export function cleanCategory(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  return value.replace(/\s+/g, ' ').trim().slice(0, MAX_CATEGORY) || undefined
 }
 
 // 아직 답이 없는 질문. 마지막으로 오간 글이 질문이면 그 글이고, 답이면 없다. 알림(note)은 건너뛴다.
@@ -247,8 +279,8 @@ export type AgreementInput = {
 // 이미 이어진 상대도 주소나 포트가 바뀌면 hello 로 알린다. back 은 그 상대가 다시 켜져 돌아왔다는 뜻이다.
 type Payload =
   // rejoin: 받는 쪽이 보내는 쪽을 잊었다가 다시 붙을 때 들고 올 토큰. 보내는 쪽이 받는 쪽 키에만 쓰이게 만들어 건넨다.
-  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean; rejoin?: string }
-  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean; rejoin?: string }
+  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean; rejoin?: string; about?: About }
+  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean; rejoin?: string; about?: About }
   | { type: 'introduce'; member: Member }
   | { type: 'msg'; msg: WireMessage }
   | { type: 'ok' }
@@ -321,6 +353,8 @@ export type SavedBridge = {
   ended?: Ended[]
   // 중계 서버 우편함의 비밀. 다시 켜도 같은 우편함을 쓰므로, 양쪽이 다 다시 켜져도 서로의 우편함을 찾는다.
   relaySecret?: string
+  // 이 세션의 소개. 다시 켜도 남는다.
+  about?: About
   seen: string[]
   closedAsks: [string, string][]
   // 왔지만 AI가 아직 읽지 않은 소식. 다시 켠 뒤 inbox 나 기다리기로 받는다.
@@ -417,13 +451,15 @@ const isoOf = (ms: number | undefined) => (ms ? new Date(ms).toISOString() : und
 // 기억해 두는 「쓴 코드」와 「끝난 연결」의 수.
 const MAX_USED = 500
 const MAX_ENDED = 20
-const savedPeer = (p: Peer) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given })
+const savedPeer = (p: Peer) => ({ key: p.key, name: p.name, about: p.about, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given })
 // 이 PC가 잠들었다고 보는 시계의 빈틈. 5초마다 재는데 이만큼 넘게 비면 그동안 멈춰 있었다.
 const TICK_MS = 5000
 const PAUSE_MS = 30_000
 
 export class Bridge {
   readonly keys: KeyPair
+  // 이 세션의 소개(어느 AI 도구, 모델, 강도). 인사할 때 상대에게 알린다.
+  private about: About | undefined
   readonly key: string
   private readonly route: string
   name: string
@@ -518,10 +554,12 @@ export class Bridge {
   // 상대들은 이 세션을 같은 키로 알고 있으므로 새 연결 코드 없이 다시 이어진다. 바뀐 주소와 포트는 인사로 알린다.
   static restore(saved: SavedBridge, options: Omit<BridgeOptions, 'name' | 'keys'>): Bridge {
     const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } })
+    b.about = cleanAbout(saved.about)
     for (const p of saved.peers)
       b.peers.set(p.key, {
         key: p.key,
         name: p.name,
+        about: cleanAbout(p.about),
         addrs: p.addrs,
         port: p.port,
         private: p.private || undefined,
@@ -583,6 +621,7 @@ export class Bridge {
       publicKey: toB64(this.keys.publicKey),
       secretKey: toB64(this.keys.secretKey),
       port: this.port,
+      about: this.about,
       peers: [...this.peers.values()].map(savedPeer),
       threads: [...this.threads.values()],
       outbox: this.outbox,
@@ -720,6 +759,7 @@ export class Bridge {
         key: peer.key,
         id: peerId(peer.key),
         name: peer.name,
+        about: peer.about,
         state: down ? ('reconnecting' as const) : ('connected' as const),
         since: isoOf(down?.since),
         via: peer.lastAddr ? (isRelayAddr(peer.lastAddr) ? ('relay' as const) : ('direct' as const)) : pulling ? ('pickup' as const) : ('direct' as const),
@@ -735,14 +775,15 @@ export class Bridge {
 
   // to 가 여러 명이나 everyone 이면 받는 사람마다 대화를 하나씩 만들고 같은 ask 로 묶는다. 한 명이면 ask 와 같다.
   // noAnswer: 답이 필요 없는 알림으로 보낸다. 받은 쪽은 답하지 않아도 되고, 답해도 된다.
-  async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all', noAnswer = false) {
+  // category: 사람이 골라 볼 수 있게 붙이는 짧은 분류.
+  async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all', noAnswer = false, category?: string) {
     const peers = await this.resolvePeers(to)
-    if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context, undefined, noAnswer)
+    if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context, undefined, noAnswer, category)
     const ask: AskInfo = { id: randomUUID().slice(0, 8), to: peers.map(p => p.name), answers }
     const sent = await Promise.all(
       peers.map(peer =>
         // 한 곳이 거절해도 나머지는 보낸다.
-        this.sendQuestion(peer, question, context, ask, noAnswer).catch(e => ({
+        this.sendQuestion(peer, question, context, ask, noAnswer, category).catch(e => ({
           thread: undefined,
           to: peer.name,
           delivery: 'refused' as const,
@@ -753,8 +794,9 @@ export class Bridge {
     return { ask: ask.id, answers, to: ask.to, sent }
   }
 
-  private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false) {
-    assertNoSecrets({ question, context })
+  private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false, category?: string) {
+    assertNoSecrets({ question, context, category })
+    const label = cleanCategory(category)
     const thread: Thread = {
       id: randomUUID().slice(0, 8),
       peer: peer.key,
@@ -764,11 +806,12 @@ export class Bridge {
       startedBy: 'me',
       status: 'waiting_for_peer',
       ask,
+      category: label,
       messages: [],
     }
     this.threads.set(thread.id, thread)
     const notice = noAnswer ? { noAnswer: true } : {}
-    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, ...notice, at: now() }
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, ...notice, category: label, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, ...notice, at: msg.at })
     this.changed()
     try {
@@ -912,6 +955,7 @@ export class Bridge {
         const error = !reachable && peer.lastError
         return {
           name: peer.name,
+          about: peer.about,
           id: peerId(peer.key),
           group: !peer.private,
           reachable,
@@ -940,6 +984,7 @@ export class Bridge {
         id: t.id,
         with: t.peerName,
         subject: t.subject,
+        category: t.category,
         status: t.status,
         ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
         messages: counted(t),
@@ -953,7 +998,7 @@ export class Bridge {
 
   describe() {
     const relay = this.opts.relay ? { url: this.opts.relay, status: this.relayState } : undefined
-    return { name: this.name, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay }
+    return { name: this.name, about: this.about, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay }
   }
 
   // 중계 서버에 우편함이 열릴 때까지 잠깐 기다린다. 연결 코드를 넘기기 전에 상대가 닿을 수 있게 한다.
@@ -1078,14 +1123,14 @@ export class Bridge {
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
-      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined }
+      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), about: cleanAbout(payload.about), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined }
       // 그룹 코드로 들어왔으면, 이쪽 그룹의 다른 세션과 서로 소개한다. 소개받아 온 세션은 더 퍼뜨리지 않는다.
       const members = token && !token.private ? this.groupPeers().filter(p => p.key !== from) : []
       for (const m of members) void this.sendOrQueue(m, { type: 'introduce', member: memberOf(added) }).catch(() => {})
       const rejoin = this.rejoinFor(added)
       const again = !!token && 'again' in token
       this.addPeer(added, { emit: true, via: invited ? invite!.by : undefined, again, how: invited ? 'introduced' : again ? 'came back with its token' : 'code' })
-      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin })
+      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about })
     }
 
     // 상대에게서 무엇이든 왔으면 상대는 깨어 있다. 다시 붙기를 기다리던 중이면 바로 다시 붙어 본다.
@@ -1182,7 +1227,8 @@ export class Bridge {
     if (hello.back) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
     else this.changed()
     void this.flush()
-    return { type: 'hello_ack', name: this.name, rejoin: this.rejoinFor(peer) }
+    this.learn(peer, hello.about)
+    return { type: 'hello_ack', name: this.name, rejoin: this.rejoinFor(peer), about: this.about }
   }
 
   // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
@@ -1200,7 +1246,8 @@ export class Bridge {
         if (!isHelloFields(payload)) return null
         peer.addrs = payload.addrs
         peer.port = payload.port
-        return { type: 'hello_ack', name: this.name }
+        this.learn(peer, payload.about)
+        return { type: 'hello_ack', name: this.name, about: this.about }
       case 'introduce':
         // 개인용 코드로 이어진 상대가 소개하는 세션은 받지 않는다.
         if (!peer.private) this.invite(payload.member, peer.name)
@@ -1227,7 +1274,7 @@ export class Bridge {
     this.ended = this.ended.filter(e => e.id !== peerId(peer.key))
     // 바로 저장한다. 연결하자마자 프로세스가 죽어도 다시 켜면 이 상대에게 다시 붙는다.
     this.save()
-    if (options.emit) this.emit({ type: 'connected', peer: peer.name, via: options.via, again: options.again || undefined, at: now() })
+    if (options.emit) this.emit({ type: 'connected', peer: peer.name, via: options.via, again: options.again || undefined, about: peer.about, at: now() })
     else this.changed()
     void this.pollLoop(peer.key)
     return true
@@ -1435,6 +1482,7 @@ export class Bridge {
         startedBy: 'peer',
         status: 'your_turn',
         ask: isAskInfo(msg.ask) ? { id: msg.ask.id, to: msg.ask.to, answers: msg.ask.answers } : undefined,
+        category: cleanCategory(msg.category),
         messages: [],
       }
       this.threads.set(thread.id, thread)
@@ -1476,7 +1524,7 @@ export class Bridge {
       if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer.name, thread.id)
       ask = this.askProgress(thread.ask)
     }
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, ...(notice ? { no_answer_needed: true } : {}), at: now() })
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, ...(notice ? { no_answer_needed: true } : {}), ...(thread.category ? { category: thread.category } : {}), at: now() })
   }
 
   private peerAsksHuman(thread: Thread, inText: boolean) {
@@ -1774,12 +1822,30 @@ export class Bridge {
 
   // 인사한다. 상대가 이쪽을 잊으면 들고 올 토큰을 함께 건네고, 상대가 건넨 토큰은 받아 둔다.
   private async sayHello(peer: Peer, extra: { token?: string; back?: boolean } = {}) {
-    const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), ...extra })
+    const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, ...extra })
+    if (reply.type === 'hello_ack') this.learn(peer, reply.about)
     if (reply.type === 'hello_ack' && isToken(reply.rejoin)) {
       peer.token = reply.rejoin
       if (this.peers.has(peer.key)) this.dirty()
     }
     return reply
+  }
+
+  // 상대가 인사에 적어 보낸 자기 소개를 기억한다. 달라졌으면 화면에도 알린다.
+  private learn(peer: Peer, about: unknown) {
+    const next = cleanAbout(about)
+    if (JSON.stringify(next) === JSON.stringify(peer.about)) return
+    peer.about = next
+    if (this.peers.has(peer.key)) this.changed()
+  }
+
+  // 이 세션의 소개를 정한다. 준 것만 바꾸고, 달라졌으면 이어진 세션에 다시 인사해서 알린다.
+  setAbout(about: About) {
+    const next = cleanAbout({ ...this.about, ...about })
+    if (JSON.stringify(next) === JSON.stringify(this.about)) return
+    this.about = next
+    this.changed()
+    for (const peer of this.peers.values()) void this.sayHello(peer).catch(() => {})
   }
 
   // 이 PC 쪽 일을 기록한다: 잠들었다 깸(시계가 비었다), 주소가 바뀜(다른 네트워크로 옮김).
