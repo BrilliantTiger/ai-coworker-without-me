@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { saysNoAnswer } from '../src/bridge'
 import { PAGE } from '../src/page'
 
 // 대화 화면을 가짜 대화로 미리 본다. 진짜 세션과는 연결하지 않고, 아무것도 밖으로 보내지 않는다.
@@ -33,9 +34,13 @@ const MINSU = { key: 'bWluc3Uta2V5', id: 'a1b2c3', name: '민수 · Codex', abou
 const JIHYEON = { key: 'amloeWVvbi1rZXk', id: 'd4e5f6', name: '지현 · Claude Code (Windows)', about: { app: 'Claude Code', model: 'Opus 5.5' } }
 const now = () => new Date().toISOString()
 let made = 0
-const message = (from: 'me' | 'peer', kind: string, text: string, more: Partial<Message> = {}): Message => ({ id: `m${++made}`, from, kind, text, at: now(), ...more })
+// 실제 브릿지처럼, 글에 답이 필요 없다고만 적은 질문도 알림으로 표시한다.
+const message = (from: 'me' | 'peer', kind: string, text: string, more: Partial<Message> = {}): Message => ({ id: `m${++made}`, from, kind, text, at: now(), ...(kind === 'question' && saysNoAnswer(text) ? { noAnswer: true } : {}), ...more })
 const fresh = (): State => ({ me: { name: '연규 · Claude Code', about: { app: 'Claude Code', model: 'Fable 5.2', effort: 'max' }, open: true, port: 7701, relay: { url: 'https://relay.example', status: 'connected' } }, links: [], connecting: [], unread: [], conversations: [] })
 let state = fresh()
+// 화면에서 고정한 대화. 데모가 처음으로 돌아가도 남는다.
+const pins = new Set<string>()
+const shown = () => ({ ...state, conversations: state.conversations.map(c => (pins.has(c.id) ? { ...c, pinned: true } : c)) })
 const talk = (id: string) => state.conversations.find(c => c.id === id)!
 const link = (key: string) => state.links.find(l => l.key === key)!
 
@@ -154,7 +159,7 @@ const steps: [number, () => void][] = [
     },
   ],
   [2500, () => void (state.unread = [])],
-  // 답 필요 없다고 표시하지 않고 글로만 적어 보낸 옛 판의 알림. 읽고 답하지 않으면 얼마 뒤 조용해진다(주소에 ?quiet=6000 을 붙이면 6초).
+  // 답 필요 없다고 표시하지 않고 글로만 적어 보낸 알림(옛 판, 또는 표시를 잊은 AI). 브릿지가 글을 보고 알림으로 표시한다.
   [
     1500,
     () =>
@@ -222,7 +227,14 @@ const server = Bun.serve({
       return new Response(PAGE, {
         headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'" },
       })
-    if (path === '/demo/data') return Response.json(state)
+    if (path === '/demo/data') return Response.json(shown())
+    // 고정 단추가 부르는 주소. 진짜 서버의 /pin 과 같은 모양이다.
+    if (path === '/demo/pin' && req.method === 'POST')
+      return req.json().then((body: { threads?: string[]; pinned?: boolean }) => {
+        for (const id of body.threads ?? []) body.pinned ? pins.add(id) : pins.delete(id)
+        for (const send of [...watchers]) send()
+        return Response.json({ changed: (body.threads ?? []).length })
+      })
     // 채팅창 위 띠가 읽는 짧은 요약. 진짜 서버의 /status 와 같은 모양이다.
     if (path === '/demo/status') {
       const waiting = { yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 }
@@ -257,7 +269,7 @@ const server = Bun.serve({
       start(controller) {
         const send = () => {
           try {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(state)}\n\n`))
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(shown())}\n\n`))
           } catch {
             stop()
           }

@@ -131,6 +131,17 @@ export class Viewer {
     return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers })
   }
 
+  // 사람이 화면에서 대화를 맨 위에 고정하거나 푼다(2026-11-17, 사람이 정함: 「질답 정렬을 고정, 최신 질답, 순으로」).
+  // 접근키 발급과 같이 이 화면에서 온 요청만 받는다. 고정은 이 PC에만 남는다.
+  private async pin(req: Request, headers: Record<string, string>): Promise<Response> {
+    if (!this.mine(req)) return new Response('forbidden', { status: 403 })
+    const body = (await req.json().catch(() => null)) as { threads?: unknown; pinned?: unknown } | null
+    const threads = body?.threads
+    const ok = Array.isArray(threads) && threads.length > 0 && threads.length <= 64 && threads.every(id => typeof id === 'string' && id.length <= 200)
+    if (!ok || typeof body?.pinned !== 'boolean') return Response.json({ error: 'expected { threads: string[], pinned: boolean }' }, { status: 400, headers })
+    return Response.json({ changed: this.bridge.pin(threads as string[], body.pinned) }, { headers })
+  }
+
   // 백그라운드 명령이 지금 기다리고 있는지.
   get listening() {
     return this.listener !== undefined
@@ -157,6 +168,7 @@ export class Viewer {
     if (req.method === 'GET' && path === `/${this.token}/status`) return Response.json(this.status(), { headers })
     if (req.method === 'POST' && path === `/${this.token}/code`) return this.issue(req, headers)
     if (req.method === 'POST' && path === `/${this.token}/about`) return this.introduce(req, headers)
+    if (req.method === 'POST' && path === `/${this.token}/pin`) return this.pin(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/events`) return this.events(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/next`) return this.next(req, headers)
     if (req.method === 'GET' && path === `/${this.token}/wake`) return this.wake(req, headers)

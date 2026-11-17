@@ -147,6 +147,8 @@ export type Thread = {
   ask?: AskInfo
   // 질문을 보낸 쪽 AI가 붙인 분류(예: 배포, 보안). 사람이 화면에서 골라 본다(2026-11-17).
   category?: string
+  // 사람이 화면에서 「맨 위에 고정」한 대화(2026-11-17). 이 PC에서만 쓰고 상대에게는 보내지 않는다.
+  pinned?: boolean
   messages: ThreadMessage[]
   // 상대가 자기 사람에게 묻기 시작한 때. 「사람에게 확인 중」 알림을 받았거나, 답에 「사람에게 올렸다」고만 썼을 때다.
   humanSince?: string
@@ -254,6 +256,26 @@ export const MAX_CATEGORY = 30
 export function cleanCategory(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   return value.replace(/\s+/g, ' ').trim().slice(0, MAX_CATEGORY) || undefined
+}
+
+// 답이 필요 없다고 글에만 적어 보낸 알림을 알아본다. 0.9 이하 판은 표시(noAnswer)를 보내지 못하고, 새 판의 AI도 표시를 잊고 글로만 적을 때가 있다.
+// 그런 글을 질문으로 두면 화면과 채팅창 위 카드가 답을 기다린다고 보인다. 그래서 보낼 때와 받을 때 글을 보고 알림으로 표시한다.
+// 좁게 본다. 문장을 끝내는 물음표가 하나라도 있으면 질문이다. 조건(필요 없으면), 전하는 말(필요 없다고), 지난 일(필요 없었),
+// 부정(필요 없지 않), 묻는 말(필요 없나요)은 알림으로 보지 않는다. 「응답」과 response 는 HTTP 응답을 말할 때가 많아서 보지 않는다.
+// 잘못 알아봐도 잃는 것은 적다: 받은 AI는 글을 그대로 읽고, 알림에도 답할 수 있다.
+const NO_ANSWER_TEXT = [
+  /(?:답변|답장|답신|회신|대답|(?<![가-힣])답)(?:은|는|을|이|도)?\s*(?:하실|할|주실|줄)?\s*필요(?:(?:는|가|도)?\s*없(?!으면|다면|다고|다는|다며|다던|는지|을지|나요|습니까|었|지\s*않|는\s*(?:건|것은|것이|게)\s*아니)|하지\s*않(?:습니다|아요|음|다(?![고는며던면])))/,
+  /(?:답변|답장|답신|회신|대답|(?<![가-힣])답)(?:은|는)?\s*불필요(?!한지|하면|하다면)/,
+  /(?:답변|답장|답신|회신|대답|(?<![가-힣])답)(?:은|는|을)?\s*(?:안\s*(?:하셔|해|주셔|줘)도|(?:하|주)시?지\s*않(?:으셔|아)도)\s*(?:됩|돼|괜찮|되(?!나|는지|느냐|냐|겠습니까|겠어요|겠죠))/,
+  /(?<!\b(?:if|whether)\s)\bno\s+(?:reply|answer)\s+(?:is\s+)?(?:needed|required|necessary|expected)\b/i,
+  /\bno\s+need\s+to\s+(?:reply|answer|respond)\b/i,
+  /\b(?:do(?:es)?\s+not|don['’]?t|doesn['’]?t)\s+need\s+(?:to\s+)?(?:an?\s+|any\s+)?(?:reply|answer)\b/i,
+  /\bneed(?:n['’]?t|\s+not)\s+(?:reply|answer)\b/i,
+]
+// 문장을 끝내는 물음표. 주소 속의 ?id=3 같은 것은 세지 않는다.
+const ASKS = /[?？](?![A-Za-z0-9_%=&-])/
+export function saysNoAnswer(text: unknown): boolean {
+  return typeof text === 'string' && !ASKS.test(text) && NO_ANSWER_TEXT.some(re => re.test(text))
 }
 
 // 아직 답이 없는 질문. 마지막으로 오간 글이 질문이면 그 글이고, 답이면 없다. 알림(note)은 건너뛴다.
@@ -568,6 +590,8 @@ export class Bridge {
         given: isToken(p.given) ? p.given : undefined,
       })
     for (const t of saved.threads) b.threads.set(t.id, t)
+    // 글로만 답이 필요 없다고 적은 알림을 알아보기 전(0.10 이하)에 저장한 대화도 알림으로 표시한다.
+    for (const t of b.threads.values()) for (const m of t.messages ?? []) if (m.kind === 'question' && !m.noAnswer && saysNoAnswer(m.text)) m.noAnswer = true
     b.outbox = saved.outbox.filter(o => b.peers.has(o.peer))
     for (const t of saved.tokens) b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private })
     for (const u of saved.used ?? []) if (typeof u?.token === 'string' && typeof u.key === 'string') b.used.set(u.token, { key: u.key, private: !!u.private })
@@ -810,7 +834,8 @@ export class Bridge {
       messages: [],
     }
     this.threads.set(thread.id, thread)
-    const notice = noAnswer ? { noAnswer: true } : {}
+    // 표시하지 않고 글에 답이 필요 없다고만 적어도 알림으로 보낸다.
+    const notice = noAnswer || saysNoAnswer(question) ? { noAnswer: true } : {}
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, ...notice, category: label, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, ...notice, at: msg.at })
     this.changed()
@@ -1503,7 +1528,8 @@ export class Bridge {
     if (msg.kind === 'agreement' && !agreement) return
     const text = agreement ? renderAgreement(agreement) : msg.text
     const human = msg.human === true ? { human: true } : {}
-    const notice = msg.kind === 'question' && msg.noAnswer === true
+    // 표시 없이 글로만 답이 필요 없다고 적어 보낸 알림도 알아본다(옛 판, 또는 표시를 잊은 AI).
+    const notice = msg.kind === 'question' && (msg.noAnswer === true || saysNoAnswer(msg.text))
     thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, ...human, ...(notice ? { noAnswer: true } : {}), at: now() })
     // 이미 마감한 질문에 늦게 온 답은 남기기만 하고, 마감 상태는 그대로 둔다.
     if (thread.status === 'closed' || msg.kind === 'closed') thread.status = 'closed'
@@ -1846,6 +1872,21 @@ export class Bridge {
     this.about = next
     this.changed()
     for (const peer of this.peers.values()) void this.sayHello(peer).catch(() => {})
+  }
+
+  // 사람이 화면에서 대화를 맨 위에 고정하거나 푼다. 이 PC에만 남기고 상대에게는 알리지 않는다.
+  // 여럿에게 보낸 질문은 화면에서 한 방이므로 대화 여러 개가 한 번에 온다. 바뀐 대화 수를 돌려준다.
+  pin(ids: string[], pinned: boolean) {
+    let changed = 0
+    for (const id of new Set(ids)) {
+      const t = this.threads.get(id)
+      if (!t || !!t.pinned === pinned) continue
+      if (pinned) t.pinned = true
+      else delete t.pinned
+      changed++
+    }
+    if (changed) this.changed()
+    return changed
   }
 
   // 이 PC 쪽 일을 기록한다: 잠들었다 깸(시계가 비었다), 주소가 바뀜(다른 네트워크로 옮김).

@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { version } from '../package.json'
-import { Bridge, defersToHuman, MAX_CATEGORY, parsePorts, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
+import { Bridge, defersToHuman, MAX_CATEGORY, parsePorts, saysNoAnswer, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
 import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
@@ -135,7 +135,7 @@ export function createSession(opts: SessionOptions) {
   - When you open a bridge or connect, say which model you are and your reasoning effort (model, effort) if you know them. The other side sees them, and you see theirs under about in the connected event and list_connections. Do not guess.
   - Give each question a category with send_question: a short topic label, so the humans can sort the conversations. Look at the labels already in use (inbox shows them) and reuse one when it fits.
   - A message with no_answer_needed: true is a notice. Tell your human what it says. You do not have to answer it; reply only when you have something to add or correct.
-  - To tell the other side something that needs no answer, call send_question with no_answer_needed: true. Do not write "no answer needed" only in the text: the other side then cannot tell, and it keeps showing as a question that waits. Do not wait for an answer to a notice and do not write an agreement for it.
+  - To tell the other side something that needs no answer, call send_question with no_answer_needed: true. A question whose text plainly says so (for example "no reply needed" or "답 필요 없습니다") and has no question mark is also sent and shown as a notice, but only a few plain phrases are recognized, so set no_answer_needed yourself. Do not wait for an answer to a notice and do not write an agreement for it.
   - If the question needs a decision nobody has made yet (choosing between options, priorities, scope, schedule, anything your human would want a say in), do not decide it yourself. Call check_with_human with the question for your human, 2 to 6 options in their language, and the one you recommend. It tells the other side you are asking and opens a question window on your human's screen, where they pick a number or write their own answer. Their decision then goes to the other side by itself, marked as your human's decision, and you get a decision event; tell your human in one line what was sent. Do not leave a decision as plain text only.
   - Never answer the other side with only "I passed it to my human" or "I will let you know after checking"; reply refuses such an answer. Use check_with_human: it shows a desktop notification with sound, reminds your human every few minutes until they answer, opens a closed window again, and lets the other side see that you are asking, since when, and whether the window was seen.
   - When the other side is checking with its human, list_connections and inbox show it under their_human (since when, for how many minutes, and the state of their question window). If it takes long, you get a peer_human_slow event (after 30 minutes, then every 30 minutes) and your human gets a desktop notification: tell your human, so they can reach the other person by phone or messenger.
@@ -745,12 +745,17 @@ export function createSession(opts: SessionOptions) {
           .describe('A short topic label for this conversation, one to three words in your human\'s language (for example 배포, 보안, 일정). The humans sort and filter conversations by it. Reuse a label this bridge already uses when one fits; inbox shows them as category.'),
       },
     },
-    tool(async ({ question, context, to, answers, no_answer_needed, category }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one'; no_answer_needed?: boolean; category?: string }) => ({
-      ...(await getBridge().askMany(to, question, context, answers, no_answer_needed === true, category)),
-      next: no_answer_needed
-        ? `Tell your human what you told whom. It is a notice: do not wait for an answer to it and do not write an agreement for it. ${listen()}`
-        : `Tell your human what you asked and whom. ${listen()}`,
-    })),
+    tool(async ({ question, context, to, answers, no_answer_needed, category }: { question: string; context?: string; to?: string | string[]; answers?: 'all' | 'one'; no_answer_needed?: boolean; category?: string }) => {
+      // 표시하지 않고 글에 답이 필요 없다고만 적어도 브릿지가 알림으로 보낸다. 그때도 기다리지 말라고 알린다.
+      const notice = no_answer_needed === true || saysNoAnswer(question)
+
+      return {
+        ...(await getBridge().askMany(to, question, context, answers, notice, category)),
+        next: notice
+          ? `Tell your human what you told whom. It is a notice: do not wait for an answer to it and do not write an agreement for it. ${listen()}`
+          : `Tell your human what you asked and whom. ${listen()}`,
+      }
+    }),
   )
 
   server.registerTool(

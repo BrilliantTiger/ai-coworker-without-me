@@ -1,12 +1,17 @@
 // 사람이 브라우저로 보는 대화 화면. viewer.ts 가 이 글을 그대로 내려 준다.
-// 사람이 지켜볼 맛이 나게 움직임을 많이 넣었다(2026-11-16, 사람이 정함: 「모션도 빵빵하게」, 「보는 재미가 있어야지」).
+// 화면은 차분하고 읽기 쉽게 짜고, 움직임은 과하지도 모자라지도 않게 넣는다(2026-11-17, 사람이 정함:
+// 「모던하고 심플하되 가독성 높은 상태에서 모션이 과하지 않고 이질감없이 자연스럽게」, 「과하지 않은 적절한 모션」).
+// 왼쪽에 고른 대화 하나를, 오른쪽에 대화 목록을 둔다(2026-11-17, 사람이 정함: 「대화의 묶음 리스트를 오른쪽에 두고 클릭하면 볼 수 있게」).
+// 넣는 움직임: 글이 오가면 연결선을 따라 점이 건너간다. 고른 대화와 새 글이 부드럽게 들어온다. 차례가 바뀌면 목록의 줄이 미끄러져 간다.
+// 상태가 바뀌면 이름표가 넘어가고 체크가 그려진다. 기다리는 곳에서는 점이 조용히 뛴다.
+// 넣지 않는 것: 얼굴 캐릭터, 배경에 떠다니는 것, 색종이, 번쩍이며 도는 테두리, 글자가 써 내려가는 것, 카드가 기우는 것.
 //
 // 지키는 것:
 // - 상대가 보낸 글과 이름은 textContent 로만 넣는다. HTML 로 해석하지 않는다.
 // - 밖에서 아무것도 받아 오지 않는다. 글꼴·그림·스크립트 모두 이 글 안에 있다(CSP: default-src 'none').
 // - 움직임은 <html class="on"> 일 때만 건다. 「동작 줄이기」를 켠 PC에서는 처음부터 꺼져 있고,
-//   화면의 「모션 끄기」 단추로 언제든 멈춘다. 멈춰도 내용은 모두 그대로 보인다.
-// - 1초에 세 번 넘게 깜빡이는 것은 없다.
+//   화면의 「모션 끄기」 단추로 언제든 멈춘다. 멈춰도 내용은 모두 그대로 보인다. 빛깔이나 투명도만 바뀌는 것은 그대로 둔다.
+// - 움직임은 자리 옮김, 크기, 투명도, 그리고 선이 그어지거나 흐르는 것으로만 만든다. 1초에 세 번 넘게 깜빡이는 것은 없다.
 // - 이 글은 템플릿 글 안에 있다. 그래서 화면 스크립트에는 백틱, 달러-중괄호, 역슬래시를 쓰지 않는다.
 //   달러-중괄호는 아래 QUIET_AFTER_MS 를 넣는 한 곳에만 있다.
 //   (String.raw 로 감싸면 안 된다. Bun 이 한글을 \\uXXXX 로 바꿔 묶어서, 화면에 그 글자가 그대로 찍힌다.)
@@ -22,363 +27,343 @@ export const PAGE = `<!doctype html>
 <meta name="color-scheme" content="light dark">
 <title>Coworker 대화</title>
 <style>
-@property --a { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
 :root {
   color-scheme: light dark;
-  --bg: #f3f2ee; --card: #ffffff; --text: #1c1b19; --muted: #63615b; --line: #dcdad2;
-  --in: #e7eefe; --in-b: #2f5bd3; --out: #e3f4e7; --out-b: #17703c; --note: #fcf2d7; --note-b: #8f5c0e; --agree: #f0e8ff; --agree-b: #6f42c9;
-  --accent: #2f5bd3; --accent2: #7c4ddb; --warn: #b3261e;
-  --shadow: 0 1px 2px rgba(20, 20, 30, .06), 0 8px 24px rgba(20, 20, 30, .07);
-  --aur1: #9db8ff; --aur2: #c9b3ff; --aur3: #9fe3c0; --aur-o: .7;
-  --spring: cubic-bezier(.34, 1.56, .64, 1); --bounce: cubic-bezier(.34, 1.56, .64, 1);
+  --bg: #f4f4f7; --card: #ffffff; --soft: #f0f0f4; --line: #e1e1e8; --text: #17171c; --muted: #5f606b;
+  --in: #edf0fd; --in-b: #3350c9; --out: #e7f5ec; --out-b: #1b7340; --note: #fbf1d8; --note-b: #8a5a0c; --agree: #f1ebfe; --agree-b: #6a3fc0;
+  --accent: #4353d6; --accent2: #7a4fd8; --warn: #b3261e; --ok: #1b8a4b;
+  --t1: #3350c9; --t2: #1b7340; --t3: #8a5a0c; --t4: #6a3fc0; --t5: #0e7490; --t6: #b4325f;
+  --shadow: 0 1px 2px rgba(16, 20, 40, .05), 0 6px 20px rgba(16, 20, 40, .06);
+  --pop: 0 4px 12px rgba(16, 20, 40, .08), 0 18px 44px rgba(16, 20, 40, .16);
+  --glow: 9%;
+  --ease: cubic-bezier(.22, 1, .36, 1);
   --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
-}
-@supports (transition-timing-function: linear(0, 1)) {
-  :root {
-    --spring: linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1);
-    --bounce: linear(0, 0.214 14.7%, 0.386 23.7%, 0.598 31.9%, 0.999 44.7%, 0.807 52.6%, 0.762 56%, 0.747 59.4%, 0.758 62.4%, 0.793 65.6%, 0.999 77.4%, 0.961 81.2%, 0.949 84.8%, 0.956 88%, 0.993 95.5%, 1);
-  }
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0b0c11; --card: #171924; --text: #ecebe6; --muted: #9b9ba6; --line: #2a2d3b;
-    --in: #162242; --in-b: #8aa8ff; --out: #12301e; --out-b: #62d28d; --note: #32280e; --note-b: #f0b84a; --agree: #281d47; --agree-b: #b9a0ff;
-    --accent: #8aa8ff; --accent2: #b9a0ff; --warn: #ff8a80;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .35);
-    --aur1: #2b4fb8; --aur2: #5a36b0; --aur3: #17694a; --aur-o: .6;
+    --bg: #0c0d11; --card: #15161c; --soft: #1d1f27; --line: #282a33; --text: #ededf1; --muted: #9c9eaa;
+    --in: #161f38; --in-b: #8eaaff; --out: #122a1e; --out-b: #6fd49b; --note: #2a2311; --note-b: #e8b85a; --agree: #221b3a; --agree-b: #b9a2ff;
+    --accent: #8b9dff; --accent2: #b08cff; --warn: #ff8f85; --ok: #5fd08f;
+    --t1: #8eaaff; --t2: #6fd49b; --t3: #e8b85a; --t4: #b9a2ff; --t5: #5cc8de; --t6: #ff8fb1;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .22);
+    --pop: 0 4px 14px rgba(0, 0, 0, .4), 0 20px 50px rgba(0, 0, 0, .5);
+    --glow: 14%;
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.55 var(--font); overflow-x: hidden; }
+body { margin: 0; min-height: 100vh; color: var(--text); font: 15px/1.55 var(--font); background: radial-gradient(1000px 440px at 50% -180px, color-mix(in srgb, var(--accent) var(--glow), transparent), transparent 72%) fixed no-repeat, var(--bg); }
 button { font: inherit; color: inherit; }
-button:focus-visible, .node:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-/* 배경: 떠다니는 빛과 별자리 */
-#sky, .aurora, #fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-#sky, .aurora { z-index: 0; }
-#fx { z-index: 40; }
-.aurora { overflow: hidden; opacity: var(--aur-o); }
-.aurora i { position: absolute; width: 46vmax; height: 46vmax; border-radius: 50%; filter: blur(70px); }
-.aurora i:nth-child(1) { left: -12vmax; top: -16vmax; background: radial-gradient(circle, var(--aur1), transparent 65%); }
-.aurora i:nth-child(2) { right: -14vmax; top: 4vmax; background: radial-gradient(circle, var(--aur2), transparent 65%); }
-.aurora i:nth-child(3) { left: 22vmax; bottom: -26vmax; background: radial-gradient(circle, var(--aur3), transparent 65%); }
-.on .aurora i:nth-child(1) { animation: drift1 11s ease-in-out infinite alternate; }
-.on .aurora i:nth-child(2) { animation: drift2 14s ease-in-out infinite alternate; }
-.on .aurora i:nth-child(3) { animation: drift3 17s ease-in-out infinite alternate; }
-@keyframes drift1 { to { translate: 14vmax 10vmax; scale: 1.25; } }
-@keyframes drift2 { to { translate: -16vmax 12vmax; scale: .85; } }
-@keyframes drift3 { to { translate: -10vmax -14vmax; scale: 1.3; } }
-
-/* 맨 위: 이름, 실시간 표시, 단추 */
-.bar { position: fixed; inset: 0 0 auto 0; height: 3px; z-index: 20; background: linear-gradient(90deg, var(--accent), var(--accent2)); transform-origin: 0 50%; scale: 0 1; }
-.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; padding: 12px max(16px, calc((100vw - 900px) / 2 + 16px)); background: color-mix(in srgb, var(--bg) 72%, transparent); -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4); border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); }
-.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
-.logo { width: 30px; height: 30px; overflow: visible; flex: none; }
-.logo .lo { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 3 5; opacity: .6; }
-.logo .l1 { fill: var(--accent); } .logo .l2 { fill: var(--accent2); }
-.logo .ll { stroke: var(--muted); stroke-width: 2; stroke-linecap: round; }
-.on .logo .lg { animation: rot 9s linear infinite; }
-.on .logo .lo { animation: rot 30s linear infinite reverse; }
-@keyframes rot { to { rotate: 360deg; } }
-h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; white-space: nowrap; }
-h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2), var(--accent)); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; }
-.on h1 span { animation: shimmer 5s linear infinite; }
-@keyframes shimmer { to { background-position: -200% 0; } }
-.chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1; padding: 7px 11px; border-radius: 99px; border: 1px solid var(--line); background: color-mix(in srgb, var(--card) 80%, transparent); white-space: nowrap; }
-button.chip { cursor: pointer; transition: scale .5s var(--spring), border-color .2s; }
-button.chip:hover { border-color: var(--accent); }
-.on button.chip:hover { scale: 1.06; }
-.on button.chip:active { scale: .94; }
-.eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; flex: none; }
-.eq b { width: 3px; height: 100%; border-radius: 1px; background: var(--out-b); transform-origin: 50% 100%; scale: 1 .45; }
-.on .eq b { animation: eq .9s ease-in-out infinite alternate; }
-.on .eq b:nth-child(2) { animation-duration: .6s; }
-.on .eq b:nth-child(3) { animation-duration: 1.1s; }
-.on .eq b:nth-child(4) { animation-duration: .75s; }
-@keyframes eq { from { scale: 1 .25; } to { scale: 1 1; } }
-.live.off { color: var(--warn); border-color: var(--warn); }
-.live.off .eq b { background: var(--warn); animation: none; scale: 1 .2; }
-/* 새 글이 오면 화면을 가로지르는 빛줄기 */
-.sweep { position: fixed; inset: 0; z-index: 25; pointer-events: none; opacity: 0; translate: -100% 0; background: linear-gradient(100deg, transparent 32%, var(--sw, var(--accent)) 50%, transparent 68%); }
-@supports ((animation-timeline: scroll()) and (animation-range: entry)) {
-  .on .bar { animation: grow auto linear both; animation-timeline: scroll(root); }
-  .on .top { animation: tuck auto linear both; animation-timeline: scroll(root); animation-range: 0px 140px; }
-  @keyframes grow { to { scale: 1 1; } }
-  @keyframes tuck { from { padding-block: 20px; } to { padding-block: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .14); } }
-}
-
-main { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 16px 16px 90px; transition: filter .6s ease; }
-.offline main { filter: grayscale(.85); }
-.me, .refresh { color: var(--muted); font-size: 13px; margin: 0; }
-.refresh { margin: 2px 0 16px; }
-.offline .refresh { color: var(--warn); font-weight: 600; }
-
-/* 연결 무대: 세션마다 얼굴이 있는 캐릭터가 서 있다. 선을 따라 빛 알갱이가 흐르고, 글을 보내면 입을 움직이며 말풍선을 띄운다 */
-.stage { position: relative; border: 1px solid var(--line); border-radius: 18px; background: color-mix(in srgb, var(--card) 62%, transparent); box-shadow: var(--shadow); overflow: hidden; margin-bottom: 12px; }
-#flow { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-#net { display: block; width: 100%; position: relative; }
-#net text { font: 600 12px/1 var(--font); fill: var(--text); text-anchor: middle; paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; }
-#net .sub { font-weight: 400; font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
-#net .ab { font-weight: 500; font-size: 10.5px; fill: var(--muted); }
-.link { fill: none; stroke: var(--line); stroke-width: 1.5; opacity: .7; }
-.lk.down .link { stroke: var(--warn); stroke-dasharray: 6 8; opacity: 1; }
-.on .lk.down .link { animation: blink 1.8s ease-in-out infinite; }
-@keyframes blink { 50% { opacity: .3; } }
-.lk.ghost .link { stroke-dasharray: 3 7; }
-.node { cursor: pointer; outline-offset: 6px; }
-.node.me { cursor: default; }
-.node .core { stroke: var(--card); stroke-width: 2; }
-.node .core-r, .node.sq .core-c { display: none; }
-.node.sq .core-r { display: inline; }
-.node.ghost .body { opacity: .55; }
-.node.down .body, .node.closed .body { filter: grayscale(1) brightness(.85); }
-.node .halo { fill: var(--tone, var(--in-b)); opacity: .16; }
-.node.down .halo { fill: var(--warn); }
-.node .spin { fill: none; stroke: var(--accent2); stroke-width: 1.5; stroke-dasharray: 4 7; opacity: .85; }
-.node.sel .core { stroke: var(--accent2); stroke-width: 4; }
-.eye { fill: #fff; }
-.pupil { fill: #1b1d2a; }
-.mouth { fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.omouth { fill: #fff; display: none; }
-.xeyes { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; display: none; }
-#net .zz { display: none; fill: var(--muted); stroke: none; font-size: 12px; font-weight: 800; }
-.node.down .eyes { display: none; }
-.node.down .xeyes, .node.down .zz { display: inline; }
-.node.talk .mouth, .node.wow .mouth { display: none; }
-.node.talk .omouth, .node.wow .omouth { display: inline; }
-.node.think .pupil { translate: -1.6px -2.2px; }
-.node.joy .mouth { stroke-width: 3.2; }
-.hb, .dots3 { display: none; }
-.node.human .hb, .node.think .dots3 { display: inline; }
-.hb circle { fill: var(--note-b); stroke: var(--card); stroke-width: 2; }
-#net .hb text { fill: var(--card); stroke: none; font-size: 11px; font-weight: 800; }
-.dots3 circle { fill: var(--tone, var(--out-b)); }
-.on .node .fl { animation: float var(--fd, 5s) ease-in-out var(--fo, 0s) infinite alternate; }
-@keyframes float { from { translate: 0 -4px; } to { translate: 0 5px; } }
-.on .node .body { animation: breathe 3.2s ease-in-out var(--fo, 0s) infinite; transform-box: fill-box; transform-origin: 50% 100%; }
-@keyframes breathe { 50% { scale: 1.06 .95; } }
-.on .node .halo { animation: halo 2.6s ease-in-out infinite; }
-@keyframes halo { 50% { scale: 1.35; opacity: .05; } }
-.on .node .spin { animation: rot 7s linear infinite; }
-.on .node .eyes { animation: blink-eye var(--bd, 4.4s) var(--fo, 0s) infinite; transform-box: fill-box; transform-origin: center; }
-@keyframes blink-eye { 0%, 91%, 100% { scale: 1 1; } 95% { scale: 1 .1; } }
-.on .node.talk .omouth { animation: chat .24s ease-in-out infinite alternate; transform-box: fill-box; transform-origin: center; }
-@keyframes chat { from { scale: 1 .3; } to { scale: 1 1; } }
-.on .node.joy .fl { animation: hop .45s var(--spring) 3; }
-@keyframes hop { 50% { translate: 0 -14px; } }
-.on .node.wow .body { animation: jolt .4s ease-out; transform-box: fill-box; transform-origin: center; }
-@keyframes jolt { 30% { scale: 1.18; } }
-.on .node.human .hb circle { animation: beat 1.4s ease-in-out infinite; }
-.on .dots3 circle { animation: hop3 1s ease-in-out infinite; }
-.on .dots3 circle:nth-child(2) { animation-delay: .15s; }
-.on .dots3 circle:nth-child(3) { animation-delay: .3s; }
-@keyframes hop3 { 0%, 60%, 100% { translate: 0 0; opacity: .5; } 30% { translate: 0 -4px; opacity: 1; } }
-.on #net .zz { animation: snore 2.4s ease-in-out infinite; }
-@keyframes snore { from { translate: 0 0; opacity: 0; } 30% { opacity: 1; } to { translate: 9px -15px; opacity: 0; } }
-/* 말풍선 */
-#talk { position: absolute; inset: 0; pointer-events: none; }
-.say { position: absolute; max-width: min(240px, 46%); translate: -50% -100%; transform-origin: 50% 100%; padding: 6px 10px; border-radius: 12px; font-size: 12px; line-height: 1.35; background: var(--card); color: var(--text); border: 1.5px solid var(--b, var(--in-b)); box-shadow: var(--shadow); overflow-wrap: anywhere; }
-.say::after { content: ''; position: absolute; left: 50%; bottom: -6px; width: 9px; height: 9px; translate: -50% 0; rotate: 45deg; background: var(--card); border-right: 1.5px solid var(--b, var(--in-b)); border-bottom: 1.5px solid var(--b, var(--in-b)); }
-.stats { position: relative; display: flex; gap: 10px 30px; flex-wrap: wrap; justify-content: center; align-items: flex-start; padding: 4px 12px 14px; }
-.stat { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 52px; font-size: 12px; line-height: 1.3; color: var(--muted); text-align: center; }
-.stat.hot { color: var(--note-b); }
-.num { display: inline-flex; justify-content: center; font-weight: 700; font-size: 20px; line-height: 1.2; height: 1.2em; color: var(--text); font-variant-numeric: tabular-nums; -webkit-user-select: none; user-select: none; }
-/* 화면에는 안 보이고, 긁어서 복사할 때와 읽어 주는 프로그램에만 잡히는 글 */
+:where(button, summary, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 화면에는 안 보이고 읽어 주는 프로그램에만 잡히는 글 */
 .plain { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.stat.hot .num { color: var(--note-b); }
-.dg { display: inline-block; height: 1.2em; overflow: hidden; }
-.dg > span { display: block; translate: 0 calc(var(--d, 0) * -1.2em); }
-/* 띠의 숫자는 글이 아니라 꾸밈으로 그린다. 그래야 긁어서 복사할 때 0부터 9까지가 딸려 오지 않는다. */
-.dg i { display: block; height: 1.2em; font-style: normal; }
-.dg i::before { content: attr(data-d); }
-.on .dg > span { transition: translate .8s var(--spring); }
+
+/* 맨 위: 이름, 실시간 표시, 단추. 화면을 내리면 아래 금이 나타난다. */
+.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 12px max(16px, calc((100vw - 1180px) / 2 + 16px)); background: color-mix(in srgb, var(--bg) 80%, transparent); -webkit-backdrop-filter: blur(14px) saturate(1.3); backdrop-filter: blur(14px) saturate(1.3); border-bottom: 1px solid var(--line); }
+@supports (animation-timeline: scroll()) {
+  .top { border-bottom-color: transparent; animation: edge linear both; animation-timeline: scroll(root); animation-range: 0px 72px; }
+  @keyframes edge { to { border-bottom-color: var(--line); } }
+}
+.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+.logo { width: 26px; height: 26px; flex: none; }
+.logo path { stroke: var(--muted); stroke-width: 2; stroke-linecap: round; opacity: .55; }
+.logo .l1 { fill: var(--accent); } .logo .l2 { fill: var(--accent2); }
+h1 { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: -.015em; white-space: nowrap; }
+h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1; padding: 8px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--card); white-space: nowrap; }
+button.chip { cursor: pointer; transition: background-color .15s, border-color .15s, color .15s, scale .2s var(--ease); }
+button.chip:hover { background: var(--soft); border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
+.on button.chip:active { scale: .96; }
 button.chip:disabled { opacity: .5; cursor: not-allowed; }
-.downs { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 0 12px 12px; }
+.chip b { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip.sel { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, var(--card)); color: var(--accent); font-weight: 600; }
+.chip.sel b { color: inherit; opacity: .8; }
+.chip.main { background: linear-gradient(135deg, var(--accent), var(--accent2)); border-color: transparent; color: var(--card); font-weight: 600; }
+button.chip.main:hover { background: linear-gradient(135deg, var(--accent), var(--accent2)); filter: brightness(1.08); }
+/* 살아 있음을 알리는 점. 둘레로 고리가 천천히 퍼진다. */
+.live { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); padding: 0 8px 0 2px; white-space: nowrap; }
+.beacon { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
+.beacon::after, .sdot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: inherit; opacity: 0; }
+.on .beacon::after, .on .act .sdot::after { animation: ping 2.4s var(--ease) infinite; }
+@keyframes ping { 0% { opacity: .5; scale: 1; } 70%, 100% { opacity: 0; scale: 2.9; } }
+.live.off { color: var(--warn); font-weight: 600; }
+.live.off .beacon { background: var(--warn); }
+.on .live.off .beacon::after { animation: none; }
+
+main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 90px; transition: opacity .3s; }
+.offline main { opacity: .55; }
+.on.boot .panel, .on.boot .info { animation: enter .6s var(--ease) both; }
+.on.boot .info { animation-delay: .08s; }
+@keyframes enter { from { opacity: 0; translate: 0 10px; } }
+
+/* 연결 그림: 왼쪽이 이 세션, 오른쪽이 연결된 세션. 선이 둘을 잇고, 글이 오가면 선을 따라 점이 건너간다. */
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); margin-bottom: 10px; overflow: hidden; container: panel / inline-size; }
+.net { position: relative; display: grid; grid-template-columns: minmax(0, max-content) minmax(56px, 1fr) minmax(0, 1.6fr); align-items: center; padding: 20px 20px 18px; background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 70%); }
+#wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.wire { fill: none; stroke: color-mix(in srgb, var(--muted) 28%, var(--line)); stroke-width: 1.5; transition: stroke .3s; }
+/* 기다리는 일이 있는 선은 점선이 되어, 답할 쪽으로 천천히 흐른다 */
+.wire.fwd, .wire.back { stroke: color-mix(in srgb, var(--accent) 55%, var(--line)); stroke-dasharray: 3 7; }
+.on .wire.fwd { animation: flow 1.8s linear infinite; }
+.on .wire.back { animation: flow 1.8s linear infinite reverse; }
+@keyframes flow { to { stroke-dashoffset: -10; } }
+.wire.ghost { stroke-dasharray: 2 6; }
+.wire.sel { stroke: color-mix(in srgb, var(--accent) 80%, var(--line)); }
+.wire.down, .on .wire.down { stroke: var(--warn); stroke-dasharray: 4 6; animation: none; }
+.spark { fill: var(--c, var(--accent)); filter: drop-shadow(0 0 5px var(--c, var(--accent))); }
+.peers { grid-column: 3; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.peers:empty { display: none; }
+.nopeer { grid-column: 2 / 4; margin: 0; padding-left: 24px; font-size: 13px; color: var(--muted); text-wrap: pretty; }
+.nopeer[hidden] { display: none; }
+.sess { position: relative; display: flex; align-items: center; gap: 11px; min-width: 0; padding: 7px 10px; border-radius: 12px; border: 1px solid transparent; background: none; text-align: left; }
+.sess.me { grid-column: 1; padding: 0; gap: 13px; max-width: 280px; }
+button.sess { width: 100%; cursor: pointer; }
+.on .sess { transition: opacity .4s ease-out, background-color .15s, border-color .2s; }
+button.sess:hover { background: var(--soft); }
+.sess[aria-pressed=true] { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.avatar { position: relative; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; flex: none; font-size: 14px; font-weight: 650; color: var(--tone, var(--muted)); background: color-mix(in srgb, var(--tone, var(--muted)) 14%, var(--card)); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--tone, var(--muted)) 36%, transparent); }
+.sess.me .avatar { width: 46px; height: 46px; font-size: 17px; color: var(--card); background: linear-gradient(135deg, var(--accent), var(--accent2)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); }
+.sess.ghost .avatar { box-shadow: none; outline: 1.5px dashed color-mix(in srgb, var(--tone, var(--muted)) 55%, transparent); outline-offset: -1.5px; }
+.sess.down .avatar, .sess.closed .avatar { filter: grayscale(1); opacity: .7; }
+.ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 2px var(--c, var(--accent)); opacity: 0; pointer-events: none; }
+.st { position: absolute; right: -1px; bottom: -1px; width: 10px; height: 10px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--card); }
+.sess.down .st { background: var(--warn); }
+.sess.ghost .st, .sess.closed .st { background: var(--muted); }
+.sinfo { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+.sname { font-size: 13.5px; font-weight: 600; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess.me .sname { font-size: 15px; font-weight: 650; }
+.ssub { font-size: 12px; line-height: 1.45; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssub:empty { display: none; }
+/* 답할 차례인 쪽에는 점 세 개가, 사람에게 확인 중인 쪽에는 이름표가 붙는다. */
+.stag { display: none; flex: none; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; line-height: 1; padding: 5px 9px; border-radius: 99px; white-space: nowrap; }
+.sinfo .stag { align-self: flex-start; margin-top: 5px; }
+.sess.think .stag { display: inline-flex; color: var(--in-b); background: color-mix(in srgb, var(--in-b) 12%, transparent); }
+.sess.human .stag { display: inline-flex; color: var(--note-b); background: color-mix(in srgb, var(--note-b) 14%, transparent); }
+.sess.human .stag .dots { display: none; }
+@container panel (max-width: 619px) {
+  .net { grid-template-columns: minmax(0, 1fr); row-gap: 12px; padding: 16px; }
+  .sess.me, .peers, .nopeer { grid-column: 1; }
+  .sess.me { max-width: none; }
+  .peers { padding-left: 34px; }
+  .nopeer { padding-left: 2px; }
+}
+.dots { display: inline-flex; gap: 3px; align-items: center; }
+.dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: .4; }
+.on .dots i { animation: wave 1.3s ease-in-out infinite; }
+.on .dots i:nth-child(2) { animation-delay: .16s; }
+.on .dots i:nth-child(3) { animation-delay: .32s; }
+@keyframes wave { 0%, 60%, 100% { translate: 0 0; opacity: .35; } 30% { translate: 0 -3px; opacity: 1; } }
+/* 닿지 않는 세션 */
+.downs { display: flex; flex-direction: column; gap: 6px; padding: 0 14px 12px; }
 .downs:empty { display: none; }
 .downrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; color: var(--warn); padding: 7px 10px; border-radius: 10px; background: color-mix(in srgb, var(--warn) 9%, transparent); }
 .downrow > span { flex: 1 1 220px; }
-.node.sel .core { stroke: var(--accent2); stroke-width: 4; }
+/* 숫자 띠. 칸 너비가 같아서 줄이 맞는다. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); border-top: 1px solid var(--line); overflow: hidden; }
+.stat { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 11px 20px 12px; margin: -1px 0 0 -1px; border-left: 1px solid var(--line); border-top: 1px solid var(--line); font-size: 12px; line-height: 1.4; color: var(--muted); }
+.num { display: block; font-weight: 650; font-size: 20px; line-height: 1.25; color: var(--text); font-variant-numeric: tabular-nums; }
+.stat.hot, .stat.hot .num { color: var(--note-b); }
+.info { display: flex; flex-wrap: wrap; gap: 2px 14px; justify-content: space-between; margin: 0 4px 18px; color: var(--muted); font-size: 12.5px; }
+.me, .refresh { margin: 0; }
+.offline .refresh { color: var(--warn); font-weight: 600; }
 
-/* 세션을 골라 그 세션과 나눈 대화만 본다 */
-.filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
-.filters[hidden], .wrap[hidden] { display: none; }
-.chip b { font-weight: 600; opacity: .75; font-variant-numeric: tabular-nums; }
-.chip.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--card)); font-weight: 600; }
+/* 세션이나 분류를 골라 그 대화만 본다 */
+.filterbar { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.filters[hidden], .wrap[hidden], .room[hidden], .board[hidden] { display: none; }
 
 /* 대화 카드 */
-#list { display: flex; flex-direction: column; gap: 16px; }
+/* 왼쪽에 고른 대화 하나, 오른쪽에 대화 목록. 목록은 화면을 내려도 따라온다. 좁은 화면에서는 목록이 위에 옆으로 놓인다. */
+.board { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; margin-top: 14px; }
+.pane { grid-column: 1; grid-row: 1; min-width: 0; }
 .wrap { position: relative; }
-@supports ((animation-timeline: view()) and (animation-range: entry)) {
-  .on .wrap { animation: rise auto linear backwards, sink auto linear forwards; animation-timeline: view(), view(); animation-range: entry 0px entry 180px, exit calc(100% - 160px) exit 100%; }
-  @keyframes rise { from { opacity: 0; scale: .95; } }
-  @keyframes sink { to { opacity: .2; scale: .97; } }
+.rooms { grid-column: 2; grid-row: 1; position: sticky; top: 68px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 84px); overflow-y: auto; padding: 3px; margin: -3px; scrollbar-width: thin; overscroll-behavior: contain; }
+.room { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; flex: none; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); cursor: pointer; --ring: var(--muted); }
+.on .room { transition: opacity .35s ease-out, translate .45s var(--ease), background-color .15s, border-color .2s; transition-delay: calc(var(--i, 0) * 45ms), calc(var(--i, 0) * 45ms), 0s, 0s; }
+.room:hover { border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
+.room[aria-current=true] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
+.rtitle { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: 13.5px; font-weight: 600; line-height: 1.4; }
+.rsub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rcat { flex: none; font-size: 11px; font-weight: 650; line-height: 1.3; padding: 1px 6px; border-radius: 6px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.rcat:empty { display: none; }
+.rago { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rstate { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.rstate .sdot { color: var(--ring); }
+.rlabel { flex: 0 1 auto; min-width: 0; color: var(--ring); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rwho { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rmarks { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 12px; }
+.rpin { display: none; color: var(--accent); }
+.rpin svg { display: block; width: 12px; height: 12px; fill: currentColor; }
+.room.pinned .rpin { display: block; }
+/* 열어 두지 않은 대화에 새 글이 왔다는 표시 */
+.rnew { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.room.unseen .rnew { display: block; }
+.room.unseen .rago { color: var(--accent); font-weight: 650; }
+@media (max-width: 860px) {
+  .board { grid-template-columns: minmax(0, 1fr); }
+  .pane, .rooms { grid-column: 1; grid-row: auto; }
+  .rooms { position: static; flex-direction: row; max-height: none; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; padding-bottom: 8px; }
+  .room { flex: 0 0 min(80%, 300px); scroll-snap-align: start; }
 }
-.conv { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px 12px; box-shadow: var(--shadow); transform: perspective(1100px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)); --ring: var(--muted); }
-.conv[data-st=waiting_for_peer] { --ring: var(--in-b); }
-.conv[data-st=your_turn] { --ring: var(--out-b); }
-.conv[data-st=checking_with_your_human], .conv[data-st=peer_checking_with_their_human] { --ring: var(--note-b); }
-.conv[data-st=agreed] { --ring: var(--agree-b); }
-.conv[data-st=answered], .conv[data-st=answered_by_me] { --ring: var(--out-b); }
-.conv[data-st=unread], .conv[data-st=unread_notice] { --ring: var(--note-b); }
-.conv.act { border-color: color-mix(in srgb, var(--ring) 45%, var(--line)); }
-.conv::before { content: ''; position: absolute; inset: -1px; border-radius: inherit; padding: 2px; pointer-events: none; opacity: 0; background: conic-gradient(from var(--a), transparent 0 62%, var(--ring) 84%, transparent 100%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
-.on .conv.act::before { opacity: 1; animation: spin 3.6s linear infinite; }
-@keyframes spin { to { --a: 360deg; } }
-.conv::after { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity .3s; background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 0%), color-mix(in srgb, var(--accent) 13%, transparent), transparent 60%); }
-.on .conv:hover::after { opacity: 1; }
-.on .conv { transition-property: opacity, translate, scale, filter, transform, border-color; transition-duration: .6s, .9s, .9s, .6s, .4s, .3s; transition-timing-function: ease-out, var(--spring), var(--spring), ease-out, ease-out, ease; --d: calc(var(--i, 0) * 70ms); transition-delay: var(--d), var(--d), var(--d), var(--d), 0s, 0s; }
-.on .wrap.gone .conv { opacity: 0; scale: .92; filter: blur(6px); }
-.head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.badge { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 99px; background: var(--in); color: var(--in-b); white-space: nowrap; }
-.badge.out { background: var(--out); color: var(--out-b); }
+.conv { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; box-shadow: var(--shadow); --ring: var(--muted); }
+/* 상태마다 빛깔 하나. 카드와 목록의 줄이 같이 쓴다. */
+[data-st=waiting_for_peer] { --ring: var(--in-b); }
+[data-st=your_turn] { --ring: var(--out-b); }
+[data-st=checking_with_your_human], [data-st=peer_checking_with_their_human] { --ring: var(--note-b); }
+[data-st=agreed] { --ring: var(--agree-b); }
+[data-st=answered], [data-st=answered_by_me] { --ring: var(--out-b); }
+[data-st=unread], [data-st=unread_notice] { --ring: var(--note-b); }
+.conv:hover { border-color: color-mix(in srgb, var(--muted) 38%, var(--line)); }
+.conv.pinned, .conv.pinned:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.on .conv { transition: opacity .35s ease-out, translate .5s var(--ease), border-color .25s; transition-delay: calc(var(--i, 0) * 55ms), calc(var(--i, 0) * 55ms), 0s; }
+.head { display: flex; gap: 8px 10px; align-items: flex-start; flex-wrap: wrap; }
 /* 질문에 붙은 분류 */
-.cat { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 99px; border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--line)); color: var(--accent2); white-space: nowrap; }
+.cat { flex: none; margin-top: 2px; font-size: 11.5px; font-weight: 650; line-height: 1.3; padding: 3px 8px; border-radius: 7px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); white-space: nowrap; }
 .cat:empty { display: none; }
-.subject { font-size: 15px; font-weight: 650; margin: 0; overflow-wrap: anywhere; flex: 1 1 220px; min-width: 0; }
-.status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; color: var(--ring); background: color-mix(in srgb, var(--ring) 12%, transparent); }
-.sdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
-.on .act .sdot { animation: beat 1.4s ease-in-out infinite; }
+.subject { font-size: 16px; font-weight: 650; line-height: 1.4; letter-spacing: -.005em; margin: 0; overflow-wrap: anywhere; flex: 1 1 240px; min-width: 0; }
+.status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; line-height: 1.3; padding: 4px 10px; border-radius: 99px; color: var(--ring); background: color-mix(in srgb, var(--ring) 12%, transparent); transition: color .25s, background-color .25s; }
+.sdot { position: relative; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 /* 답이 오간 대화와 합의한 대화는 점 대신 체크로 끝났음을 보인다 */
 .ck { display: none; width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 16; }
 .conv[data-st^=answered] .ck, .conv[data-st=agreed] .ck { display: inline; }
 .conv[data-st^=answered] .sdot, .conv[data-st=agreed] .sdot { display: none; }
-.fxl { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; }
-.on .shine { animation: sheen 9s ease-in-out infinite; animation-delay: calc(var(--n, 0) * -1.7s); }
-@keyframes sheen { 0%, 84% { translate: -130% 0; } 100% { translate: 330% 0; } }
-.on .conv:hover { box-shadow: 0 2px 4px rgba(0, 0, 0, .12), 0 18px 44px rgba(0, 0, 0, .22); }
-.shine { position: absolute; top: 0; bottom: 0; left: 0; width: 45%; translate: -130% 0; background: linear-gradient(100deg, transparent, color-mix(in srgb, var(--ring) 30%, transparent), transparent); }
-@keyframes beat { 50% { scale: 1.6; opacity: .5; } }
 .ago { font-weight: 400; opacity: .85; font-variant-numeric: tabular-nums; }
-.meta { color: var(--muted); font-size: 12.5px; margin: 6px 0 2px; overflow-wrap: anywhere; }
+/* 맨 위에 고정하는 단추. 고정하면 핀이 바로 서고 색이 찬다. */
+.pin { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 1; padding: 5px 8px; border-radius: 8px; border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; transition: background-color .15s, color .15s, border-color .15s; }
+.pin:hover { background: var(--soft); color: var(--text); }
+.pin svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; rotate: 38deg; }
+.on .pin svg { transition: rotate .35s var(--ease); }
+.pin[aria-pressed=true] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.pin[aria-pressed=true] svg { rotate: 0deg; fill: currentColor; }
+.sub { margin-top: 5px; font-size: 12.5px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.badge { font-weight: 650; color: var(--in-b); margin-right: 8px; white-space: nowrap; }
+.badge.out { color: var(--out-b); }
 /* 여럿에게 보낸 질문: 받은 사람마다 답했는지 */
-.people { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 0; }
+.people { display: flex; gap: 6px; flex-wrap: wrap; margin: 9px 0 0; }
 .people:empty { display: none; }
-.pp { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.pp { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.3; padding: 3px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
 .pp::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.pp.ok { color: var(--out-b); border-color: color-mix(in srgb, var(--out-b) 40%, var(--line)); }
-.pp.wait { color: var(--in-b); border-color: color-mix(in srgb, var(--in-b) 40%, var(--line)); }
-.pp.human { color: var(--note-b); border-color: color-mix(in srgb, var(--note-b) 40%, var(--line)); }
-.on .pp.wait::before, .on .pp.human::before { animation: beat 1.4s ease-in-out infinite; }
-.av { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--b); color: var(--card); font-size: 11px; font-weight: 700; flex: none; }
+.pp.ok { color: var(--out-b); border-color: color-mix(in srgb, var(--out-b) 35%, var(--line)); }
+.pp.wait { color: var(--in-b); border-color: color-mix(in srgb, var(--in-b) 35%, var(--line)); }
+.pp.human { color: var(--note-b); border-color: color-mix(in srgb, var(--note-b) 35%, var(--line)); }
 
 /* 주고받은 글 */
-.msgs { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
-.msg { max-width: min(88%, 660px); min-width: 0; }
+.msgs { list-style: none; margin: 14px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: min(86%, 640px); min-width: 0; }
 .msg.peer { align-self: flex-start; }
 .msg.mine { align-self: flex-end; }
 .msg.note { align-self: center; max-width: 92%; }
-.msg.agreement { align-self: stretch; max-width: none; margin-top: 8px; }
-.bubble { position: relative; padding: 9px 13px 10px; border-radius: 16px; background: var(--in); --b: var(--in-b); border: 1px solid color-mix(in srgb, var(--b) 22%, transparent); }
+.msg.agreement { align-self: stretch; max-width: none; margin-top: 4px; }
+.on .msg { transition: opacity .3s ease-out, translate .45s var(--ease); transition-delay: calc(var(--i, 0) * 40ms); }
+.bubble { position: relative; padding: 9px 13px 10px; border-radius: 14px; background: var(--in); --b: var(--in-b); }
 .peer .bubble { border-bottom-left-radius: 5px; }
 .mine .bubble { background: var(--out); --b: var(--out-b); border-bottom-right-radius: 5px; }
-.note .bubble { background: var(--note); --b: var(--note-b); border-radius: 12px; font-size: 13.5px; }
-.agreement .bubble { background: var(--agree); --b: var(--agree-b); border-width: 1.5px; border-color: color-mix(in srgb, var(--b) 55%, transparent); border-radius: 14px; padding: 14px 16px; }
+.note .bubble { background: var(--note); --b: var(--note-b); border-radius: 11px; font-size: 13.5px; padding: 7px 12px 8px; }
+.agreement .bubble { background: var(--agree); --b: var(--agree-b); padding: 13px 15px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--b) 35%, transparent); }
+/* 새로 온 글에는 테두리가 잠깐 둘렸다가 사라진다 */
+.bubble::after { content: ''; position: absolute; inset: -3px; border-radius: inherit; border: 2px solid var(--b); opacity: 0; pointer-events: none; transition: opacity .9s ease-out; }
+.msg.fresh .bubble::after { opacity: .6; transition-duration: .2s; }
 .who { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center; font-size: 12.5px; font-weight: 650; color: var(--b); }
+.av { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--tone, var(--b)); color: var(--card); font-size: 11px; font-weight: 700; flex: none; }
 .hum { font-size: 11.5px; padding: 1px 7px; border-radius: 99px; background: color-mix(in srgb, var(--note-b) 18%, transparent); color: var(--note-b); }
 .dir { font-weight: 500; color: var(--muted); }
 .time { color: var(--muted); font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; margin-left: auto; }
 .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 3px; }
-.rest { visibility: hidden; }
-.caret { display: inline-block; width: 0; position: relative; }
-.caret::after { content: ''; position: absolute; left: 1px; bottom: -.2em; width: 2px; height: 1.15em; border-radius: 1px; background: var(--b); }
-.on .caret::after { animation: caret 1s steps(1) infinite; }
-@keyframes caret { 50% { opacity: 0; } }
-.stamp { position: absolute; right: 12px; top: -13px; padding: 3px 10px; border: 2px solid var(--agree-b); color: var(--agree-b); background: var(--card); border-radius: 8px; font-weight: 800; font-size: 12px; letter-spacing: .08em; rotate: -6deg; }
 details { margin-top: 6px; font-size: 13px; color: var(--muted); }
 summary { cursor: pointer; width: fit-content; }
 details .text { color: var(--text); }
 @supports (interpolate-size: allow-keywords) {
   :root { interpolate-size: allow-keywords; }
-  .on details::details-content { block-size: 0; overflow: clip; transition: block-size .45s ease, content-visibility .45s; transition-behavior: allow-discrete; }
+  .on details::details-content { block-size: 0; overflow: clip; transition: block-size .3s var(--ease), content-visibility .3s; transition-behavior: allow-discrete; }
   .on details[open]::details-content { block-size: auto; }
 }
-.on .msg { transition: opacity .5s ease-out, translate .8s var(--spring), scale .8s var(--spring), filter .5s ease-out; transition-delay: calc(var(--i, 0) * 45ms); }
-.typing { display: none; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--ring); }
+/* 누군가를 기다리는 동안: 기다리게 하는 쪽에 점 세 개가 뛴다 */
+.typing { display: none; align-items: center; gap: 8px; margin-top: 12px; font-size: 12.5px; color: var(--ring); }
 .conv.act .typing { display: flex; }
 .typing.r { flex-direction: row-reverse; }
-.dots { display: inline-flex; gap: 4px; padding: 7px 10px; border-radius: 12px; background: color-mix(in srgb, var(--ring) 14%, transparent); }
-.dots i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .6; }
-.on .dots i { animation: hop 1.2s ease-in-out infinite; }
-.on .dots i:nth-child(2) { animation-delay: .15s; }
-.on .dots i:nth-child(3) { animation-delay: .3s; }
-@keyframes hop { 0%, 60%, 100% { translate: 0 0; opacity: .45; } 30% { translate: 0 -5px; opacity: 1; } }
+.typing .dots { padding: 7px 10px; border-radius: 11px; background: color-mix(in srgb, var(--ring) 12%, transparent); }
 .timer { font-variant-numeric: tabular-nums; font-weight: 650; }
 
 /* 아직 대화가 없을 때 */
-.empty { display: grid; place-items: center; gap: 12px; padding: 30px 16px 40px; color: var(--muted); text-align: center; }
+.empty { display: grid; place-items: center; gap: 10px; padding: 36px 16px 40px; color: var(--muted); text-align: center; font-size: 14px; border: 1px dashed var(--line); border-radius: 16px; }
 .empty[hidden] { display: none; }
-.radar { width: 88px; height: 88px; border-radius: 50%; position: relative; border: 1px solid var(--line); background: radial-gradient(circle, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%); }
-.radar::before { content: ''; position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(color-mix(in srgb, var(--accent) 55%, transparent), transparent 28%); }
-.radar::after { content: ''; position: absolute; inset: 38px; border-radius: 50%; background: var(--accent); }
-.on .radar::before { animation: rot 2.6s linear infinite; }
-.on .radar::after { animation: beat 1.6s ease-in-out infinite; }
+.empty svg { width: 44px; height: 44px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; opacity: .6; }
 
 /* 새 소식 알림 */
-#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; flex-direction: column; gap: 8px; width: min(360px, calc(100vw - 32px)); }
-.toast { position: relative; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; text-align: left; padding: 10px 12px 12px; border-radius: 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--card) 88%, transparent); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); box-shadow: var(--shadow); cursor: pointer; overflow: hidden; }
+#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; flex-direction: column; gap: 8px; width: min(350px, calc(100vw - 32px)); }
+.toast { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; text-align: left; padding: 11px 13px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); box-shadow: var(--pop); cursor: pointer; }
 .toast .tk { font-size: 12px; font-weight: 700; color: var(--in-b); }
 .toast .tk.k-answer { color: var(--out-b); } .toast .tk.k-note, .toast .tk.k-closed { color: var(--note-b); } .toast .tk.k-agreement { color: var(--agree-b); }
 .toast .tw { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast .ts { grid-column: 1 / -1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toast .life { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); transform-origin: 0 50%; }
-.on .toast { transition: opacity .3s ease, translate .7s var(--spring); }
-.on .toast .life { animation: life 5.2s linear forwards; }
-@keyframes life { to { scale: 0 1; } }
-.on .toast.out { opacity: 0; translate: 48px 0; }
+.on .toast { transition: opacity .3s ease-out, translate .45s var(--ease); }
+.on .toast.out { opacity: 0; translate: 14px 0; }
 
 /* 접근키 창 */
-dialog { border: 1px solid var(--line); border-radius: 16px; padding: 18px 18px 14px; width: min(540px, calc(100vw - 32px)); background: var(--card); color: var(--text); box-shadow: 0 20px 60px rgba(0, 0, 0, .35); }
+dialog { border: 1px solid var(--line); border-radius: 16px; padding: 20px 20px 16px; width: min(540px, calc(100vw - 32px)); background: var(--card); color: var(--text); box-shadow: var(--pop); }
 dialog::backdrop { background: rgba(8, 9, 14, .5); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
-.on dialog[open] { animation: pop .5s var(--spring); }
-@keyframes pop { from { opacity: 0; scale: .9; translate: 0 12px; } }
+.on dialog[open] { animation: pop .35s var(--ease); }
+.on dialog[open]::backdrop { animation: fade .25s ease-out; }
+@keyframes pop { from { opacity: 0; scale: .96; translate: 0 8px; } }
+@keyframes fade { from { opacity: 0; } }
 dialog h2 { margin: 0 0 6px; font-size: 16px; }
 dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
-.code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 3em; max-height: 180px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px dashed var(--line); background: color-mix(in srgb, var(--accent) 7%, transparent); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+.code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 3em; max-height: 180px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--soft); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
 .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
-.chip.main { background: var(--accent); border-color: var(--accent); color: var(--card); font-weight: 600; }
 
 /* 처음 나타날 때의 출발 모습. 맨 바깥에 둬야 브라우저가 읽는다. */
 @starting-style {
-  .on .conv { opacity: 0; translate: 0 26px; scale: .96; filter: blur(8px); }
-  .on .msg { opacity: 0; scale: .92; filter: blur(6px); }
-  .on .msg.peer { translate: -28px 8px; }
-  .on .msg.mine { translate: 28px 8px; }
-  .on .msg.note, .on .msg.agreement { translate: 0 14px; }
-  .on .toast { opacity: 0; translate: 48px 0; }
+  .on .conv { opacity: 0; translate: 0 14px; }
+  .on .msg { opacity: 0; translate: 0 10px; }
+  .on .room { opacity: 0; translate: 0 8px; }
+  .on .toast { opacity: 0; translate: 14px 0; }
+  .on .sess { opacity: 0; }
+  /* 대화를 열 때는 카드만 떠오른다. 안의 글은 따로 움직이지 않는다. */
+  .on .wrap.quiet .msg { opacity: 1; translate: none; }
+  /* 자리만 옮긴 목록 줄은 다시 나타나는 움직임을 하지 않는다 */
+  .on .room.still { opacity: 1; translate: none; }
 }
 </style>
 </head>
 <body>
-<canvas id="sky" aria-hidden="true"></canvas>
-<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
-<div class="bar" aria-hidden="true"></div>
 <header class="top">
   <div class="brand">
-    <svg class="logo" viewBox="-24 -24 48 48" aria-hidden="true"><circle class="lo" r="21"/><g class="lg"><path class="ll" d="M-7 0H7"/><circle class="l1" cx="-13" r="6"/><circle class="l2" cx="13" r="6"/></g></svg>
+    <svg class="logo" viewBox="0 0 28 28" aria-hidden="true"><path d="M9 14h10"/><circle class="l1" cx="7" cy="14" r="5"/><circle class="l2" cx="21" cy="14" r="5"/></svg>
     <h1>Coworker <span>대화</span></h1>
   </div>
   <div class="chips">
-    <span class="chip live" id="live"><i class="eq" aria-hidden="true"><b></b><b></b><b></b><b></b></i><span id="liveText">연결하는 중</span></span>
+    <span class="live" id="live"><i class="beacon" aria-hidden="true"></i><span id="liveText">연결하는 중</span></span>
     <button class="chip" id="issue" type="button">접근키 발급</button>
     <button class="chip" id="follow" type="button">새 글 따라가기 끄기</button>
     <button class="chip" id="motion" type="button">모션 끄기</button>
   </div>
 </header>
 <main>
-  <section class="stage" id="stage" aria-label="연결 상태">
-    <canvas id="flow" aria-hidden="true"></canvas>
-    <svg id="net" role="img" aria-label="세션 연결 그림"></svg>
-    <div id="talk" aria-hidden="true"></div>
-    <div class="stats" id="stats"></div>
+  <section class="panel" aria-label="연결 상태">
+    <div class="net" id="net">
+      <svg id="wires" aria-hidden="true"></svg>
+      <div class="peers" id="peers"></div>
+      <p class="nopeer" id="nopeer" hidden>아직 연결된 세션이 없습니다. 「접근키 발급」으로 동료를 초대할 수 있습니다.</p>
+    </div>
     <div class="downs" id="downs"></div>
+    <div class="stats" id="stats"></div>
   </section>
-  <p class="me" id="me"></p>
-  <p class="refresh" id="refresh" role="status"></p>
-  <div class="filters" id="filters" role="group" aria-label="세션을 골라 보기" hidden></div>
-  <div class="filters" id="cats" role="group" aria-label="분류를 골라 보기" hidden></div>
-  <div id="list"></div>
-  <div class="empty" id="empty" hidden><div class="radar" aria-hidden="true"></div><div id="emptyText">아직 주고받은 질문이 없습니다.</div></div>
+  <div class="info">
+    <p class="me" id="me"></p>
+    <p class="refresh" id="refresh" role="status"></p>
+  </div>
+  <div class="filterbar">
+    <div class="filters" id="filters" role="group" aria-label="세션을 골라 보기" hidden></div>
+    <div class="filters" id="cats" role="group" aria-label="분류를 골라 보기" hidden></div>
+  </div>
+  <p class="plain" id="said" role="status"></p>
+  <div class="board" id="board" hidden>
+    <nav class="rooms" id="rooms" aria-label="대화 목록"></nav>
+    <div class="pane" id="pane"></div>
+  </div>
+  <div class="empty" id="empty" hidden>
+    <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 12a4 4 0 0 1 4-4h18a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4H19l-7 6v-6a4 4 0 0 1-4-4z"/><path d="M38 19a4 4 0 0 1 2 3.5V32a4 4 0 0 1-4 4v5l-6-5h-8"/></svg>
+    <div id="emptyText">아직 주고받은 질문이 없습니다.</div>
+  </div>
 </main>
 <dialog id="keybox" aria-labelledby="keytitle">
   <h2 id="keytitle">접근키 (연결 코드)</h2>
@@ -392,8 +377,6 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
   </div>
 </dialog>
 <div id="toasts" role="log" aria-live="polite"></div>
-<div class="sweep" id="sweep" aria-hidden="true"></div>
-<canvas id="fx" aria-hidden="true"></canvas>
 <script>
 const KIND = { question: '질문', answer: '답', note: '알림', closed: '마감', agreement: '합의문' }
 // 대화가 지금 어디에 와 있는지. 대화는 대개 합의문 없이 질문과 답으로 끝난다. 그래서 세션이 알려 주는 「차례」를
@@ -414,7 +397,7 @@ const PHASE = {
   closed: '마감 · 다른 사람이 먼저 답함',
   agreed: '합의문 작성됨',
 }
-// 누군가를 기다리는 단계. 카드 테두리가 돌고, 기다리는 쪽에 점 세 개가 뛴다.
+// 누군가를 기다리는 단계. 상태 점 둘레로 고리가 퍼지고, 기다리게 하는 쪽에 점 세 개가 뛴다.
 const WAIT = {
   waiting_for_peer: '상대의 답을 기다리는 중',
   your_turn: '이쪽 AI가 답할 차례',
@@ -445,8 +428,8 @@ function phase(c) {
   return quiet ? 'read_no_answer' : 'your_turn'
 }
 const ANSWERS = { all: '모두 답', one: '한 명만 답' }
-const SPRING_FN = 'linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1)'
-const SPRING = window.CSS && CSS.supports('transition-timing-function', 'linear(0, 1)') ? SPRING_FN : 'cubic-bezier(.34, 1.56, .64, 1)'
+// 움직임에 쓰는 빠르기 곡선. 빨리 나가서 부드럽게 멎는다. 튀어 넘지 않는다.
+const EASE = 'cubic-bezier(.22, 1, .36, 1)'
 const root = document.documentElement
 const byId = id => document.getElementById(id)
 const time = at => new Date(at).toLocaleString('ko-KR', { hour12: false })
@@ -495,577 +478,121 @@ function fx(node, frames, options) {
   try { return node.animate(frames, options) } catch (e) { return null }
 }
 
-// 배경의 별자리. 점이 천천히 떠다니고 가까운 점끼리 선이 이어진다. 새 글이 오면 물결이 한 번 퍼진다.
-const sky = (() => {
-  const canvas = byId('sky')
-  const ctx = canvas.getContext('2d')
-  let w = 0, h = 0, points = [], waves = [], shoots = [], nextShoot = 0, raf = 0, px = -1e4, py = -1e4, rgb = '120,150,255'
-  const make = () => ({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - .5) * .28, vy: (Math.random() - .5) * .28, r: Math.random() * 1.5 + .6, p: Math.random() * 6.28 })
-  function tone() {
-    const m = /^#([0-9a-f]{6})$/i.exec(getComputedStyle(root).getPropertyValue('--accent').trim())
-    if (m) rgb = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)).join(',')
-  }
-  function size() {
-    const dpr = Math.min(devicePixelRatio || 1, 2)
-    w = innerWidth
-    h = innerHeight
-    canvas.width = Math.round(w * dpr)
-    canvas.height = Math.round(h * dpr)
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    const n = Math.round(Math.min(90, Math.max(26, (w * h) / 17000)))
-    while (points.length < n) points.push(make())
-    points.length = n
-    tone()
-    paint(performance.now(), false)
-  }
-  function paint(now, step) {
-    ctx.clearRect(0, 0, w, h)
-    for (const p of points) {
-      if (step) {
-        p.x += p.vx
-        p.y += p.vy
-        const dx = p.x - px, dy = p.y - py, d2 = dx * dx + dy * dy
-        if (d2 < 16000 && d2 > 1) {
-          const f = ((16000 - d2) / 16000) * .7, d = Math.sqrt(d2)
-          p.x += (dx / d) * f
-          p.y += (dy / d) * f
-        }
-        if (p.x < -20) p.x = w + 20
-        else if (p.x > w + 20) p.x = -20
-        if (p.y < -20) p.y = h + 20
-        else if (p.y > h + 20) p.y = -20
-      }
-      ctx.fillStyle = 'rgba(' + rgb + ',' + (.3 + .25 * Math.sin(now / 900 + p.p)).toFixed(3) + ')'
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, p.r, 0, 6.2832)
-      ctx.fill()
-    }
-    ctx.lineWidth = 1
-    for (let i = 0; i < points.length; i++)
-      for (let j = i + 1; j < points.length; j++) {
-        const a = points[i], b = points[j], dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy
-        if (d2 > 16900) continue
-        ctx.strokeStyle = 'rgba(' + rgb + ',' + ((1 - Math.sqrt(d2) / 130) * .2).toFixed(3) + ')'
-        ctx.beginPath()
-        ctx.moveTo(a.x, a.y)
-        ctx.lineTo(b.x, b.y)
-        ctx.stroke()
-      }
-    waves = waves.filter(v => v.r < v.max)
-    for (const v of waves) {
-      if (step) v.r += 7
-      ctx.strokeStyle = 'rgba(' + rgb + ',' + ((1 - v.r / v.max) * .35).toFixed(3) + ')'
-      ctx.lineWidth = 2
-      ctx.beginPath()
-      ctx.arc(v.x, v.y, v.r, 0, 6.2832)
-      ctx.stroke()
-    }
-    // 가끔 별똥별이 지나간다.
-    if (step && now > nextShoot) {
-      nextShoot = now + 2200 + Math.random() * 3800
-      shoots.push({ x: Math.random() * w * .8, y: Math.random() * h * .45, vx: 9 + Math.random() * 7, vy: 3 + Math.random() * 3, life: 0 })
-    }
-    shoots = shoots.filter(v => v.life < 46 && v.x < w + 80)
-    for (const v of shoots) {
-      if (step) {
-        v.x += v.vx
-        v.y += v.vy
-        v.life++
-      }
-      const tail = ctx.createLinearGradient(v.x, v.y, v.x - v.vx * 9, v.y - v.vy * 9)
-      tail.addColorStop(0, 'rgba(' + rgb + ',' + (.85 * (1 - v.life / 46)).toFixed(3) + ')')
-      tail.addColorStop(1, 'rgba(' + rgb + ',0)')
-      ctx.strokeStyle = tail
-      ctx.lineWidth = 2
-      ctx.beginPath()
-      ctx.moveTo(v.x, v.y)
-      ctx.lineTo(v.x - v.vx * 9, v.y - v.vy * 9)
-      ctx.stroke()
-    }
-  }
-  function frame(now) {
-    raf = 0
-    if (!moving() || document.hidden) return
-    paint(now, true)
-    raf = requestAnimationFrame(frame)
-  }
-  function run() {
-    if (!raf && moving() && !document.hidden) raf = requestAnimationFrame(frame)
-    if (!moving()) {
-      waves = []
-      paint(0, false)
-    }
-  }
-  addEventListener('resize', size)
-  addEventListener('pointermove', e => { px = e.clientX; py = e.clientY }, { passive: true })
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { tone(); run() })
-  size()
-  return { run, wave(x, y) { if (moving()) waves.push({ x, y, r: 10, max: Math.max(w, h) * .6 }) } }
-})()
-
-// 합의문이 오면 색종이가 터진다.
-const confetti = (() => {
-  const canvas = byId('fx')
-  const ctx = canvas.getContext('2d')
-  const colors = ['#8aa8ff', '#b9a0ff', '#62d28d', '#f0b84a', '#ff8a80', '#5fd3e6']
-  let parts = [], raf = 0, w = 0, h = 0, seen = 0
-  // 시간으로 움직인다. 탭이 가려져 그리기가 멈췄다가 돌아오면, 지난 조각은 남기지 않고 바로 치운다.
-  function frame(now) {
-    raf = 0
-    const dt = Math.min(3, (now - seen) / 16.7)
-    seen = now
-    ctx.clearRect(0, 0, w, h)
-    parts = parts.filter(p => now - p.born < 2400 && p.y < h + 40)
-    for (const p of parts) {
-      const age = now - p.born
-      p.vy += .3 * dt
-      p.vx *= Math.pow(.99, dt)
-      p.x += p.vx * dt
-      p.y += p.vy * dt
-      p.rot += p.vr * dt
-      ctx.save()
-      ctx.globalAlpha = age > 1600 ? Math.max(0, 1 - (age - 1600) / 800) : 1
-      ctx.translate(p.x, p.y)
-      ctx.rotate(p.rot)
-      ctx.fillStyle = p.color
-      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.abs(Math.cos(age / 150 + p.rot)))
-      ctx.restore()
-    }
-    if (parts.length && moving()) raf = requestAnimationFrame(frame)
-    else {
-      parts = []
-      ctx.clearRect(0, 0, w, h)
-    }
-  }
-  return {
-    burst(x, y) {
-      if (!moving()) return
-      const dpr = Math.min(devicePixelRatio || 1, 2)
-      w = innerWidth
-      h = innerHeight
-      canvas.width = Math.round(w * dpr)
-      canvas.height = Math.round(h * dpr)
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      for (let i = 0; i < 120; i++) {
-        const a = -Math.PI / 2 + (Math.random() - .5) * 2.4, v = 4 + Math.random() * 10
-        parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, w: 5 + Math.random() * 6, h: 8 + Math.random() * 6, rot: Math.random() * 6.28, vr: (Math.random() - .5) * .4, color: colors[i % colors.length], born: performance.now() })
-      }
-      if (!raf) {
-        seen = performance.now()
-        raf = requestAnimationFrame(frame)
-      }
-    },
-  }
-})()
-
-const list = byId('list')
+const pane = byId('pane'), rooms = byId('rooms'), board = byId('board')
+// 왼쪽에 열어 둔 대화. 사람이 목록에서 고르거나, 새 글이 오면 그 대화로 바뀐다.
+let active = ''
 const empty = byId('empty')
 const toasts = byId('toasts')
 const cards = new Map()
 
+// 새로 온 글에 테두리를 잠깐 둘러 어디가 바뀌었는지 보인다.
+function mark(node) {
+  node.classList.add('fresh')
+  clearTimeout(node.unmark)
+  node.unmark = setTimeout(() => node.classList.remove('fresh'), 1800)
+}
 function reveal(node) {
   node.scrollIntoView({ block: 'center', behavior: moving() ? 'smooth' : 'auto' })
-  fx(node, [{ scale: 1.03, filter: 'brightness(1.2)' }, { scale: 1, filter: 'brightness(1)' }], { duration: 800, easing: 'ease-out' })
+  mark(node)
 }
 
-// 연결 무대. 가운데가 이 세션이고 둘레가 연결된 세션이다. 세션마다 얼굴이 있는 캐릭터가 서 있다.
-// 평소에도 선을 따라 빛 알갱이가 흐르고 바닥 격자가 다가온다. 글을 보내면 입을 움직이며 말풍선을 띄우고,
-// 그 글이 빛덩이로 날아가 닿으면 불꽃이 튄다. 캐릭터는 눈을 깜빡이고, 생각할 때와 끊겼을 때 표정이 다르다.
+// 연결 그림. 왼쪽이 이 세션이고, 연결된 세션이 오른쪽에 줄지어 선다. 선이 둘을 잇는다.
+// 글이 오가면 그 선을 따라 점 하나가 보낸 쪽에서 받은 쪽으로 건너가고, 닿은 쪽 둘레에 고리가 한 번 퍼진다.
+// 답할 차례인 쪽에는 점 세 개가, 사람에게 확인 중인 쪽에는 이름표가 붙는다.
+// 세션을 누르면 그 세션이 들어 있는 대화만 보인다. 다시 누르면 모두 보인다.
 const ME = ':me'
-const stage = (() => {
-  const box = byId('stage'), net = byId('net'), flow = byId('flow'), talk = byId('talk'), ctx = flow.getContext('2d')
+const net = (() => {
+  const box = byId('net'), wires = byId('wires'), peersBox = byId('peers'), nopeer = byId('nopeer')
   const NS = 'http://www.w3.org/2000/svg'
-  const mk = (tag, cls, attrs) => {
-    const e = document.createElementNS(NS, tag)
-    if (cls) e.setAttribute('class', cls)
-    for (const k in attrs || {}) e.setAttribute(k, attrs[k])
-    return e
+  const tiles = new Map(), tones = new Map()
+  // 세션마다 빛깔 하나. 여럿이 있는 방의 글에도 같은 빛깔을 쓴다.
+  const toneOf = key => {
+    if (!tones.has(key)) tones.set(key, 'var(--t' + ((tones.size % 6) + 1) + ')')
+    return tones.get(key)
   }
-  // 세션마다 다른 몸 빛깔. 마지막 것은 이 세션의 것이다.
-  const PALETTE = [['#9db8ff', '#4f6fe0'], ['#7fe0a6', '#2b9a62'], ['#ffd27a', '#d18a1c'], ['#ffa8ba', '#de5c7b'], ['#84e3f2', '#2a9db3'], ['#cdb8ff', '#8763e6'], ['#d8c4ff', '#6f8cff']]
-  const defs = mk('defs')
-  PALETTE.forEach((pair, i) => {
-    const g = mk('radialGradient', '', { id: 'g' + i, cx: '35%', cy: '28%', r: '85%' })
-    const a = mk('stop', '', { offset: '0' }), b = mk('stop', '', { offset: '1' })
-    a.style.stopColor = pair[0]
-    b.style.stopColor = pair[1]
-    g.append(a, b)
-    defs.append(g)
-  })
-  const linkLayer = mk('g'), nodeLayer = mk('g')
-  net.append(defs, linkLayer, nodeLayer)
-  const nodes = new Map(), hues = new Map()
-  let W = 0, H = 230, raf = 0, shown = [], comets = [], sparks = [], rings = [], seen = 0, visible = true
-  const rgb = { inb: '138,168,255', outb: '98,210,141', note: '240,184,74', agree: '185,160,255', warn: '255,138,128', accent: '138,168,255' }
-  function tone() {
-    const css = getComputedStyle(root)
-    const read = (name, key) => {
-      const m = /^#([0-9a-f]{6})$/i.exec(css.getPropertyValue(name).trim())
-      if (m) rgb[key] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)).join(',')
-    }
-    read('--in-b', 'inb')
-    read('--out-b', 'outb')
-    read('--note-b', 'note')
-    read('--agree-b', 'agree')
-    read('--warn', 'warn')
-    read('--accent', 'accent')
-  }
-  const colorOf = kind => (kind === 'answer' ? rgb.outb : kind === 'agreement' ? rgb.agree : kind === 'note' || kind === 'closed' ? rgb.note : rgb.inb)
-
-  // 세션을 누르면 그 세션이 들어 있는 대화만 보인다. 다시 누르면 모두 보인다.
-  function open(key) {
-    setFilter(key)
-    byId('filters').scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
-  }
-  const num = v => v.toFixed(1)
-  function node(key, kind) {
-    let n = nodes.get(key)
-    if (n) return n
-    const r = kind === 'me' ? 28 : kind === 'ghost' ? 16 : 22
-    if (kind !== 'me' && !hues.has(key)) hues.set(key, hues.size % (PALETTE.length - 1))
-    const fill = 'url(#g' + (kind === 'me' ? PALETTE.length - 1 : hues.get(key)) + ')'
-    const g = mk('g', 'node ' + kind), fl = mk('g', 'fl'), body = mk('g', 'body'), tip = mk('title')
-    const eyes = mk('g', 'eyes')
-    let cross = ''
-    for (const side of [-1, 1]) {
-      const cx = side * r * .34, cy = -r * .12, s = r * .13
-      eyes.append(mk('ellipse', 'eye', { cx: num(cx), cy: num(cy), rx: num(r * .15), ry: num(r * .2) }), mk('circle', 'pupil', { cx: num(cx), cy: num(cy + r * .03), r: num(r * .075) }))
-      cross += 'M' + num(cx - s) + ' ' + num(cy - s) + 'L' + num(cx + s) + ' ' + num(cy + s) + 'M' + num(cx + s) + ' ' + num(cy - s) + 'L' + num(cx - s) + ' ' + num(cy + s)
-    }
-    const mouth = mk('path', 'mouth'), snore = mk('text', 'zz', { x: num(r * .75), y: num(-r * .85) })
-    snore.textContent = 'z'
-    body.append(
-      mk('circle', 'core core-c', { r, fill }),
-      mk('rect', 'core core-r', { x: -r, y: -r, width: r * 2, height: r * 2, rx: num(r * .42), fill }),
-      eyes,
-      mk('path', 'xeyes', { d: cross }),
-      mouth,
-      mk('ellipse', 'omouth', { cx: 0, cy: num(r * .38), rx: num(r * .16), ry: num(r * .2) }),
-    )
-    const hb = mk('g', 'hb', { transform: 'translate(' + num(r * .8) + ' ' + num(-r * .8) + ')' }), mark = mk('text', '', { dy: '.35em' })
-    mark.textContent = '?'
-    hb.append(mk('circle', '', { r: 9 }), mark)
-    const dots3 = mk('g', 'dots3', { transform: 'translate(0 ' + num(-r - 12) + ')' })
-    dots3.append(mk('circle', '', { cx: -7, r: 2.4 }), mk('circle', '', { cx: 0, r: 2.4 }), mk('circle', '', { cx: 7, r: 2.4 }))
-    const nm = mk('text', 'nm', { y: r + 22 }), sub = mk('text', 'sub', { y: r + 37 }), ab = mk('text', 'ab', { y: r + 51 })
-    fl.append(mk('circle', 'halo', { r: r + 10 }))
-    if (kind === 'me') fl.append(mk('circle', 'spin', { r: r + 7 }))
-    fl.append(body, hb, dots3, snore)
-    g.append(tip, fl, nm, sub, ab)
-    fl.style.setProperty('--fd', (3.6 + Math.random() * 2.6).toFixed(1) + 's')
-    fl.style.setProperty('--fo', (-Math.random() * 5).toFixed(1) + 's')
-    fl.style.setProperty('--bd', (3.6 + Math.random() * 2.4).toFixed(1) + 's')
-    if (kind !== 'me') g.style.setProperty('--tone', PALETTE[hues.get(key)][0])
-    nodeLayer.append(g)
-    n = { key, kind, g, fl, mouth, nm, sub, ab, tip, r, x: NaN, y: NaN, tx: 0, ty: 0, sign: 1, lk: null, off: Math.random() * 2600, timers: {}, say: null }
-    if (kind !== 'me') {
-      const lg = mk('g', 'lk' + (kind === 'ghost' ? ' ghost' : '')), link = mk('path', 'link')
-      lg.append(link)
-      linkLayer.append(lg)
-      n.lk = { g: lg, link }
-      g.setAttribute('tabindex', '0')
-      g.setAttribute('role', 'button')
-      g.addEventListener('click', () => open(key))
-      g.addEventListener('keydown', e => {
-        if (e.key !== 'Enter' && e.key !== ' ') return
-        e.preventDefault()
-        open(key)
-      })
-    }
-    nodes.set(key, n)
-    fx(fl, [{ scale: 0 }, { scale: 1 }], { duration: 800, easing: SPRING })
-    return n
-  }
-  function drop(n) {
-    nodes.delete(n.key)
-    if (n.lk) n.lk.g.remove()
-    if (n.say) n.say.remove()
-    const a = fx(n.g, [{ opacity: 1 }, { opacity: 0 }], { duration: 400, easing: 'ease-in' })
-    if (a) a.finished.then(() => n.g.remove(), () => n.g.remove())
-    else n.g.remove()
-  }
-  // 표정. 끊기면 찡그리고, 생각하거나 사람에게 묻는 중이면 입을 다물고, 평소에는 웃는다.
-  function face(n) {
-    const r = n.r, c = n.g.classList
-    const d = c.contains('down')
-      ? 'M' + num(-r * .26) + ' ' + num(r * .5) + 'Q0 ' + num(r * .28) + ' ' + num(r * .26) + ' ' + num(r * .5)
-      : c.contains('think') || c.contains('human')
-        ? 'M' + num(-r * .2) + ' ' + num(r * .4) + 'H' + num(r * .2)
-        : 'M' + num(-r * .3) + ' ' + num(r * .3) + 'Q0 ' + num(r * .6) + ' ' + num(r * .3) + ' ' + num(r * .3)
-    if (n.mouth.getAttribute('d') !== d) n.mouth.setAttribute('d', d)
-  }
-  function label(n, name, sub, since, about) {
-    const chars = Array.from(name)
-    put(n.nm, chars.length > 18 ? chars.slice(0, 17).join('') + '…' : name)
-    const who = about ? [about.app, about.model, about.effort].filter(Boolean).join(' · ') : ''
-    put(n.ab, who)
-    // Codex 는 네모난 몸, 그 밖에는 둥근 몸이다.
-    n.g.classList.toggle('sq', !!about && /codex/i.test(about.app || ''))
-    put(n.tip, name + ' · ' + sub + (who ? ' · ' + who : ''))
-    n.g.setAttribute('aria-label', name + ', ' + sub + (who ? ', ' + who : ''))
-    if (since) {
-      n.sub.dataset.pre = sub + ' '
-      if (n.sub.dataset.since !== since) {
-        n.sub.dataset.since = since
-        n.sub.textContent = sub + ' ' + clock(Date.now() - Date.parse(since))
-      }
+  function tile(key, kind) {
+    let t = tiles.get(key)
+    if (t) return t
+    const node = el(kind === 'peer' ? 'button' : 'div', 'sess ' + kind)
+    const avatar = el('span', 'avatar'), ini = el('span'), ring = el('i', 'ring'), info = el('span', 'sinfo'), name = el('span', 'sname'), sub = el('span', 'ssub'), about = el('span', 'ssub')
+    const tag = el('span', 'stag'), dots = el('span', 'dots'), tagText = el('span')
+    avatar.setAttribute('aria-hidden', 'true')
+    avatar.append(ini, ring, el('i', 'st'))
+    dots.setAttribute('aria-hidden', 'true')
+    dots.append(el('i'), el('i'), el('i'))
+    tag.append(dots, tagText)
+    info.append(name, sub)
+    node.append(avatar, info)
+    let wire = null
+    if (kind === 'me') {
+      info.append(about, tag)
+      box.insertBefore(node, peersBox)
     } else {
-      delete n.sub.dataset.since
-      put(n.sub, sub)
+      node.append(tag)
+      node.style.setProperty('--tone', toneOf(key))
+      wire = document.createElementNS(NS, 'path')
+      wire.setAttribute('class', kind === 'ghost' ? 'wire ghost' : 'wire')
+      wires.append(wire)
     }
+    if (kind === 'peer') {
+      node.type = 'button'
+      node.setAttribute('aria-pressed', 'false')
+      node.addEventListener('click', () => setFilter(key))
+    }
+    t = { key, kind, node, avatar, ini, ring, name, sub, about, tagText, wire, drawn: false }
+    tiles.set(key, t)
+    return t
   }
+  function drop(t) {
+    tiles.delete(t.key)
+    t.node.remove()
+    if (t.wire) t.wire.remove()
+  }
+  function fill(t, name, sub, about) {
+    put(t.ini, (Array.from(name.trim())[0] || '?').toUpperCase())
+    put(t.name, name)
+    put(t.sub, sub)
+    put(t.about, about)
+    const full = [name, sub, about].filter(Boolean).join(' · ')
+    if (t.node.title !== full) t.node.title = full
+  }
+  // 선을 다시 긋는다. 넓으면 옆으로 휘어 잇고, 좁아서 세션이 아래로 내려가면 나뭇가지처럼 꺾어 잇는다.
+  // 자리는 한꺼번에 재고, 그 뒤에 한꺼번에 그린다.
   function layout() {
-    const me = nodes.get(ME)
-    if (!me) return
-    const peers = shown, n = peers.length
-    W = Math.max(280, box.clientWidth)
-    H = n > 6 ? 420 : n > 2 ? 370 : 280
-    net.setAttribute('viewBox', '0 0 ' + W + ' ' + H)
-    net.setAttribute('height', H)
-    const dpr = Math.min(devicePixelRatio || 1, 2), full = box.clientHeight || H
-    flow.width = Math.round(W * dpr)
-    flow.height = Math.round(full * dpr)
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    // 머리 위에 말풍선이 뜰 자리를 남긴다.
-    const cy = H / 2 + (n > 2 ? 22 : 16)
-    me.tx = n === 1 ? W * .28 : W / 2
-    me.ty = cy
-    if (n === 1) {
-      peers[0].tx = W * .72
-      peers[0].ty = cy
-      peers[0].sign = -1
-    } else {
-      const rx = Math.min(W * .38, 340), ry = H * .23
-      peers.forEach((p, i) => {
-        const a = (n === 2 ? Math.PI : -Math.PI / 2) + (i * 2 * Math.PI) / n
-        p.tx = W / 2 + Math.cos(a) * rx
-        p.ty = cy + Math.sin(a) * ry
-        p.sign = i % 2 ? 1 : -1
-      })
-    }
-    // 새로 생긴 세션은 이 세션 자리에서 튀어나온다.
-    const still = !moving()
-    for (const p of [me].concat(peers))
-      if (isNaN(p.x) || still) {
-        const own = p === me || still || isNaN(me.x)
-        p.x = own ? p.tx : me.x
-        p.y = own ? p.ty : me.y
+    const me = tiles.get(ME)
+    if (!me || !box.clientWidth) return
+    const tree = peersBox.offsetTop >= me.node.offsetTop + me.node.offsetHeight - 2
+    const hx = me.node.offsetLeft + me.avatar.offsetLeft + me.avatar.offsetWidth / 2, hy = me.node.offsetTop + me.avatar.offsetTop + me.avatar.offsetHeight + 7
+    const sx = me.node.offsetLeft + me.node.offsetWidth + 12, sy = me.node.offsetTop + me.node.offsetHeight / 2
+    const jobs = []
+    for (const t of tiles.values()) if (t.wire) jobs.push([t, t.node.offsetLeft + t.avatar.offsetLeft - 8, t.node.offsetTop + t.avatar.offsetTop + t.avatar.offsetHeight / 2])
+    const f = n => n.toFixed(1)
+    for (const [t, x2, y2] of jobs) {
+      let d = ''
+      if (tree) {
+        const r = Math.max(0, Math.min(10, x2 - hx, y2 - hy))
+        d = 'M' + f(hx) + ' ' + f(hy) + 'V' + f(y2 - r) + 'Q' + f(hx) + ' ' + f(y2) + ' ' + f(hx + r) + ' ' + f(y2) + 'H' + f(x2)
+      } else if (x2 > sx) {
+        const k = (x2 - sx) * .5
+        d = 'M' + f(sx) + ' ' + f(sy) + 'C' + f(sx + k) + ' ' + f(sy) + ' ' + f(x2 - k) + ' ' + f(y2) + ' ' + f(x2) + ' ' + f(y2)
       }
-    place()
-    run()
-  }
-  function ctrl(a, b) {
-    const dx = b.x - a.x, dy = b.y - a.y
-    return { x: (a.x + b.x) / 2 - dy * .16 * b.sign, y: (a.y + b.y) / 2 + dx * .16 * b.sign }
-  }
-  const bez = (a, c, b, t) => {
-    const u = 1 - t
-    return { x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y }
-  }
-  function place() {
-    const me = nodes.get(ME)
-    for (const n of nodes.values()) {
-      if (isNaN(n.x)) continue
-      n.g.style.transform = 'translate(' + num(n.x) + 'px,' + num(n.y) + 'px)'
-      if (n.say) {
-        n.say.style.left = num(Math.min(W - 126, Math.max(126, n.x))) + 'px'
-        n.say.style.top = num(n.y - n.r - 18) + 'px'
-      }
-      if (!n.lk || !me || isNaN(me.x)) continue
-      const c = ctrl(me, n)
-      n.lk.link.setAttribute('d', 'M' + num(me.x) + ' ' + num(me.y) + 'Q' + num(c.x) + ' ' + num(c.y) + ' ' + num(n.x) + ' ' + num(n.y))
-    }
-  }
-  // 잠깐 짓는 표정(말하기, 놀람, 기쁨). 시간이 지나면 저절로 돌아온다.
-  function emote(n, cls, ms) {
-    n.g.classList.add(cls)
-    clearTimeout(n.timers[cls])
-    n.timers[cls] = setTimeout(() => n.g.classList.remove(cls), ms)
-  }
-  // 말풍선. 보낸 글의 앞부분을 잠깐 보여 준다.
-  function say(n, text, kind) {
-    if (!moving() || !text) return
-    if (n.say) n.say.remove()
-    const flat = text.split(String.fromCharCode(10)).join(' ').trim(), chars = Array.from(flat)
-    const d = el('div', 'say', chars.length > 46 ? chars.slice(0, 45).join('') + '…' : flat)
-    d.style.setProperty('--b', 'var(--' + (kind === 'answer' ? 'out-b' : kind === 'agreement' ? 'agree-b' : kind === 'note' || kind === 'closed' ? 'note-b' : 'in-b') + ')')
-    d.style.left = num(Math.min(W - 126, Math.max(126, n.x))) + 'px'
-    d.style.top = num(n.y - n.r - 18) + 'px'
-    talk.append(d)
-    n.say = d
-    fx(d, [{ scale: 0, opacity: 0 }, { scale: 1, opacity: 1 }], { duration: 480, easing: SPRING })
-    setTimeout(() => {
-      const gone = () => {
-        d.remove()
-        if (n.say === d) n.say = null
-      }
-      const a = fx(d, [{ opacity: 1 }, { opacity: 0, translate: '-50% -125%' }], { duration: 420, easing: 'ease-in' })
-      if (a) a.finished.then(gone, gone)
-      else gone()
-    }, 3800)
-  }
-
-  // 아래부터는 캔버스에 그리는 것: 다가오는 바닥 격자, 선을 따라 흐르는 빛 알갱이, 퍼지는 고리, 날아가는 빛덩이와 불꽃.
-  function dot(x, y, r, color, alpha) {
-    ctx.fillStyle = 'rgba(' + color + ',' + (alpha * .22).toFixed(3) + ')'
-    ctx.beginPath()
-    ctx.arc(x, y, r * 2.8, 0, 6.2832)
-    ctx.fill()
-    ctx.fillStyle = 'rgba(' + color + ',' + alpha.toFixed(3) + ')'
-    ctx.beginPath()
-    ctx.arc(x, y, r, 0, 6.2832)
-    ctx.fill()
-  }
-  function floor(now) {
-    const y0 = H * .66, rows = 9, shift = (now / 1700) % 1
-    ctx.lineWidth = 1
-    for (let k = 0; k < rows; k++) {
-      const u = (k + shift) / rows, y = y0 + (H - y0) * u * u
-      ctx.strokeStyle = 'rgba(' + rgb.accent + ',' + (.04 + u * .18).toFixed(3) + ')'
-      ctx.beginPath()
-      ctx.moveTo(0, y)
-      ctx.lineTo(W, y)
-      ctx.stroke()
-    }
-    ctx.strokeStyle = 'rgba(' + rgb.accent + ',.09)'
-    for (let j = -12; j <= 12; j++) {
-      ctx.beginPath()
-      ctx.moveTo(W / 2 + j * 16, y0)
-      ctx.lineTo(W / 2 + j * (W / 10), H)
-      ctx.stroke()
-    }
-  }
-  function stream(me, n, now) {
-    const c = ctrl(me, n), count = 13
-    const nx = -(n.y - me.y), ny = n.x - me.x, len = Math.hypot(nx, ny) || 1
-    for (let dir = 0; dir < 2; dir++) {
-      const color = dir ? rgb.inb : rgb.outb, span = dir ? 2700 : 2100
-      for (let i = 0; i < count; i++) {
-        const raw = (now / span + i / count) % 1, glow = Math.sin(Math.PI * raw)
-        const p = bez(me, c, n, dir ? 1 - raw : raw), sway = Math.sin(raw * 11 + i * 1.7 + now / 420) * 3.2 * (dir ? -1 : 1)
-        dot(p.x + (nx / len) * sway, p.y + (ny / len) * sway, 1.2 + glow * 1.5, color, glow * .95)
+      if (t.wire.getAttribute('d') !== d) t.wire.setAttribute('d', d)
+      // 새로 이어진 세션은 선이 한 번 그어지며 나타난다.
+      if (d && !t.drawn) {
+        t.drawn = true
+        const length = t.wire.getTotalLength()
+        fx(t.wire, [{ strokeDasharray: length + ' ' + length, strokeDashoffset: length }, { strokeDasharray: length + ' ' + length, strokeDashoffset: 0 }], { duration: 700, easing: EASE })
       }
     }
-  }
-  // 닿지 않는 선에는 가운데에서 붉은 불티가 튄다.
-  function broken(me, n, now) {
-    const c = ctrl(me, n)
-    for (let i = 0; i < 6; i++) {
-      const p = bez(me, c, n, .5 + Math.sin(now / 170 + i * 2.1) * .07), lit = .5 + .5 * Math.sin(now / 90 + i * 1.3)
-      dot(p.x + Math.sin(now / 210 + i * 4) * 9, p.y + Math.cos(now / 260 + i * 3) * 9, 1.4, rgb.warn, lit * .8)
-    }
-  }
-  function sonar(n, now, color) {
-    const u = ((now + n.off) % 2600) / 2600
-    ctx.strokeStyle = 'rgba(' + color + ',' + ((1 - u) * .38).toFixed(3) + ')'
-    ctx.lineWidth = 1.5
-    ctx.beginPath()
-    ctx.arc(n.x, n.y, n.r + 8 + u * 40, 0, 6.2832)
-    ctx.stroke()
-  }
-  function burst(x, y, color, many) {
-    for (let i = 0; i < many; i++) {
-      const a = Math.random() * 6.2832, v = 1 + Math.random() * 4.2
-      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 26 + Math.random() * 22, max: 48, color })
-    }
-    rings.push({ x, y, r: 12, color })
-    rings.push({ x, y, r: -8, color })
-  }
-  function arrive(c) {
-    burst(c.to.x, c.to.y, colorOf(c.kind), 30)
-    emote(c.to, 'wow', 700)
-    if (c.kind === 'answer' || c.kind === 'agreement') setTimeout(() => emote(c.to, 'joy', 1500), 450)
-  }
-  function comet(c, now, dt) {
-    const me = nodes.get(ME), raw = (now - c.t0) / c.span
-    if (raw < 0) return true
-    if (!me || !nodes.has(c.peer.key)) return false
-    if (raw >= 1) {
-      arrive(c)
-      return false
-    }
-    const k = ctrl(me, c.peer), color = colorOf(c.kind)
-    const ease = t => (t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
-    for (let i = 16; i >= 0; i--) {
-      const t = ease(Math.max(0, raw - i * .012)), p = bez(me, k, c.peer, c.out ? t : 1 - t)
-      dot(p.x, p.y, 5.5 * (1 - i / 20), color, 1 - i / 17)
-      if (i === 0 && Math.random() < .7 * dt) sparks.push({ x: p.x, y: p.y, vx: (Math.random() - .5) * 2.4, vy: (Math.random() - .5) * 2.4, life: 16 + Math.random() * 14, max: 30, color })
-    }
-    return true
-  }
-  function paint(now, dt) {
-    ctx.clearRect(0, 0, flow.width, flow.height)
-    if (!moving()) return
-    floor(now)
-    const me = nodes.get(ME)
-    if (me && !isNaN(me.x)) {
-      for (const n of shown) {
-        if (n.kind !== 'peer' || isNaN(n.x)) continue
-        if (n.g.classList.contains('down')) broken(me, n, now)
-        else {
-          stream(me, n, now)
-          sonar(n, now, rgb.inb)
-        }
-      }
-      sonar(me, now, rgb.agree)
-    }
-    comets = comets.filter(c => comet(c, now, dt))
-    rings = rings.filter(g => g.r < 90)
-    for (const g of rings) {
-      g.r += 3.2 * dt
-      if (g.r <= 0) continue
-      ctx.strokeStyle = 'rgba(' + g.color + ',' + ((1 - g.r / 90) * .7).toFixed(3) + ')'
-      ctx.lineWidth = 2
-      ctx.beginPath()
-      ctx.arc(g.x, g.y, g.r, 0, 6.2832)
-      ctx.stroke()
-    }
-    sparks = sparks.filter(s => s.life > 0)
-    for (const s of sparks) {
-      s.x += s.vx * dt
-      s.y += s.vy * dt
-      s.vy += .06 * dt
-      s.life -= dt
-      dot(s.x, s.y, 1.5, s.color, Math.max(0, s.life / s.max))
-    }
-  }
-  function tick(now) {
-    raf = 0
-    const dt = Math.min(3, (now - seen) / 16.7)
-    seen = now
-    const glide = moving()
-    for (const n of nodes.values()) {
-      const dx = n.tx - n.x, dy = n.ty - n.y
-      if (glide && (Math.abs(dx) > .4 || Math.abs(dy) > .4)) {
-        n.x += dx * Math.min(1, .13 * dt)
-        n.y += dy * Math.min(1, .13 * dt)
-      } else {
-        n.x = n.tx
-        n.y = n.ty
-      }
-    }
-    place()
-    paint(now, dt)
-    if (moving() && !document.hidden && visible) raf = requestAnimationFrame(tick)
-  }
-  function run() {
-    if (raf) return
-    seen = performance.now()
-    raf = requestAnimationFrame(tick)
   }
   new ResizeObserver(layout).observe(box)
-  // 무대가 화면 밖에 있으면 그리지 않는다.
-  new IntersectionObserver(entries => {
-    visible = entries[0].isIntersecting
-    if (visible) run()
-  }).observe(box)
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', tone)
-  tone()
 
   return {
-    run,
+    tone: toneOf,
     update(data, convs) {
-      const me = node(ME, 'me'), want = new Set([ME]), act = new Map()
+      const me = tile(ME, 'me'), want = new Set([ME]), act = new Map(), order = []
+      // 누가 답할 차례인지(think), 누가 사람에게 묻는 중인지(human), 그리고 그 일이 선의 어느 쪽에 가 있는지(toward: 상대 쪽이면 fwd, 이쪽이면 back).
+      const toward = new Map()
       const flag = (key, what) => act.set(key, Object.assign(act.get(key) || {}, { [what]: true }))
       for (const c of convs) {
         const ph = phase(c)
@@ -1073,145 +600,213 @@ const stage = (() => {
         else if (ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice') flag(ME, 'think')
         else if (ph === 'checking_with_your_human') flag(ME, 'human')
         else if (ph === 'peer_checking_with_their_human') flag(c.peer, 'human')
+        if (ph === 'waiting_for_peer' || ph === 'peer_checking_with_their_human') toward.set(c.peer, 'fwd')
+        else if (WAIT[ph] && !toward.has(c.peer)) toward.set(c.peer, 'back')
       }
-      label(me, data.me.name, data.me.open ? '이 세션 · 포트 ' + data.me.port : '이 세션 · 브릿지 닫힘', '', data.me.about)
-      me.g.classList.toggle('closed', !data.me.open)
-      shown = []
-      const said = []
-      for (const l of (data.links || []).slice(0, 12)) {
-        const n = node(l.key, 'peer'), down = l.state !== 'connected'
+      const who = about => (about ? [about.app, about.model, about.effort].filter(Boolean).join(' · ') : '')
+      fill(me, data.me.name, data.me.open ? '이 세션 · 포트 ' + data.me.port : '이 세션 · 브릿지 닫힘', who(data.me.about))
+      me.node.classList.toggle('closed', !data.me.open)
+      for (const l of (data.links || []).slice(0, 16)) {
+        const t = tile(l.key, 'peer'), down = l.state !== 'connected'
         want.add(l.key)
-        shown.push(n)
-        n.g.classList.toggle('down', down)
-        n.lk.g.classList.toggle('down', down)
-        const sub = down ? '다시 붙는 중' : l.via === 'relay' ? '중계로 연결됨' : l.via === 'pickup' ? '상대가 가져가는 중' : '연결됨'
-        label(n, l.name, sub, down ? l.since : '', l.about)
-        said.push(l.name + ' ' + sub)
+        order.push(t)
+        t.node.classList.toggle('down', down)
+        t.wire.classList.toggle('down', down)
+        const state = down ? '다시 붙는 중' : l.via === 'relay' ? '중계로 연결됨' : l.via === 'pickup' ? '상대가 가져가는 중' : '연결됨'
+        fill(t, l.name, [state, who(l.about)].filter(Boolean).join(' · '), '')
       }
       for (const c of (data.connecting || []).slice(0, 4)) {
-        const key = ':in:' + c.name, n = node(key, 'ghost')
+        const key = ':in:' + c.name, t = tile(key, 'ghost')
         want.add(key)
-        shown.push(n)
-        label(n, c.name, '소개받는 중', '', null)
-        said.push(c.name + ' 소개받는 중')
+        order.push(t)
+        fill(t, c.name, '소개받는 중', '')
       }
-      for (const n of [...nodes.values()]) {
-        const a = act.get(n.key) || {}
-        n.g.classList.toggle('think', !!a.think)
-        n.g.classList.toggle('human', !!a.human)
-        if (!want.has(n.key)) drop(n)
-        else face(n)
+      for (const t of [...tiles.values()]) {
+        if (!want.has(t.key)) {
+          drop(t)
+          continue
+        }
+        const a = act.get(t.key) || {}
+        t.node.classList.toggle('human', !!a.human)
+        t.node.classList.toggle('think', !!a.think && !a.human)
+        put(t.tagText, a.human ? '사람 확인 중' : a.think ? '답할 차례' : '')
+        if (t.wire) {
+          t.wire.classList.toggle('fwd', toward.get(t.key) === 'fwd')
+          t.wire.classList.toggle('back', toward.get(t.key) === 'back')
+        }
       }
-      net.setAttribute('aria-label', said.length ? '연결된 세션 ' + said.length + '개: ' + said.join(', ') : '연결된 세션이 없습니다')
+      // 줄 선 차례를 맞춘다. 달라진 것만 옮긴다(옮기면 누르던 단추가 초점을 잃는다).
+      let at = peersBox.firstElementChild
+      for (const t of order) {
+        if (t.node === at) at = at.nextElementSibling
+        else peersBox.insertBefore(t.node, at)
+      }
+      nopeer.hidden = order.length > 0
       layout()
     },
-    // 글 하나가 from 에서 to 로 날아간다. 보낸 쪽은 입을 움직이며 말풍선을 띄운다.
-    send(from, to, kind, delay, text) {
-      const a = nodes.get(from), b = nodes.get(to), me = nodes.get(ME)
-      if (!a || !b || !me || a === b || !moving()) return
-      setTimeout(() => {
-        emote(a, 'talk', 1400)
-        say(a, text, kind)
-      }, delay || 0)
-      comets.push({ peer: a === me ? b : a, out: a === me, to: b, kind, t0: performance.now() + (delay || 0) + 250, span: 1000 })
-      run()
+    // 글 하나가 from 에서 to 로 건너간다. 닿으면 받은 쪽 둘레에 고리가 한 번 퍼진다.
+    send(from, to, kind, delay) {
+      const target = tiles.get(to), via = tiles.get(from === ME ? to : from)
+      if (!target || !moving()) return
+      const color = 'var(--' + (kind === 'answer' ? 'out-b' : kind === 'agreement' ? 'agree-b' : kind === 'question' ? 'in-b' : 'note-b') + ')'
+      const land = () => {
+        target.ring.style.setProperty('--c', color)
+        fx(target.ring, [{ opacity: .75, scale: 1 }, { opacity: 0, scale: 1.75 }], { duration: 700, easing: 'ease-out' })
+      }
+      const wire = via && via.wire
+      if (!wire || !wire.getAttribute('d')) return void setTimeout(land, delay || 0)
+      const length = wire.getTotalLength(), steps = 14, frames = []
+      for (let i = 0; i <= steps; i++) {
+        const p = wire.getPointAtLength(length * (from === ME ? i / steps : 1 - i / steps))
+        // 떠날 때 나타나고, 닿기 조금 전부터 옅어진다.
+        frames.push({ transform: 'translate(' + p.x.toFixed(1) + 'px, ' + p.y.toFixed(1) + 'px)', opacity: i === 0 || i === steps ? 0 : i === steps - 1 ? .5 : 1 })
+      }
+      const dot = document.createElementNS(NS, 'circle')
+      dot.setAttribute('class', 'spark')
+      dot.setAttribute('r', '3.5')
+      dot.style.setProperty('--c', color)
+      wires.append(dot)
+      // 시작 전과 끝난 뒤에는 보이지 않게 양쪽 끝 모습을 붙들어 둔다(fill: both). 끝나면 점을 지운다.
+      const run = dot.animate(frames, { duration: 800, delay: delay || 0, easing: 'cubic-bezier(.45, 0, .2, 1)', fill: 'both' })
+      let landed = false
+      const done = () => {
+        if (landed) return
+        landed = true
+        dot.remove()
+        land()
+      }
+      run.finished.then(done, done)
+      // 끝났다는 알림이 오지 않아도 점이 남지 않게 한다. 화면이 가려져 움직임이 늦게 시작할 수 있으므로 넉넉히 기다린다.
+      setTimeout(done, (delay || 0) + 4000)
     },
-    center() {
-      const r = box.getBoundingClientRect()
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
-    },
-    // 골라 둔 세션에 테두리를 두른다.
+    // 골라 둔 세션과 그 선을 도드라지게 한다.
     select(key) {
-      for (const n of nodes.values()) {
-        n.g.classList.toggle('sel', !!key && n.key === key)
-        if (n.kind === 'peer') n.g.setAttribute('aria-pressed', String(!!key && n.key === key))
+      for (const t of tiles.values()) {
+        const on = !!key && t.key === key
+        if (t.kind === 'peer') t.node.setAttribute('aria-pressed', String(on))
+        if (t.wire) t.wire.classList.toggle('sel', on)
       }
     },
   }
 })()
 
-// 숫자가 바뀌면 자리마다 굴러서 바뀐다.
+// 숫자 띠. 값이 바뀌면 새 숫자가 아래에서 살짝 올라온다.
 const stats = (() => {
   const box = byId('stats'), made = {}
-  function stat(key, label) {
-    if (made[key]) return made[key]
-    const wrap = el('div', 'stat'), num = el('span', 'num'), plain = el('span', 'plain'), text = el('span', '', label)
-    num.setAttribute('aria-hidden', 'true')
-    wrap.append(num, plain, text)
-    box.append(wrap)
-    return (made[key] = { wrap, num, plain, text, value: '' })
-  }
   return {
     set(key, label, n, hot) {
-      const s = stat(key, label), value = String(n)
+      let s = made[key]
+      if (!s) {
+        s = made[key] = { wrap: el('div', 'stat'), text: el('span'), num: el('b', 'num'), value: null }
+        s.wrap.append(s.text, s.num)
+        box.append(s.wrap)
+      }
       put(s.text, label)
       s.wrap.classList.toggle('hot', !!hot)
+      const value = String(n)
       if (s.value === value) return
+      if (s.value !== null) fx(s.num, [{ opacity: 0, translate: '0 7px' }, { opacity: 1, translate: '0 0' }], { duration: 320, easing: EASE })
       s.value = value
-      // 굴러가는 숫자 띠에는 0부터 9까지가 다 들어 있다. 복사하면 그것이 다 딸려 오므로, 띠는 꾸밈으로 그리고 값은 따로 적는다.
-      put(s.plain, value + ' ')
-      while (s.num.children.length < value.length) {
-        const dg = el('span', 'dg'), strip = el('span')
-        for (let d = 0; d < 10; d++) {
-          const one = el('i')
-          one.dataset.d = String(d)
-          strip.append(one)
-        }
-        dg.append(strip)
-        s.num.prepend(dg)
-      }
-      while (s.num.children.length > value.length) s.num.firstChild.remove()
-      // 자리가 새로 생겼으면 0 에서 굴러 올라오게 한 박자 뒤에 값을 넣는다.
-      requestAnimationFrame(() => {
-        for (let i = 0; i < value.length; i++) if (s.num.children[i]) s.num.children[i].firstChild.style.setProperty('--d', value[i])
-      })
+      s.num.textContent = value
     },
   }
 })()
 
-// 새 글은 한 낱말씩 써 내려간다. 자리는 미리 잡아 두어서 쓰는 동안 화면이 밀리지 않는다.
-function cuts(text) {
-  const out = []
-  if (window.Intl && Intl.Segmenter) for (const s of new Intl.Segmenter('ko', { granularity: 'word' }).segment(text)) out.push(s.index + s.segment.length)
-  else {
-    // 낱말 나누기가 없는 브라우저: 빈칸과 글자가 바뀌는 자리에서 끊는다.
-    let gap = text.slice(0, 1).trim() === ''
-    for (let i = 1; i < text.length; i++) {
-      const g = text[i].trim() === ''
-      if (g !== gap) out.push(i)
-      gap = g
-    }
-    out.push(text.length)
-  }
-  if (!out.length) out.push(text.length)
-  return out
+// 목록의 차례가 바뀌면 줄이 옛 자리에서 새 자리로 미끄러져 온다. 바꾸기 전에 자리를 재 두고(measure), 바꾼 뒤에 맞춘다(settle).
+// 재는 일과 움직이는 일을 섞지 않는다: 먼저 다 재고, 그 뒤에 다 움직인다.
+function measure() {
+  const before = new Map()
+  if (moving())
+    for (const v of cards.values())
+      if (!v.item.hidden) {
+        const r = v.item.getBoundingClientRect()
+        before.set(v, [r.left, r.top])
+      }
+  return before
 }
-function typeIn(node, text) {
-  if (!moving() || document.hidden || text.length < 2 || text.length > 6000) return
-  const at = cuts(text), typed = document.createTextNode(''), rest = el('span', 'rest', text)
-  node.replaceChildren(typed, el('span', 'caret'), rest)
-  const length = Math.min(2800, Math.max(450, text.length * 14)), t0 = performance.now()
-  let last = -1
-  const finish = () => {
-    if (node.typing !== finish) return
-    node.typing = null
-    node.textContent = text
-  }
-  const step = now => {
-    if (node.typing !== finish) return
-    if (!node.isConnected || !moving()) return finish()
-    const p = Math.min(1, (now - t0) / length), i = Math.min(at.length - 1, Math.floor(p * at.length))
-    if (i !== last) {
-      last = i
-      typed.data = text.slice(0, at[i])
-      rest.textContent = text.slice(at[i])
+function settle(before) {
+  const moved = [], far = Math.max(innerWidth, innerHeight)
+  for (const v of before.keys()) if (v.slide) v.slide.cancel()
+  for (const [v, at] of before)
+    if (v.item.isConnected && !v.item.hidden) {
+      const r = v.item.getBoundingClientRect()
+      moved.push([v, at[0] - r.left, at[1] - r.top])
     }
-    if (p < 1) requestAnimationFrame(step)
-    else finish()
-  }
-  node.typing = finish
-  requestAnimationFrame(step)
+  // 아주 멀리 가는 줄은 화면 크기만큼만 미끄러진다.
+  const cap = n => Math.max(-far, Math.min(far, n)).toFixed(1)
+  for (const [v, dx, dy] of moved)
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) v.slide = v.item.animate([{ translate: cap(dx) + 'px ' + cap(dy) + 'px' }, { translate: '0 0' }], { duration: 480, easing: EASE })
 }
+// 목록의 줄을 정한 차례대로 놓는다. 있는 줄은 다시 만들지 않고 자리만 옮긴다.
+// moveBefore 로 옮기면 초점과 돌던 움직임이 그대로 남는다. 그것이 없는 브라우저에서는 떼었다 붙이므로,
+// 나타나는 움직임이 다시 돌지 않게 표시(still)를 잠깐 붙이고 초점을 되돌린다.
+function place(order) {
+  const held = document.activeElement, canMove = Object.hasOwn(Element.prototype, 'moveBefore'), stills = []
+  let at = rooms.firstElementChild
+  for (const item of order) {
+    if (item === at) {
+      at = at.nextElementSibling
+      continue
+    }
+    if (item.parentNode !== rooms) rooms.insertBefore(item, at)
+    else if (canMove) rooms.moveBefore(item, at)
+    else {
+      item.classList.add('still')
+      stills.push(item)
+      rooms.insertBefore(item, at)
+    }
+  }
+  // 다시 붙인 줄의 스타일을 여기서 한 번 계산하게 한다. 그러면 출발 모습을 그 자리에서 지나가므로 표시를 바로 뗄 수 있다.
+  for (const item of stills) getComputedStyle(item).opacity
+  for (const item of stills) item.classList.remove('still')
+  if (held && held !== document.activeElement && rooms.contains(held)) held.focus({ preventScroll: true })
+}
+// 목록 안에서만 굴려서 그 줄이 보이게 한다. 화면 전체는 건드리지 않는다.
+function showItem(item) {
+  const a = item.getBoundingClientRect(), b = rooms.getBoundingClientRect()
+  const dx = a.left < b.left ? a.left - b.left : a.right > b.right ? a.right - b.right : 0
+  const dy = a.top < b.top ? a.top - b.top : a.bottom > b.bottom ? a.bottom - b.bottom : 0
+  if (dx || dy) rooms.scrollBy({ left: dx, top: dy, behavior: moving() ? 'smooth' : 'auto' })
+}
+// 왼쪽에 열 대화를 고른다. 열리는 대화는 카드만 떠오르고, 안의 글은 따로 움직이지 않는다.
+// byHand: 사람이 목록에서 골랐다. 긴 대화를 읽다가 다른 대화로 가도 처음부터 보이게 화면을 올린다.
+function activate(id, byHand) {
+  const next = cards.get(id)
+  if (!next) return
+  active = id
+  for (const v of cards.values()) {
+    const on = v === next
+    v.item.setAttribute('aria-current', String(on))
+    if (on && v.wrap.hidden) {
+      v.wrap.classList.add('quiet')
+      v.wrap.hidden = false
+      for (const node of v.msgs.children) getComputedStyle(node).opacity
+      v.wrap.classList.remove('quiet')
+    } else if (!on && !v.wrap.hidden) v.wrap.hidden = true
+  }
+  if (next.unseen) {
+    next.unseen = false
+    next.item.classList.remove('unseen')
+  }
+  showItem(next.item)
+  if (byHand) {
+    const top = next.wrap.getBoundingClientRect().top
+    if (top < 60) scrollBy({ top: top - 76, behavior: moving() ? 'smooth' : 'auto' })
+  }
+}
+// 대화를 맨 위에 고정하거나 푼다. 세션이 기억하고, 바뀐 차례는 세션이 밀어 주는 새 내용으로 그려진다.
+// 읽어 주는 프로그램에는 결과를 한 번만 알린다.
+const said = byId('said')
+async function togglePin(v) {
+  const want = !v.pinned
+  let ok = false
+  try {
+    const res = await fetch(location.pathname + '/pin', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ threads: v.threads, pinned: want }) })
+    ok = res.ok
+  } catch (e) {}
+  said.textContent = !ok ? '고정을 바꾸지 못했습니다. 세션이 켜져 있는지 확인하세요.' : '「' + v.subject.textContent + '」 대화' + (want ? '를 맨 위에 고정했습니다.' : '의 고정을 풀었습니다.')
+}
+const PIN_PATH = 'M5.5 2h5v1.2l-1 .8v3.2l2 1.8v1H8.6V14L8 15.2 7.4 14v-4H4.5V9l2-1.8V4l-1-.8z'
 
 function toast(n) {
   const b = el('button', 'toast')
@@ -1220,9 +815,9 @@ function toast(n) {
     el('span', 'tk k-' + (n.m.noAnswer ? 'note' : kindOf(n.m.kind)), '새 ' + (n.m.noAnswer ? '알림' : KIND[n.m.kind] ?? n.m.kind)),
     el('span', 'tw', (n.m.from === 'me' ? '나 → ' + n.c.peerName : n.c.peerName + ' → 나') + (n.c.category ? ' · ' + n.c.category : '')),
     el('span', 'ts', n.c.subject),
-    el('i', 'life'),
   )
   b.addEventListener('click', () => {
+    activate(n.v.id, false)
     reveal(n.node)
     dismiss(b)
   })
@@ -1238,59 +833,78 @@ async function dismiss(b) {
   if (running.length) await Promise.race([Promise.allSettled(running.map(a => a.finished)), new Promise(r => setTimeout(r, 900))])
   b.remove()
 }
-async function leave(wrap) {
-  wrap.classList.add('gone')
-  const running = wrap.firstChild.getAnimations ? wrap.firstChild.getAnimations() : []
-  if (moving() && running.length) await Promise.race([Promise.allSettled(running.map(a => a.finished)), new Promise(r => setTimeout(r, 900))])
-  wrap.remove()
-}
-
-function makeCard() {
+function makeCard(id) {
   const wrap = el('div', 'wrap'), card = el('section', 'conv'), head = el('div', 'head')
-  const badge = el('span', 'badge'), subject = el('h2', 'subject'), status = el('span', 'status'), stext = el('span'), agoEl = el('span', 'ago')
-  const SVG = 'http://www.w3.org/2000/svg', ck = document.createElementNS(SVG, 'svg'), tick = document.createElementNS(SVG, 'path')
-  ck.setAttribute('class', 'ck')
-  ck.setAttribute('viewBox', '0 0 16 16')
-  ck.setAttribute('aria-hidden', 'true')
-  tick.setAttribute('d', 'M3 8.5l3.2 3L13 4.5')
-  ck.append(tick)
+  const cat = el('span', 'cat'), subject = el('h2', 'subject'), status = el('span', 'status'), stext = el('span'), agoEl = el('span', 'ago')
+  const SVG = 'http://www.w3.org/2000/svg'
+  const icon = (cls, d) => {
+    const svg = document.createElementNS(SVG, 'svg'), path = document.createElementNS(SVG, 'path')
+    if (cls) svg.setAttribute('class', cls)
+    svg.setAttribute('viewBox', '0 0 16 16')
+    svg.setAttribute('aria-hidden', 'true')
+    path.setAttribute('d', d)
+    svg.append(path)
+    return svg
+  }
+  const ck = icon('ck', 'M3 8.5l3.2 3L13 4.5')
   status.append(el('i', 'sdot'), ck, stext, agoEl)
-  const cat = el('span', 'cat')
-  head.append(badge, cat, subject, status)
-  const meta = el('div', 'meta'), msgs = el('ol', 'msgs'), typing = el('div', 'typing'), dots = el('span', 'dots'), tlabel = el('span'), timer = el('span', 'timer')
+  // 맨 위에 고정하는 단추. 이름은 그대로 두고, 눌린 상태로 지금 고정돼 있는지를 알린다.
+  const pin = el('button', 'pin')
+  pin.type = 'button'
+  pin.setAttribute('aria-pressed', 'false')
+  pin.title = '맨 위에 고정'
+  pin.append(icon('', PIN_PATH), el('span', '', '고정'))
+  head.append(cat, subject, status, pin)
+  const sub = el('div', 'sub'), badge = el('span', 'badge'), meta = el('span', 'meta')
+  sub.append(badge, meta)
+  const people = el('div', 'people'), msgs = el('ol', 'msgs'), typing = el('div', 'typing'), dots = el('span', 'dots'), tlabel = el('span'), timer = el('span', 'timer')
   dots.append(el('i'), el('i'), el('i'))
   dots.setAttribute('aria-hidden', 'true')
   typing.append(dots, tlabel, timer)
-  const glow = el('div', 'fxl'), shine = el('i', 'shine'), people = el('div', 'people')
-  glow.setAttribute('aria-hidden', 'true')
-  glow.append(shine)
-  card.append(glow, head, meta, people, msgs, typing)
+  card.append(head, sub, people, msgs, typing)
   wrap.append(card)
-  return { wrap, card, badge, cat, subject, status, stext, tick, shine, ago: agoEl, meta, people, msgs, typing, tlabel, timer, seen: new Map(), st: undefined, label: '', peers: [], category: '' }
+  wrap.hidden = true
+  // 오른쪽 목록의 한 줄: 분류와 제목, 마지막 글의 때, 상태, 상대, 그리고 고정했는지와 새 글이 왔는지. 누르면 이 대화가 열린다.
+  const item = el('button', 'room'), ititle = el('span', 'rtitle'), icat = el('span', 'rcat'), isub = el('span', 'rsub'), iago = el('span', 'rago')
+  const istate = el('span', 'rstate'), ilabel = el('span', 'rlabel'), iwho = el('span', 'rwho'), imarks = el('span', 'rmarks'), ipin = el('span', 'rpin'), inew = el('span', 'rnew')
+  item.type = 'button'
+  item.dataset.id = id
+  item.setAttribute('aria-current', 'false')
+  ititle.append(icat, isub)
+  iago.dataset.pre = ''
+  istate.append(el('i', 'sdot'), ilabel, iwho)
+  ipin.append(icon('', PIN_PATH), el('span', 'plain', '고정됨'))
+  inew.append(el('span', 'plain', '새 글'))
+  imarks.append(ipin, inew)
+  item.append(ititle, iago, istate, imarks)
+  const v = { id, wrap, card, badge, cat, subject, status, stext, tick: ck.firstChild, pin, ago: agoEl, meta, people, msgs, typing, tlabel, timer, item, icat, isub, iago, ilabel, iwho, unseen: false, seen: new Map(), st: undefined, label: '', peers: [], category: '', threads: [], pinned: false }
+  pin.addEventListener('click', () => togglePin(v))
+  item.addEventListener('click', () => activate(id, true))
+  return v
 }
 function bubble(c, m, everyone) {
   const cls = m.kind === 'agreement' ? 'agreement' : m.kind === 'note' || m.kind === 'closed' ? 'note' : m.from === 'me' ? 'mine' : 'peer'
   const li = el('li', 'msg ' + cls), b = el('div', 'bubble'), who = el('div', 'who'), at = el('time', 'time', shortTime(m.at))
   at.dateTime = m.at
   at.title = time(m.at)
-  // 여럿이 있는 방에서는 누가 한 말인지 얼굴(이름 첫 글자)을 붙인다.
-  if (everyone && m.from !== 'me') who.append(el('span', 'av', (Array.from(c.peerName.trim())[0] || '?').toUpperCase()))
+  // 여럿이 있는 방에서는 누가 한 말인지 이름 첫 글자를 붙인다. 빛깔은 연결 그림의 그 세션과 같다.
+  if (everyone && m.from !== 'me') {
+    const av = el('span', 'av', (Array.from(c.peerName.trim())[0] || '?').toUpperCase())
+    av.style.setProperty('--tone', net.tone(c.peer))
+    who.append(av)
+  }
   who.append(el('span', '', m.noAnswer ? '알림 · 답 필요 없음' : KIND[m.kind] ?? m.kind))
   if (m.human) who.append(el('span', 'hum', '사람이 정함'))
   const shared = everyone && m.from === 'me' && m.kind === 'question'
   who.append(el('span', 'dir', shared ? '나 → ' + everyone.join(', ') : m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'), at)
   const text = el('div', 'text', m.text)
   b.append(who, text)
-  if (m.kind === 'agreement') b.append(el('span', 'stamp', '합의'))
   if (m.context) {
     const d = el('details')
     d.append(el('summary', '', '함께 보낸 배경'), el('div', 'text', m.context))
     b.append(d)
   }
   li.append(b)
-  li.body = text
-  // 써 내려가는 중에 누르면 바로 끝까지 보여 준다.
-  li.addEventListener('click', () => text.typing && text.typing())
   return li
 }
 // 여러 세션에 한 번에 보낸 질문은 방 하나로 묶는다. 단체 대화방처럼 질문은 한 번만 보이고, 답은 온 차례대로 한 방에 쌓인다
@@ -1329,10 +943,22 @@ function paint(v, room, live, index, news) {
   v.peers = convs.map(one => one.peer)
   v.category = c.category || ''
   put(v.cat, v.category)
+  // 고정은 방 전체에 건다. 여럿에게 보낸 질문은 그 대화들을 한 번에 고정한다.
+  v.threads = convs.map(one => one.id)
+  if (v.pinned !== !!room.pinned) {
+    v.pinned = !!room.pinned
+    v.card.classList.toggle('pinned', v.pinned)
+    v.item.classList.toggle('pinned', v.pinned)
+    v.pin.setAttribute('aria-pressed', String(v.pinned))
+    v.pin.title = v.pinned ? '고정 풀기' : '맨 위에 고정'
+  }
   const what = first && first.noAnswer ? '알림' : '질문'
   put(v.badge, group ? '여럿에게 보낸 ' + what : mine ? '보낸 ' + what : '받은 ' + what)
   v.badge.classList.toggle('out', mine)
   put(v.subject, c.subject)
+  put(v.isub, c.subject)
+  put(v.icat, v.category)
+  put(v.iwho, names.join(', '))
   const where = convs.map(one => one.peerName + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
   const mode = c.ask ? ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
   const others = c.ask ? (group ? ' ·' + mode : ' · 함께 받은 사람: ' + c.ask.to.join(', ') + mode) : ''
@@ -1349,14 +975,15 @@ function paint(v, room, live, index, news) {
     v.card.dataset.st = PHASE[ph] ? ph : ''
     v.card.classList.toggle('act', !!WAIT[ph])
     put(v.stext, label)
+    put(v.ilabel, label)
+    v.item.dataset.st = PHASE[ph] ? ph : ''
+    v.item.classList.toggle('act', !!WAIT[ph])
     v.typing.classList.toggle('r', ph === 'your_turn' || ph === 'unread' || ph === 'unread_notice' || ph === 'checking_with_your_human')
     if (live && was !== undefined) {
-      fx(v.status, [{ rotate: 'x 90deg', opacity: 0 }, { rotate: 'x 0deg', opacity: 1 }], { duration: 600, easing: SPRING })
-      // 답이 와서 질문과 답이 끝났다. 가장 흔한 끝이므로 여기에도 작은 마무리를 둔다: 체크가 그려지고 빛이 한 번 지나간다.
-      if (changed && (ph === 'answered' || ph === 'answered_by_me')) {
-        fx(v.tick, [{ strokeDashoffset: 16 }, { strokeDashoffset: 0 }], { duration: 600, delay: 300, easing: 'ease-out', fill: 'backwards' })
-        fx(v.shine, [{ translate: '-130% 0' }, { translate: '330% 0' }], { duration: 1100, easing: 'ease-in-out' })
-      }
+      // 상태가 바뀌면 이름표가 아래에서 올라오며 바뀐다.
+      fx(v.status, [{ opacity: 0, translate: '0 5px' }, { opacity: 1, translate: '0 0' }], { duration: 320, easing: EASE })
+      // 답이 와서 질문과 답이 끝났다. 가장 흔한 끝이다: 체크가 한 번 그려진다.
+      if (changed && (ph === 'answered' || ph === 'answered_by_me' || ph === 'agreed')) fx(v.tick, [{ strokeDashoffset: 16 }, { strokeDashoffset: 0 }], { duration: 450, delay: 180, easing: 'ease-out', fill: 'backwards' })
     }
   }
   put(v.tlabel, !WAIT[ph] ? '' : group ? WAIT[ph] + ': ' + pending.map(one => one.peerName).join(', ') : WAIT[ph])
@@ -1388,6 +1015,8 @@ function paint(v, room, live, index, news) {
   if (newest && v.ago.dataset.ago !== newest) {
     v.ago.dataset.ago = newest
     v.ago.textContent = '· ' + ago(Date.now() - Date.parse(newest))
+    v.iago.dataset.ago = newest
+    v.iago.textContent = ago(Date.now() - Date.parse(newest))
   }
   const ids = new Set(items.map(it => it.id))
   for (const [id, node] of v.seen)
@@ -1401,7 +1030,6 @@ function paint(v, room, live, index, news) {
     let node = v.seen.get(it.id)
     if (!node) {
       node = bubble(it.c, it.m, group ? names : null)
-      if (!live) node.style.setProperty('--i', Math.min(index + i + 1, 10))
       v.seen.set(it.id, node)
       v.msgs.insertBefore(node, after)
       if (live) news.unshift({ c: it.c, m: it.m, v, node })
@@ -1425,30 +1053,37 @@ function setCat(key) {
   applyFilter(true)
 }
 function applyFilter(byPerson) {
-  const slide = byPerson && moving(), before = new Map()
-  if (slide) for (const v of cards.values()) if (!v.wrap.hidden) before.set(v, v.wrap.getBoundingClientRect().top)
+  const before = byPerson ? measure() : null
   let count = 0
   for (const v of cards.values()) {
     const hide = filtered(v)
-    if (v.wrap.hidden !== hide) v.wrap.hidden = hide
+    if (v.item.hidden !== hide) v.item.hidden = hide
     if (!hide) count++
   }
+  board.hidden = count === 0
   empty.hidden = count > 0
-  put(byId('emptyText'), filter ? '이 세션과 나눈 대화가 아직 없습니다.' : '아직 주고받은 질문이 없습니다.')
-  if (slide)
-    for (const [v, top] of before) {
-      if (v.wrap.hidden) continue
-      if (v.slide) v.slide.cancel()
-      const dy = top - v.wrap.getBoundingClientRect().top
-      if (Math.abs(dy) > 1) v.slide = v.wrap.animate([{ translate: '0 ' + dy.toFixed(1) + 'px' }, { translate: '0 0' }], { duration: 700, easing: SPRING })
-    }
+  put(byId('emptyText'), filter ? '이 세션과 나눈 대화가 아직 없습니다.' : catFilter ? '이 분류의 대화가 아직 없습니다.' : '아직 주고받은 질문이 없습니다.')
+  // 열어 둔 대화가 목록에서 빠졌으면 목록의 첫 대화를 연다.
+  const open = cards.get(active)
+  if (!open || open.item.hidden) {
+    let top = ''
+    for (const node of rooms.children)
+      if (!node.hidden) {
+        top = node.dataset.id
+        break
+      }
+    active = ''
+    for (const v of cards.values()) if (!v.wrap.hidden) v.wrap.hidden = true
+    if (top) activate(top, false)
+  }
+  if (before) settle(before)
   for (const [row, picked] of [[filters, filter], [cats, catFilter]])
     for (const b of row.children) {
       const on = (b.dataset.key || '') === picked
       b.classList.toggle('sel', on)
       b.setAttribute('aria-pressed', String(on))
     }
-  stage.select(filter)
+  net.select(filter)
 }
 function syncFilters(groups, links) {
   const seen = new Map()
@@ -1520,7 +1155,7 @@ async function issueKey(name) {
     hasKey = true
     put(keycode, made.code)
     put(byId('keyinfo'), '한 사람만, 한 번만 쓸 수 있습니다. ' + shortTime(made.expires) + '까지 쓸 수 있습니다.')
-    fx(keycode, [{ scale: .96, opacity: .3 }, { scale: 1, opacity: 1 }], { duration: 500, easing: SPRING })
+    fx(keycode, [{ opacity: .2 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' })
   } catch (e) {
     put(keycode, '')
     put(byId('keyinfo'), e.message === '409' ? '브릿지가 닫혀 있어서 만들 수 없습니다. AI에게 「브릿지 열어줘」라고 하세요.' : e.message === '429' ? '잠시 뒤에 다시 눌러 주세요.' : '접근키를 만들지 못했습니다. 세션이 켜져 있는지 확인하세요.')
@@ -1567,44 +1202,35 @@ function syncDowns(links) {
 
 let follow = saved.get('coworker.follow') !== 'off'
 let touched = 0
-// 새로 온 글을 알린다: 연결 그림에 빛이 날아가고, 글이 써 내려가고, 알림이 뜬다. 합의문이면 색종이가 터진다.
+// 새로 온 글을 알린다: 연결선을 따라 점이 건너가고, 새 글에 테두리가 잠깐 둘린다.
+// 「새 글 따라가기」를 켰으면 그 글이 온 대화를 연다(2026-11-17, 사람이 정함: 「새로운 질답 오면 그걸 활성화」).
+// 사람이 방금 화면을 만졌으면 건드리지 않는다. 열어 두지 않은 대화에 온 글은 목록에 표시하고 알림으로 띄운다.
 function announce(news) {
-  const few = news.length <= 4
+  const newest = news[news.length - 1], jump = follow && Date.now() - touched > 3000
+  if (jump) activate(newest.v.id, false)
   news.forEach((n, i) => {
     const recent = i >= news.length - 3
-    if (i < 8) stage.send(n.m.from === 'me' ? ME : n.c.peer, n.m.from === 'me' ? n.c.peer : ME, n.m.kind, i * 320, n.m.text)
-    if (few || recent) typeIn(n.node.body, n.m.text)
+    if (i < 6) net.send(n.m.from === 'me' ? ME : n.c.peer, n.m.from === 'me' ? n.c.peer : ME, n.m.kind, i * 180)
+    if (recent) mark(n.node)
+    if (n.v.id === active) return
+    if (!n.v.unseen) {
+      n.v.unseen = true
+      n.v.item.classList.add('unseen')
+    }
     if (recent) toast(n)
-    // 카드가 한 번 부풀고 테두리에서 빛이 퍼진다.
-    if (recent) {
-      const glow = 'var(--' + (n.m.kind === 'answer' ? 'out-b' : n.m.kind === 'agreement' ? 'agree-b' : n.m.kind === 'question' ? 'in-b' : 'note-b') + ')'
-      fx(n.v.card, [{ scale: 1, boxShadow: '0 0 0 0 ' + glow }, { scale: 1.022, boxShadow: '0 0 0 10px transparent', offset: .45 }, { scale: 1, boxShadow: '0 0 0 0 transparent' }], { duration: 900, easing: 'ease-out' })
-    }
-    if (n.m.kind === 'agreement' && recent) {
-      const stamp = n.node.querySelector('.stamp')
-      if (stamp) fx(stamp, [{ scale: 2.8, opacity: 0, rotate: '-24deg' }, { scale: 1, opacity: 1, rotate: '-6deg' }], { duration: 800, easing: SPRING })
-      const r = n.node.getBoundingClientRect()
-      confetti.burst(Math.min(innerWidth - 20, Math.max(20, r.left + r.width / 2)), Math.min(innerHeight - 20, Math.max(20, r.top + 20)))
-      // 합의는 드물다. 불꽃을 두 번 더 터뜨린다.
-      setTimeout(() => confetti.burst(innerWidth * .25, innerHeight * .4), 350)
-      setTimeout(() => confetti.burst(innerWidth * .75, innerHeight * .35), 700)
-    }
   })
-  const c = stage.center()
-  sky.wave(c.x, c.y)
-  setTimeout(() => sky.wave(c.x, c.y), 260)
-  // 화면을 가로지르는 빛줄기. 가장 새 글의 종류에 맞는 빛깔이다.
-  const kind = news[news.length - 1].m.kind, sweep = byId('sweep')
-  sweep.style.setProperty('--sw', 'var(--' + (kind === 'answer' ? 'out-b' : kind === 'agreement' ? 'agree-b' : kind === 'question' ? 'in-b' : 'note-b') + ')')
-  fx(sweep, [{ translate: '-100% 0', opacity: 0 }, { opacity: .3, offset: .35 }, { translate: '100% 0', opacity: 0 }], { duration: 950, easing: 'ease-in-out' })
-  const newest = news[news.length - 1]
-  // 따라가기를 켰으면 새 글이 보이게 옮긴다. 사람이 방금 화면을 만졌으면 건드리지 않는다.
-  if (follow && Date.now() - touched > 3000) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
+  if (jump) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
 }
 
 let first = true
 let lastData = null
 let nextFlip = 0
+// 방에서 가장 새 글의 시각.
+function newestAt(room) {
+  let at = ''
+  for (const c of room.convs) for (const m of c.messages) if (m.at > at) at = m.at
+  return at
+}
 function render(data) {
   const live = !first
   first = false
@@ -1627,54 +1253,49 @@ function render(data) {
     const at = Date.parse(asked.at) + QUIET_MS + 500
     if (!nextFlip || at < nextFlip) nextFlip = at
   }
+  // 차례는 대화방 목록처럼 한다(2026-11-17, 사람이 정함: 「고정, 최신 질답, 순」).
+  // 고정한 대화가 먼저고, 그 안에서는 마지막 글이 새로운 대화가 먼저다.
+  const groups = roomsOf(convs).map(room => Object.assign(room, { pinned: room.convs.some(c => c.pinned), at: newestAt(room) }))
+  groups.sort((a, b) => (a.pinned !== b.pinned ? (a.pinned ? -1 : 1) : a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
   stats.set('links', up < links.length ? '연결 (끊김 ' + (links.length - up) + ')' : '연결', up, false)
-  const groups = roomsOf(convs)
   stats.set('convs', '대화', groups.length, false)
   stats.set('msgs', '글', convs.reduce((n, c) => n + c.messages.length, 0), false)
   stats.set('open', '답 기다림', unanswered, false)
   stats.set('humans', '사람 결정 대기', asking, asking > 0)
-  stage.update(data, convs)
+  net.update(data, convs)
   issueButton.disabled = !me.open
   syncDowns(links)
 
-  // 카드가 밀려나는 것을 부드럽게 잇는다: 바꾸기 전 자리를 재 두고, 바꾼 뒤 그 차이만큼 미끄러져 오게 한다.
-  const slide = live && moving()
-  const before = new Map()
-  if (slide) for (const v of cards.values()) before.set(v, v.wrap.getBoundingClientRect().top)
-  const news = [], keep = new Set()
-  let prev = null
+  // 목록의 차례가 바뀌는 것을 부드럽게 잇는다: 바꾸기 전 자리를 재 두고, 바꾼 뒤 그 차이만큼 미끄러져 오게 한다.
+  const before = live ? measure() : new Map()
+  const news = [], keep = new Set(), order = []
   groups.forEach((room, i) => {
     keep.add(room.id)
     let v = cards.get(room.id)
     if (!v) {
-      v = makeCard()
-      v.card.style.setProperty('--n', String(cards.size % 5))
+      v = makeCard(room.id)
       cards.set(room.id, v)
+      pane.append(v.wrap)
+      // 처음 열 때는 목록이 위에서부터 차례로 들어온다.
       if (!live) {
-        v.card.style.setProperty('--i', Math.min(i, 8))
-        setTimeout(() => v.card.style.removeProperty('--i'), 2000)
+        v.item.style.setProperty('--i', Math.min(i, 8))
+        setTimeout(() => v.item.style.removeProperty('--i'), 1500)
       }
-      list.insertBefore(v.wrap, prev ? prev.nextSibling : list.firstChild)
     }
     paint(v, room, live, i, news)
-    if (filtered(v)) v.wrap.hidden = true
-    prev = v.wrap
+    order.push(v.item)
   })
   for (const [id, v] of [...cards])
     if (!keep.has(id)) {
       cards.delete(id)
-      leave(v.wrap)
+      v.wrap.remove()
+      v.item.remove()
     }
+  place(order)
   syncFilters(groups, links)
   syncCats(groups)
   applyFilter(false)
-  if (slide)
-    for (const [v, top] of before) {
-      if (!v.wrap.isConnected) continue
-      if (v.slide) v.slide.cancel()
-      const dy = top - v.wrap.getBoundingClientRect().top
-      if (Math.abs(dy) > 1) v.slide = v.wrap.animate([{ translate: '0 ' + dy.toFixed(1) + 'px' }, { translate: '0 0' }], { duration: 700, easing: SPRING })
-    }
+  settle(before)
   if (news.length) announce(news)
 }
 
@@ -1686,44 +1307,16 @@ setInterval(() => {
     const from = Date.parse(n.dataset.since)
     if (!isNaN(from)) put(n, (n.dataset.pre || '') + clock(now - from))
   }
-  for (const n of document.querySelectorAll('[data-ago]')) put(n, '· ' + ago(now - Date.parse(n.dataset.ago)))
+  for (const n of document.querySelectorAll('[data-ago]')) put(n, (n.dataset.pre ?? '· ') + ago(now - Date.parse(n.dataset.ago)))
   if (nextFlip && now >= nextFlip && lastData) render(lastData)
 }, 1000)
 
-// 카드 위에서 마우스를 움직이면 카드가 살짝 기울고 빛이 따라온다. 긴 카드는 덜 기운다.
-const fine = matchMedia('(hover: hover) and (pointer: fine)')
-let tilt = null
-list.addEventListener('pointermove', e => {
-  if (!moving() || !fine.matches) return
-  const card = e.target.closest ? e.target.closest('.conv') : null
-  if (!card) return
-  const go = !tilt
-  tilt = { card, x: e.clientX, y: e.clientY }
-  if (go)
-    requestAnimationFrame(() => {
-      const t = tilt
-      tilt = null
-      const r = t.card.getBoundingClientRect(), x = (t.x - r.left) / r.width, y = (t.y - r.top) / r.height, k = Math.min(1, 420 / r.height)
-      t.card.style.setProperty('--mx', (x * 100).toFixed(1) + '%')
-      t.card.style.setProperty('--my', (y * 100).toFixed(1) + '%')
-      t.card.style.setProperty('--ry', ((x - .5) * 5).toFixed(2) + 'deg')
-      t.card.style.setProperty('--rx', ((.5 - y) * 4.4 * k).toFixed(2) + 'deg')
-    })
-})
-list.addEventListener('pointerout', e => {
-  const card = e.target.closest ? e.target.closest('.conv') : null
-  if (!card || (e.relatedTarget && card.contains(e.relatedTarget))) return
-  card.style.removeProperty('--rx')
-  card.style.removeProperty('--ry')
-})
 for (const name of ['wheel', 'touchstart', 'keydown', 'pointerdown']) addEventListener(name, () => { touched = Date.now() }, { passive: true })
 
 const motionButton = byId('motion'), followButton = byId('follow')
 function applyMotion() {
   root.classList.toggle('on', moving())
   put(motionButton, moving() ? '모션 끄기' : '모션 켜기')
-  sky.run()
-  stage.run()
 }
 motionButton.addEventListener('click', () => {
   motionPref = moving() ? 'off' : 'on'
@@ -1739,6 +1332,9 @@ followButton.addEventListener('click', () => {
   saved.set('coworker.follow', follow ? 'on' : 'off')
   applyFollow()
 })
+// 처음 열릴 때 한 번, 위쪽 칸이 떠오르며 나타난다.
+root.classList.add('boot')
+setTimeout(() => root.classList.remove('boot'), 1500)
 applyMotion()
 applyFollow()
 
@@ -1784,8 +1380,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) release()
   else {
     connect()
-    sky.run()
-    stage.run()
   }
 })
 if (!document.hidden) connect()

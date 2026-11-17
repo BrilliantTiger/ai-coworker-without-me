@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Bridge, defersToHuman, isSavedBridge, parsePorts, routeId, type BridgeEvent, type SavedBridge } from '../src/bridge'
+import { Bridge, defersToHuman, isSavedBridge, parsePorts, routeId, saysNoAnswer, type BridgeEvent, type SavedBridge } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, ReplayGuard, seal, fromB64 } from '../src/crypto'
 import { Viewer } from '../src/viewer'
@@ -758,6 +758,8 @@ describe('viewer', () => {
       // 화면의 글은 한글 그대로 내려간다. \uXXXX 로 바뀐 글자가 없다.
       const html = await (await fetch(url)).text()
       expect(html).toContain('<h1>Coworker <span>대화</span></h1>')
+      // 대화를 맨 위에 고정하는 단추가 화면에 있다.
+      expect(html).toContain("location.pathname + '/pin'")
       expect(html).not.toMatch(/\\u[0-9a-fA-F]{4}/)
 
       expect((await fetch(url.replace(/[^/]+$/, 'wrong-token'))).status).toBe(404)
@@ -875,11 +877,108 @@ describe('viewer', () => {
     expect(a.threadSummaries().find(t => t.id === got.thread)!.no_answer_needed).toBeUndefined()
   })
 
+  test('a question whose text plainly says no answer is needed counts as a notice; a question or a condition does not', () => {
+    for (const text of [
+      'QA 서버를 14시에 다시 켰습니다. (답 필요 없습니다)',
+      '배포 공지를 올렸습니다. 답변은 필요 없어요.',
+      '회신 불필요. 참고만 하세요.',
+      '답장 안 하셔도 됩니다.',
+      '답은 필요하지 않습니다.',
+      'FYI: the deploy notice is posted. No reply needed.',
+      'No need to answer. The build is green.',
+      "You don't need to reply.",
+      'This does not need an answer.',
+      // 주소 속의 물음표는 묻는 것이 아니다.
+      'The result is at /users?id=3. No reply needed.',
+    ])
+      expect([text, saysNoAnswer(text)]).toEqual([text, true])
+    for (const text of [
+      '다음 배포를 금요일 오후에 해도 됩니까?',
+      // 물음표로 끝나는 문장이 있으면 질문이다.
+      '답이 필요 없다고 하셨는데, 포트는 18081 입니다. 맞습니까?',
+      '답 필요 없습니까?',
+      'Is no answer needed here?',
+      // 조건, 전하는 말, 다른 낱말 속의 「답」은 알림이 아니다.
+      '답이 필요 없으면 알려 주세요.',
+      '답이 필요 없다고 들었습니다. 그래도 확인해 주세요.',
+      'API 응답이 필요 없는 요청입니다. 처리 방법을 알려 주세요.',
+      '정답 필요 없습니다. 풀이 과정만 주세요.',
+      'Tell me if no reply is needed.',
+      'The build is green.',
+      '',
+    ])
+      expect([text, saysNoAnswer(text)]).toEqual([text, false])
+    expect(saysNoAnswer(undefined)).toBe(false)
+  })
+
+  test('a notice written only in the text is still a notice: the sender marks it, and one from an older sender is marked on arrival', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    // 보내는 AI가 표시를 빠뜨리고 글에만 적었다.
+    const sent = await b.ask(undefined, 'QA 서버를 14시에 다시 켰습니다. (답 필요 없습니다)')
+    const got = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    expect(got).toMatchObject({ kind: 'question', no_answer_needed: true })
+    expect(b.threads.get(sent.thread)!.messages[0]).toMatchObject({ from: 'me', noAnswer: true })
+    expect(new Viewer(a).status().waiting).toEqual({ yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 })
+    expect(new Viewer(b).status().waiting).toEqual({ yours: 0, theirs: 0, yourHuman: 0, theirHuman: 0 })
+
+    // 옛 판은 표시를 보내지 않는다. 받는 쪽이 글을 보고 알아본다.
+    const raw = b as unknown as { sendOrQueue(peer: unknown, frame: { msg?: { noAnswer?: boolean } }, thread: string): Promise<unknown> }
+    const send = raw.sendOrQueue.bind(b)
+    raw.sendOrQueue = (peer, frame, thread) => {
+      if (frame.msg) delete frame.msg.noAnswer
+      return send(peer, frame, thread)
+    }
+    await b.ask(undefined, 'The report is uploaded. No reply needed.')
+    const old = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    expect(old).toMatchObject({ kind: 'question', no_answer_needed: true })
+    expect(a.threads.get(old.thread)!.messages[0]).toMatchObject({ from: 'peer', noAnswer: true })
+    expect(new Viewer(a).status().waiting.yours).toBe(0)
+  })
+
+  test('the human pins a conversation on the page; the pin stays on this PC and nothing but that page can set it', async () => {
+    const { a, b } = await pair()
+    await next(a, 'connected')
+    const sent = await b.ask(undefined, 'Which port does the L2 API use?')
+    const got = (await next(a, 'message')) as Extract<BridgeEvent, { type: 'message' }>
+    const viewer = new Viewer(a)
+    try {
+      const url = viewer.start()
+      const here = new URL(url).origin
+      const pin = (body: unknown, headers: Record<string, string> = { 'x-coworker-viewer': '1', origin: here }) => fetch(`${url}/pin`, { method: 'POST', headers, body: JSON.stringify(body) })
+      const want = { threads: [got.thread], pinned: true }
+      // 화면이 붙이는 표시가 없거나, 다른 사이트에서 왔으면 받지 않는다.
+      expect((await pin(want, {})).status).toBe(403)
+      expect((await pin(want, { 'x-coworker-viewer': '1', origin: 'https://evil.example' })).status).toBe(403)
+      expect((await pin(want, { 'x-coworker-viewer': '1', origin: here, 'sec-fetch-site': 'cross-site' })).status).toBe(403)
+      expect((await fetch(`${url.replace(/[^/]+$/, 'wrong-token')}/pin`, { method: 'POST', headers: { 'x-coworker-viewer': '1' }, body: JSON.stringify(want) })).status).toBe(404)
+      expect(a.threads.get(got.thread)!.pinned).toBeUndefined()
+      // 모양이 틀리면 받지 않는다.
+      for (const bad of [null, {}, { threads: [], pinned: true }, { threads: [got.thread] }, { threads: [1], pinned: true }, { threads: got.thread, pinned: true }, { threads: Array(65).fill('x'), pinned: true }])
+        expect([bad, (await pin(bad)).status]).toEqual([bad, 400])
+
+      // 없는 대화는 건너뛴다. 화면이 받는 대화에 고정 표시가 붙는다.
+      expect(await (await pin({ threads: [got.thread, 'no-such-conversation'], pinned: true })).json()).toEqual({ changed: 1 })
+      const data = (await (await fetch(`${url}/data`)).json()) as { conversations: { id: string; pinned?: boolean }[] }
+      expect(data.conversations.find(c => c.id === got.thread)!.pinned).toBe(true)
+      expect(await (await pin(want)).json()).toEqual({ changed: 0 })
+      // 고정은 이 PC의 것이다. 글이 오가도 상대 쪽 대화에는 생기지 않는다.
+      await a.reply(got.thread, '18081')
+      await next(b, 'message')
+      expect(b.threads.get(sent.thread)!.pinned).toBeUndefined()
+      expect(a.threads.get(got.thread)!.pinned).toBe(true)
+      expect(await (await pin({ threads: [got.thread], pinned: false })).json()).toEqual({ changed: 1 })
+      expect(a.threads.get(got.thread)!.pinned).toBeUndefined()
+    } finally {
+      viewer.stop()
+    }
+  })
+
   test('a question that gets no answer stops counting after a while, unless the AI has not read it yet', async () => {
     const { a, b } = await pair()
     await next(a, 'connected')
-    // 답이 필요 없는 알림도 질문으로 온다.
-    const notice = await b.ask(undefined, 'FYI: the notice is posted. No answer needed.')
+    // 답이 필요 없다고 표시하지도 적지도 않은 알림. 여느 질문으로 온다.
+    const notice = await b.ask(undefined, 'FYI: the notice is posted.')
     const mine = new Viewer(a, { quietAfterMs: 150 })
     const theirs = new Viewer(b, { quietAfterMs: 150 })
     try {
@@ -1104,6 +1203,22 @@ describe('coming back after a restart', () => {
       again.stop()
       blocker.stop(true)
     }
+  })
+
+  test('a notice saved by an older version, with the words only in its text, comes back as a notice; a pinned conversation stays pinned', async () => {
+    const { a, b, saveTo } = await pairWithSavedJoiner()
+    await a.askMany(undefined, 'QA 서버를 14시에 다시 켰습니다. (답 필요 없습니다)', undefined, 'all', true)
+    const got = (await next(b, 'message')) as Message
+    expect(b.pin([got.thread], true)).toBe(1)
+    b.shutdown()
+    // 옛 판이 남긴 상태에는 알림 표시가 없다.
+    const saved = load(saveTo)
+    for (const t of saved.threads) for (const m of t.messages) delete m.noAnswer
+    const b2 = Bridge.restore(saved, restoreOptions(saveTo, [b.port, b.port + 9]))
+    opened.push(b2)
+    expect(b2.threads.get(got.thread)!.messages[0]).toMatchObject({ from: 'peer', noAnswer: true })
+    expect(new Viewer(b2).status().waiting.yours).toBe(0)
+    expect(b2.threads.get(got.thread)!.pinned).toBe(true)
   })
 
   test('closing on purpose forgets the saved state; stopping with the process keeps it', async () => {

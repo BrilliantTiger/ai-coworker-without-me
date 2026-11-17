@@ -79,6 +79,10 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   const notice = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
   expect(notice).toMatchObject({ type: 'message', kind: 'question', thread: told.thread, no_answer_needed: true })
   expect((await claude('inbox')).conversations.find((c: { id: string }) => c.id === told.thread)).toMatchObject({ status: 'your_turn', no_answer_needed: true })
+  // 표시를 빠뜨리고 글에만 「답 필요 없다」고 적어도 알림으로 나간다.
+  const plain = await codex('send_question', { question: 'QA 서버를 14시에 다시 켰습니다. (답 필요 없습니다)' })
+  expect(plain.next).toContain('do not wait for an answer')
+  expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'message', kind: 'question', thread: plain.thread, no_answer_needed: true })
 
   expect((await codex('inbox')).conversations[0]).toMatchObject({ id: asked.thread, status: 'your_turn', messages: 2 })
 
