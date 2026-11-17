@@ -438,7 +438,11 @@ GitHub판으로 설치되는 것은 `plugin/` 폴더뿐이다. 매니페스트(`
 
 https://brillianttigercorp.com/ai-coworker-without-me/ 는 `gh-pages` 브랜치에 있다. 플러그인 폴더에 웹사이트 파일이 섞이지 않게 main과 따로 둔다. 고칠 때는 `git worktree add ../coworker-pages gh-pages`로 꺼내 고치고 그 브랜치에 push하면 GitHub Pages가 바로 다시 올린다.
 
+사이트는 `index.html`, `assets/style.css`, `assets/main.js`와 데모 `demo/index.html`이다. 색, 카드, 움직임 값은 대화 화면(`src/page.ts`)과 같게 둔다. 밖에서 불러오는 글꼴이나 스크립트는 없다. 움직임은 화면의 모션 단추로 끄고 켜고, 처음에는 운영체제의 「동작 줄이기」를 따른다. 화면 크기는 좁은 휴대폰부터 모니터까지, 그리고 iPhone Duo의 접은 화면(382×580)과 펼친 화면(951×585)에 맞췄다. 공유할 때 보이는 그림은 `assets/og.png`(1200×630)이다.
+
 사이트의 대화 화면 데모(`demo/`)는 진짜 대화 화면에 꾸민 대화를 넣어 만든 파일 하나다. 서버 없이 브라우저 안에서만 돌고, 아무것도 밖으로 보내지 않는다. 화면(`src/page.ts`)이나 꾸민 대화(`scripts/demo-scenario.ts`)를 고쳤으면 `bun scripts/demo-static.ts ../coworker-pages/demo/index.html`로 다시 만들어 올린다. 꾸민 대화의 이름은 익명(A, B, C)이고, 미리보기 서버(`bun scripts/viewer-demo.ts`)도 같은 대화를 쓴다.
+
+사이트의 「대화 화면」 구역은 이 데모를 누를 수 없는 미리보기로 줄여서 보여 준다. 데모는 그렇게 다른 페이지 안에 들어가 있을 때는 바깥 페이지의 스크롤을 끌어당기지 않고, 「소개로 돌아가기」도 달지 않는다(`scripts/demo-player.js`).
 
 ## 시험
 
