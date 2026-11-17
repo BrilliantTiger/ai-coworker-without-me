@@ -2,6 +2,7 @@
 // 화면은 차분하고 읽기 쉽게 짜고, 움직임은 과하지도 모자라지도 않게 넣는다(2026-11-17, 사람이 정함:
 // 「모던하고 심플하되 가독성 높은 상태에서 모션이 과하지 않고 이질감없이 자연스럽게」, 「과하지 않은 적절한 모션」).
 // 왼쪽에 대화 목록을, 오른쪽에 고른 대화 하나를 둔다(2026-11-17, 사람이 정함: 「대화의 묶음 리스트를 … 클릭하면 볼 수 있게」, 「오른쪽이 아니라 왼쪽이다」).
+// 넓은 화면에서는 머리와 틀이 그대로 있고 대화 목록과 채팅 내용이 따로 구른다. 채팅은 맨 아래가 가장 새 글이고, 새 글이 오면 맨 아래에 붙는다.
 // 넣는 움직임: 글이 오가면 연결선을 따라 점이 건너간다. 고른 대화와 새 글이 부드럽게 들어온다. 차례가 바뀌면 목록의 줄이 미끄러져 간다.
 // 상태가 바뀌면 이름표가 넘어가고 체크가 그려진다. 기다리는 곳에서는 점이 조용히 뛴다.
 // 넣지 않는 것: 얼굴 캐릭터, 배경에 떠다니는 것, 색종이, 번쩍이며 도는 테두리, 글자가 써 내려가는 것, 카드가 기우는 것.
@@ -177,7 +178,7 @@ button.sess:hover { background: var(--soft); }
 .pane { grid-column: 2; grid-row: 1; min-width: 0; }
 .wrap { position: relative; }
 .rooms { grid-column: 1; grid-row: 1; position: sticky; top: 68px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 84px); overflow-y: auto; padding: 3px; margin: -3px; scrollbar-width: thin; overscroll-behavior: contain; }
-.room { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; flex: none; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); cursor: pointer; --ring: var(--muted); }
+.room { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; flex: none; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); cursor: pointer; --ring: var(--muted); }
 .on .room { transition: opacity .35s ease-out, translate .45s var(--ease), background-color .15s, border-color .2s; transition-delay: calc(var(--i, 0) * 45ms), calc(var(--i, 0) * 45ms), 0s, 0s; }
 .room:hover { border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
 .room[aria-current=true] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
@@ -247,7 +248,10 @@ button.sess:hover { background: var(--soft); }
 .pp.human { color: var(--note-b); border-color: color-mix(in srgb, var(--note-b) 35%, var(--line)); }
 
 /* 주고받은 글 */
-.msgs { list-style: none; margin: 14px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+/* 채팅 내용이 구르는 자리. 넓은 화면에서는 이 안에서만 구른다. */
+.scroll { margin-top: 14px; border-top: 1px solid var(--line); }
+.scroll:focus-visible { outline-offset: -2px; }
+.msgs { list-style: none; margin: 0; padding: 14px 6px 6px 4px; display: flex; flex-direction: column; gap: 10px; }
 .msg { max-width: min(86%, 640px); min-width: 0; }
 .msg.peer { align-self: flex-start; }
 .msg.mine { align-self: flex-end; }
@@ -318,6 +322,30 @@ dialog h2 { margin: 0 0 6px; font-size: 16px; }
 dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
 .code { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 3em; max-height: 180px; overflow: auto; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--soft); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
 .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* 넓고 충분히 높은 화면에서는 화면 전체가 구르지 않는다(2026-11-17, 사람이 정함: 「대화 목록과 채팅 내용이 각각 따로 스크롤」).
+   머리와 연결 그림은 그대로 있고, 대화 목록과 채팅 내용이 저마다 따로 구른다. 좁거나 낮은 화면에서는 전처럼 화면 전체가 구른다. */
+@media (min-width: 861px) and (min-height: 680px) {
+  body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+  .top { position: static; flex: none; border-bottom-color: var(--line); animation: none; }
+  main { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; padding-bottom: 16px; }
+  .panel, .info, .filterbar { flex: none; }
+  /* 채팅 자리를 넓히려고 숫자 줄을 연결 그림 옆에 둔다. 연결된 세션이 많으면 연결 그림 안에서 구른다. */
+  .panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .net { grid-column: 1; grid-row: 1; max-height: 30vh; overflow-y: auto; overscroll-behavior: contain; }
+  .stats { grid-column: 2; grid-row: 1; grid-template-columns: repeat(2, minmax(104px, auto)); align-content: center; border-top: 0; border-left: 1px solid var(--line); }
+  .stat { padding: 8px 18px; }
+  .num { font-size: 17px; }
+  .downs { grid-column: 1 / -1; grid-row: 2; }
+  .board { flex: 1 1 auto; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr); }
+  .rooms { position: static; max-height: none; min-height: 0; scrollbar-gutter: stable; }
+  .pane { display: flex; min-height: 0; }
+  .wrap { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; }
+  .wrap[hidden] { display: none; }
+  .conv { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .head, .sub, .people, .typing { flex: none; }
+  .scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; }
+}
 
 /* 처음 나타날 때의 출발 모습. 맨 바깥에 둬야 브라우저가 읽는다. */
 @starting-style {
@@ -777,7 +805,26 @@ function showItem(item) {
   const dy = a.top < b.top ? a.top - b.top : a.bottom > b.bottom ? a.bottom - b.bottom : 0
   if (dx || dy) rooms.scrollBy({ left: dx, top: dy, behavior: moving() ? 'smooth' : 'auto' })
 }
-// 오른쪽에 열 대화를 고른다. 열리는 대화는 카드만 떠오르고, 안의 글은 따로 움직이지 않는다.
+// 채팅 내용을 맨 아래(가장 새 글)로 내린다. 넓은 화면에서는 채팅 내용만 따로 구른다.
+// 화면 전체가 구르는 좁은 화면에서는, 새 글이 왔을 때(arrived)만 그 글이 보이게 화면을 옮긴다.
+// 채팅 내용이 그 자리 안에서 구르는지 본다. 구를 것이 있을 때만 키보드로 닿는 자리로 둔다.
+function canScroll(v) {
+  const can = v.scroll.scrollHeight > v.scroll.clientHeight + 1
+  if (can) v.scroll.tabIndex = 0
+  else v.scroll.removeAttribute('tabindex')
+  return can
+}
+function toBottom(v, arrived) {
+  const how = arrived && moving() ? 'smooth' : 'auto'
+  if (canScroll(v)) v.scroll.scrollTo({ top: v.scroll.scrollHeight, behavior: how })
+  else if (arrived && v.msgs.lastElementChild) v.msgs.lastElementChild.scrollIntoView({ block: 'nearest', behavior: how })
+}
+// 창 크기가 바뀌면 구르는 자리가 생기거나 없어진다.
+addEventListener('resize', () => {
+  const v = cards.get(active)
+  if (v) canScroll(v)
+})
+// 오른쪽에 열 대화를 고른다. 열리는 대화는 카드만 떠오르고, 안의 글은 따로 움직이지 않는다. 열면 가장 새 글이 보인다.
 // byHand: 사람이 목록에서 골랐다. 긴 대화를 읽다가 다른 대화로 가도 처음부터 보이게 화면을 올린다.
 function activate(id, byHand) {
   const next = cards.get(id)
@@ -798,6 +845,7 @@ function activate(id, byHand) {
     next.item.classList.remove('unseen')
   }
   showItem(next.item)
+  toBottom(next, false)
   if (byHand) {
     const top = next.wrap.getBoundingClientRect().top
     if (top < 60) scrollBy({ top: top - 76, behavior: moving() ? 'smooth' : 'auto' })
@@ -870,7 +918,12 @@ function makeCard(id) {
   dots.append(el('i'), el('i'), el('i'))
   dots.setAttribute('aria-hidden', 'true')
   typing.append(dots, tlabel, timer)
-  card.append(head, sub, people, msgs, typing)
+  // 채팅 내용이 구르는 자리. 맨 아래가 가장 새 글이다.
+  const scroll = el('div', 'scroll')
+  scroll.setAttribute('role', 'region')
+  scroll.setAttribute('aria-label', '주고받은 글')
+  scroll.append(msgs)
+  card.append(head, sub, people, scroll, typing)
   wrap.append(card)
   wrap.hidden = true
   // 왼쪽 목록의 한 줄: 분류와 제목, 마지막 글의 때, 상태, 상대, 그리고 고정했는지와 새 글이 왔는지. 누르면 이 대화가 열린다.
@@ -886,7 +939,7 @@ function makeCard(id) {
   inew.append(el('span', 'plain', '새 글'))
   imarks.append(ipin, inew)
   item.append(ititle, iago, istate, imarks)
-  const v = { id, wrap, card, badge, cat, subject, status, stext, tick: ck.firstChild, pin, ago: agoEl, meta, people, msgs, typing, tlabel, timer, item, icat, isub, iago, ilabel, iwho, unseen: false, seen: new Map(), st: undefined, label: '', peers: [], category: '', threads: [], pinned: false }
+  const v = { id, wrap, card, badge, cat, subject, status, stext, tick: ck.firstChild, pin, ago: agoEl, meta, people, msgs, scroll, stuck: false, typing, tlabel, timer, item, icat, isub, iago, ilabel, iwho, unseen: false, seen: new Map(), st: undefined, label: '', peers: [], category: '', threads: [], pinned: false }
   pin.addEventListener('click', () => togglePin(v))
   item.addEventListener('click', () => activate(id, true))
   return v
@@ -1060,6 +1113,8 @@ function paint(v, room, live, index, news) {
     v.iago.dataset.ago = newest
     v.iago.textContent = ago(Date.now() - Date.parse(newest))
   }
+  // 열어 둔 대화가 맨 아래까지 내려가 있었는지. 그랬으면 새 글이 와도 맨 아래에 붙어 있게 한다.
+  v.stuck = !v.wrap.hidden && v.scroll.scrollHeight - v.scroll.scrollTop - v.scroll.clientHeight < 40
   const ids = new Set(items.map(it => it.id))
   for (const [id, node] of v.seen)
     if (!ids.has(id)) {
@@ -1261,7 +1316,9 @@ function announce(news) {
     }
     if (recent) toast(n)
   })
-  if (jump) newest.node.scrollIntoView({ block: 'nearest', behavior: moving() ? 'smooth' : 'auto' })
+  // 열어 둔 대화에 새 글이 왔으면 맨 아래(새 글)로 내린다. 따라가기를 껐어도, 맨 아래에 있었으면 붙어 있는다.
+  const open = cards.get(active)
+  if (open && news.some(n => n.v === open) && (follow || open.stuck)) toBottom(open, true)
 }
 
 let first = true

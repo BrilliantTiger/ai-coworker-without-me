@@ -1284,7 +1284,10 @@ describe('connection log', () => {
     b.peers.get(a.key)!.lastPollAt = undefined
     await b.ask(undefined, 'there?')
     ;(a as any).abort = new AbortController()
-    expect((a as any).listen(port)).toBe(true)
+    // 막 닫은 포트는 곧바로 다시 열리지 않을 때가 있다. 잠깐 동안 다시 해 본다.
+    let reopened = false
+    for (let i = 0; i < 40 && !(reopened = (a as any).listen(port)); i++) await Bun.sleep(25)
+    expect(reopened).toBe(true)
     await next(a, 'message')
     for (let i = 0; i < 200 && !b.log.read().some(e => e.event === 'link_up'); i++) await Bun.sleep(50)
 
