@@ -403,6 +403,11 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
   const started = Date.now()
   const pins = new Set()
   const sources = new Set()
+  // 다른 페이지 안에 미리보기로 들어가 있는지(소개 페이지의 대화 화면 칸).
+  const framed = window.top !== window.self
+  // 그 안에서는 새 글을 화면에 들이는 동작(scrollIntoView)을 하지 않는다. 이 동작은 바깥 페이지의 스크롤까지 끌어당긴다.
+  // 채팅 칸은 스스로 맨 아래를 따라가므로 미리보기에서는 없어도 된다.
+  if (framed) Element.prototype.scrollIntoView = () => {}
   // 지금 몇 바퀴째의 몇 번째 장면인지.
   const scene = () => {
     const elapsed = Date.now() - started
@@ -473,7 +478,8 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
     return realFetch(url, options)
   }
 
-  // 데모라는 것을 알리고, 소개 페이지로 돌아가는 길을 둔다.
+  // 데모라는 것을 알리고, 소개 페이지로 돌아가는 길을 둔다. 미리보기로 들어가 있을 때는 바깥 페이지가 알리므로 달지 않는다.
+  if (framed) return
   const note = document.createElement('a')
   note.href = '../'
   note.textContent = '데모 · 꾸민 대화입니다 · 소개로 돌아가기'

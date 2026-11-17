@@ -2,10 +2,12 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>AI Co-worker Without Me</title>
 <meta name="description" content="내 AI가 동료의 AI에게 직접 묻고 답합니다. Claude Code와 Codex를 잇는 오픈소스 플러그인. 사람은 지켜보다가 결정만 하고, 끝나면 합의문으로 이야기합니다.">
-<meta name="theme-color" content="#090B1C">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f4f7">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0d11">
 <link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="apple-touch-icon" href="assets/icon.png">
 <meta property="og:type" content="website">
@@ -14,484 +16,571 @@
 <meta property="og:image" content="https://brillianttigercorp.com/ai-coworker-without-me/assets/og.png">
 <meta property="og:url" content="https://brillianttigercorp.com/ai-coworker-without-me/">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="assets/style.css">
+<script>
+// 그리기 전에 정한다: 스크립트가 도는지(js), 움직임을 켤지(on), 아래 구역을 들어올 때 나타나게 할지(rv).
+// 움직임은 이 브라우저에 기억해 둔 선택이 있으면 그것을, 없으면 운영체제의 「동작 줄이기」를 따른다.
+(function () {
+  var root = document.documentElement, saved = null
+  root.classList.add('js')
+  try { saved = localStorage.getItem('cw-motion') } catch (e) {}
+  if (saved ? saved === 'on' : !matchMedia('(prefers-reduced-motion: reduce)').matches) root.classList.add('on')
+  if ('IntersectionObserver' in window) {
+    // boot는 나머지 스크립트가 예시 대화를 넘겨받을 때까지만 붙어 있다
+    root.classList.add('rv', 'boot')
+    // 나머지 스크립트를 받지 못하면 숨겨 둔 것을 그대로 보여 준다
+    setTimeout(function () { if (!window.cwReady) root.classList.remove('rv', 'boot') }, 3000)
+  }
+})()
+</script>
 </head>
-<body>
-<canvas id="sky" aria-hidden="true"></canvas>
-<div class="aura" aria-hidden="true"></div>
-<div class="progress" aria-hidden="true"><i></i></div>
+<body id="top">
 
-<header class="nav">
-  <a class="brand" href="#top" aria-label="맨 위로">
-    <img src="assets/icon.png" alt="" width="28" height="28">
-    <span>AI Co-worker <b>Without Me</b></span>
-  </a>
-  <nav class="links" aria-label="페이지 안내">
-    <a href="#how">어떻게</a>
-    <a href="#features">기능</a>
-    <a href="demo/">데모</a>
-    <a href="#where">어디서</a>
-    <a href="#install">설치</a>
-  </nav>
-  <a class="btn btn-ghost btn-sm magnetic" href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub</a>
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-out" viewBox="0 0 24 24"><path d="M9 7h8v8M17 7 7 17"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5.5 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v.5"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 5 13.5h6l-1 8 8-11h-6z"/></symbol>
+  <symbol id="i-fan" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5.5" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="19" cy="18.5" r="2"/><path d="M7 12h10M6.8 11.1l10.4-4.8M6.8 12.9l10.4 4.8"/></symbol>
+  <symbol id="i-group" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 19.5a6 6 0 0 1 12 0M15.5 5.2a3.2 3.2 0 0 1 0 5.6M17.5 14.3a6 6 0 0 1 3.5 5.2"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="m20 11.5-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 0 1 4.8 4.8l-8.3 8.3a1.8 1.8 0 0 1-2.5-2.5l7.2-7.2"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15zM10 21a2.2 2.2 0 0 0 4 0"/></symbol>
+  <symbol id="i-decide" viewBox="0 0 24 24"><circle cx="10" cy="7.5" r="3.5"/><path d="M3.5 20a6.5 6.5 0 0 1 9.6-5.7M14.5 18l2.3 2.3 4.2-4.6"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM14 3v5h5M9 13h6M9 17h4"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.4 2.9 8.2 7 10 4.1-1.8 7-5.6 7-10V6zM9.5 9.8l5 5M14.5 9.8l-5 5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5M12 14.5v2"/></symbol>
+  <symbol id="i-relay" viewBox="0 0 24 24"><circle cx="4.5" cy="12" r="2"/><circle cx="19.5" cy="12" r="2"/><rect x="9" y="8.5" width="6" height="7" rx="1.8"/><path d="M6.5 12H9M15 12h2.5"/></symbol>
+  <symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9h18M7 13h5M7 16h8"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3.5 12.3V5A1.5 1.5 0 0 1 5 3.5h7.3l8.2 8.2a1.5 1.5 0 0 1 0 2.1l-6.7 6.7a1.5 1.5 0 0 1-2.1 0z"/><circle cx="8" cy="8" r="1.3"/></symbol>
+  <symbol id="i-card" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="8.5" rx="2.2"/><path d="M6.5 8.2h7M4 16.5h16M4 20h9"/></symbol>
+  <symbol id="i-loop" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-12.9 5.2M4.5 12a7.5 7.5 0 0 1 12.9-5.2M17.5 3v4h-4M6.5 21v-4h4"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 16.5v-9M8.5 11 12 7.5l3.5 3.5"/></symbol>
+</svg>
+
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="#top">
+      <svg class="logo" viewBox="0 0 28 28" aria-hidden="true"><path d="M9 14h10"/><circle class="l1" cx="7" cy="14" r="5"/><circle class="l2" cx="21" cy="14" r="5"/></svg>
+      <span>AI Co-worker<span class="brand-tail"> Without Me</span></span>
+    </a>
+    <nav class="site-nav" aria-label="이 페이지의 구역">
+      <button class="menu-button" type="button" popovertarget="site-menu" popovertargetaction="toggle" aria-controls="site-menu" aria-label="메뉴">
+        <svg class="i" aria-hidden="true"><use href="#i-menu"/></svg><span aria-hidden="true">메뉴</span>
+      </button>
+      <ul id="site-menu" class="site-menu" popover="auto">
+        <li><a href="#how">어떻게</a></li>
+        <li><a href="#viewer">대화 화면</a></li>
+        <li><a href="#features">기능</a></li>
+        <li><a href="#where">어디서</a></li>
+        <li><a href="#install">설치</a></li>
+        <li><a href="#faq">자주 묻는 것</a></li>
+        <li><a href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub <svg class="i" aria-hidden="true"><use href="#i-out"/></svg></a></li>
+      </ul>
+    </nav>
+    <a class="btn btn-primary btn-sm" href="#install">설치</a>
+  </div>
 </header>
+<script>
+// 메뉴가 한 줄에 들어가는지 재서, 들어가면 옆으로 펴고(is-wide) 아니면 단추 하나로 접는다.
+// 그리기 전에 한 번 재려고 여기에 둔다. 너비가 바뀌면 다시 잰다.
+(function () {
+  var header = document.querySelector('.site-header'), inner = header.querySelector('.header-inner'), menu = document.getElementById('site-menu')
+  if (!('popover' in HTMLElement.prototype) || !('ResizeObserver' in window)) return
+  var seen = 0
+  // 지금 보는 구역의 표시(scroll-target-group)는 목록이 숨어 있다가 나타나면 놓치는 브라우저가 있다(Chrome 150에서 확인).
+  // 목록이 나타난 뒤에 그 값을 한 번 뺐다가 다시 걸어 준다.
+  function rearm() {
+    inner.style.setProperty('scroll-target-group', 'none')
+    void inner.offsetWidth
+    inner.style.removeProperty('scroll-target-group')
+  }
+  function fit() {
+    var width = header.clientWidth, wide = header.classList.contains('is-wide')
+    // 접혀 있는 동안에는 넓어졌을 때만 다시 잰다
+    if (!wide && width <= seen) return
+    seen = width
+    var open = menu.hasAttribute('popover') && menu.matches(':popover-open')
+    header.classList.add('is-measuring', 'is-wide')
+    menu.removeAttribute('popover')
+    var fits = inner.scrollWidth <= inner.clientWidth
+    header.classList.toggle('is-wide', fits)
+    if (!fits) {
+      menu.setAttribute('popover', 'auto')
+      if (open) menu.showPopover()
+    }
+    rearm()
+    requestAnimationFrame(function () { header.classList.remove('is-measuring') })
+  }
+  fit()
+  var watch = new ResizeObserver(fit)
+  watch.observe(header)
+  watch.observe(menu)
+  menu.addEventListener('toggle', function (event) { if (event.newState === 'open') rearm() })
+  // 접힌 메뉴에서 구역을 고르면 메뉴를 닫는다
+  menu.addEventListener('click', function (event) {
+    if (event.target.closest('a') && menu.hasAttribute('popover') && menu.matches(':popover-open')) menu.hidePopover()
+  })
+})()
+</script>
 
-<main>
-<!-- ───────────── HERO ───────────── -->
-<section class="hero" id="top">
-  <p class="eyebrow" data-reveal><span class="dot"></span>Claude Code · Codex 플러그인 · 오픈소스 · v0.12.1</p>
-  <h1 class="headline">
-    <span class="line" data-split>내 AI가 동료의 AI에게</span>
-    <span class="line" data-split><em class="grad">직접</em> 묻고 답합니다</span>
-  </h1>
-  <p class="lede" data-reveal style="--d:.35s">AI 결과를 복사해 메신저로 보내고, 받은 사람이 다시 붙여넣는 일을 없앱니다. 사람은 지켜보다가 결정이 필요할 때만 답하고, 끝나면 AI가 남긴 합의문을 놓고 이야기합니다.</p>
-  <div class="cta" data-reveal style="--d:.5s">
-    <a class="btn btn-primary magnetic" href="#install">설치하기 <span aria-hidden="true">→</span></a>
-    <a class="btn btn-ghost magnetic" href="demo/">대화 화면 데모</a>
-    <a class="btn btn-ghost magnetic" href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub에서 보기</a>
-  </div>
-  <ul class="chips" data-reveal style="--d:.65s">
-    <li>중앙 서버 없음</li><li>양 끝 암호화</li><li>비밀값 자동 차단</li><li>결정은 사람이</li><li>파일 주고받기</li><li>Mac · Windows</li>
-  </ul>
+<main id="main" tabindex="-1">
 
-  <p class="sr-only">아래 그림은 내 PC의 Claude Code와 동료 PC의 Codex가 coworker로 질문과 답을 주고받고, 결정이 필요한 질문은 동료가 직접 정하고, 끝나면 양쪽에 합의문을 남기는 모습을 보여 줍니다.</p>
-  <div class="stage" id="hero-stage" aria-hidden="true">
-    <div class="side me">
-      <div class="term" data-term="me">
-        <div class="bar"><i></i><i></i><i></i><span>Claude Code <small>· 내 PC · ~/api-server</small></span></div>
-        <div class="body"><div class="lines"></div></div>
+<section class="hero" id="hero" aria-labelledby="hero-title">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <p class="eyebrow" style="--i:0">Claude Code · Codex 플러그인 · 오픈소스 · <a href="https://github.com/BrilliantTiger/ai-coworker-without-me/releases">v0.12.1</a></p>
+      <h1 id="hero-title" style="--i:1">내 AI가 동료의 AI에게 <span class="grad">직접</span> 묻고 답합니다</h1>
+      <p class="lede" style="--i:2">AI 결과를 복사해 메신저로 보내고, 받은 사람이 다시 붙여넣는 일을 없앱니다. 사람은 지켜보다가 결정이 필요할 때만 답하고, 끝나면 AI가 남긴 합의문을 놓고 이야기합니다.</p>
+      <div class="cta" style="--i:3">
+        <a class="btn btn-primary btn-lg" href="#install">설치하기</a>
+        <a class="btn btn-lg" href="demo/">대화 화면 데모 <svg class="i" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       </div>
-      <div class="watcher me"><span class="avatar">나</span><span class="state">지켜보는 중</span></div>
+      <ul class="facts" style="--i:4">
+        <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>중앙 서버 없음</li>
+        <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>양 끝 암호화</li>
+        <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>비밀값 자동 차단</li>
+        <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>결정은 사람이</li>
+        <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg>Mac · Windows</li>
+      </ul>
     </div>
 
-    <div class="wire">
-      <svg class="wire-h" viewBox="0 0 200 300">
-        <defs>
-          <linearGradient id="wg" x1="0" x2="1"><stop offset="0" stop-color="#F2845C"/><stop offset="1" stop-color="#6EE7C8"/></linearGradient>
-        </defs>
-        <path class="track" d="M0 150 C 85 -20, 115 320, 200 150"/>
-        <path class="flow" d="M0 150 C 85 -20, 115 320, 200 150"/>
-        <g class="packets"></g>
-      </svg>
-      <svg class="wire-v" viewBox="0 0 300 110">
-        <path class="track" d="M150 0 C 40 38, 260 72, 150 110"/>
-        <path class="flow" d="M150 0 C 40 38, 260 72, 150 110"/>
-        <g class="packets"></g>
-      </svg>
-      <span class="wire-label">coworker</span>
-    </div>
-
-    <div class="side peer">
-      <div class="term" data-term="peer">
-        <div class="bar"><i></i><i></i><i></i><span>Codex <small>· 동료 PC · ~/web-app</small></span></div>
-        <div class="body"><div class="lines"></div></div>
+    <div class="scene card" id="scene" style="--i:3">
+      <div class="scene-bar">
+        <span class="live"><i class="beacon" aria-hidden="true"></i>예시 대화 · 꾸민 내용입니다</span>
+        <button class="chip" type="button" data-motion>모션 끄기</button>
       </div>
-      <div class="watcher peer">
-        <span class="avatar">동료</span><span class="state">지켜보는 중</span>
-        <div class="choice">
-          <p>결정이 필요해요 · 배포 순서</p>
-          <button tabindex="-1" data-pick="a">① API 먼저 <b>추천</b></button>
-          <button tabindex="-1" data-pick="b">② 웹 먼저</button>
-          <span class="pointer"></span>
+      <div class="net">
+        <div class="sess me">
+          <span class="avatar" aria-hidden="true">나<i class="st"></i></span>
+          <span class="sinfo"><span class="sname">나 · Claude Code</span><span class="ssub">내 PC · ~/api-server</span></span>
         </div>
+        <div class="wire" aria-hidden="true"><i class="spark"></i></div>
+        <div class="sess peer">
+          <span class="avatar" aria-hidden="true">동<i class="st"></i></span>
+          <span class="sinfo"><span class="sname">동료 · Codex</span><span class="ssub">동료 PC · ~/web-app</span></span>
+        </div>
+      </div>
+      <div class="thread">
+        <div class="thread-head">
+          <span class="cat">API</span>
+          <b>로그인 응답의 token 필드</b>
+          <span class="state" data-kind="agree"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="state-text">합의문 저장됨</span></span>
+        </div>
+        <ol class="msgs">
+          <li class="msg mine"><div class="bubble">
+            <p class="who">질문 <span>나 → 동료</span></p>
+            <p>로그인 응답의 token 필드가 바뀐 것, 웹에 반영됐나요?</p>
+          </div></li>
+          <li class="msg peer"><div class="bubble">
+            <p class="who">답 <span>동료 → 나</span></p>
+            <p>반영됐어요. <code>auth.ts:42</code>에서 확인했어요.</p>
+          </div></li>
+          <li class="msg note picked"><div class="bubble">
+            <p class="who">결정이 필요해요 <span>배포 순서</span></p>
+            <div class="opts"><span class="opt pick">① API 먼저 <em>추천</em></span><span class="opt">② 웹 먼저</span></div>
+            <p class="verdict"><span class="decided">사람이 정함 → <b>API 먼저</b></span><span class="asking" aria-hidden="true">AI는 정하지 않고 사람에게 묻는 중</span></p>
+          </div></li>
+          <li class="msg agreement"><div class="bubble">
+            <p class="who">합의문 <span>양쪽 PC에 저장</span></p>
+            <dl class="doc">
+              <div><dt>결론</dt><dd>API 먼저 배포, 웹은 다음 날</dd></div>
+              <div><dt>확인한 사실</dt><dd><code>auth.ts:42</code> · 동료가 확인</dd></div>
+              <div><dt>사람이 정할 것</dt><dd>공지 시각</dd></div>
+            </dl>
+          </div></li>
+        </ol>
       </div>
     </div>
   </div>
 </section>
 
-<div class="marquee" aria-hidden="true">
-  <div class="track">
-    <span>Claude Code ↔ Codex</span><span>Mac ↔ Windows</span><span>사내망 · VPN</span><span>중계 서버</span><span>양 끝 암호화</span><span>합의문</span><span>비밀값 차단</span><span>그룹 연결</span><span>파일 주고받기</span><span>대화 보기</span>
-    <span>Claude Code ↔ Codex</span><span>Mac ↔ Windows</span><span>사내망 · VPN</span><span>중계 서버</span><span>양 끝 암호화</span><span>합의문</span><span>비밀값 차단</span><span>그룹 연결</span><span>파일 주고받기</span><span>대화 보기</span>
-  </div>
-</div>
-
-<!-- ───────────── WHY ───────────── -->
-<section class="section why" id="why">
-  <header class="sec-head">
-    <p class="kicker" data-reveal>왜</p>
-    <h2 data-split>AI는 둘인데, 왜 사람이 옮겨 나르고 있을까요</h2>
-  </header>
-  <div class="why-grid">
-    <article class="card before" data-reveal>
-      <p class="tag">지금</p>
-      <div class="loop" aria-hidden="true">
-        <span class="hop h1"><kbd>⌘C</kbd>내 AI 결과 복사</span>
-        <span class="hop h2"><kbd>⌘V</kbd>메신저에 붙여넣기</span>
-        <span class="hop h3"><kbd>⌘C</kbd>동료가 다시 복사</span>
-        <span class="hop h4"><kbd>⌘V</kbd>동료 AI에 붙여넣기</span>
-        <i class="runner"></i>
-      </div>
-      <p class="count">오늘 옮겨 나른 횟수 <b data-tick>0</b>번</p>
-      <p class="note">전하는 사이 맥락이 빠지고, 답이 오면 또 반대로 옮깁니다.</p>
-    </article>
-    <article class="card after" data-reveal style="--d:.12s">
-      <p class="tag tag-mint">coworker를 쓰면</p>
-      <div class="direct" aria-hidden="true">
-        <span class="node">내 AI</span>
-        <span class="beam"><i></i><i></i><i></i><i></i></span>
-        <span class="node mint">동료 AI</span>
-      </div>
-      <p class="count">사람이 옮긴 횟수 <b>0</b>번</p>
-      <p class="note">AI끼리 직접 묻고 답합니다. 사람은 보고, 정하고, 합의문을 읽습니다.</p>
-    </article>
+<section class="section" id="why" aria-labelledby="why-title">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="kicker">왜</p>
+      <h2 id="why-title">AI는 둘인데, 왜 사람이 옮겨 나르고 있을까요</h2>
+    </header>
+    <div class="ways">
+      <article class="way card reveal">
+        <p class="tag">지금</p>
+        <ol class="hops">
+          <li><kbd>⌘C</kbd>내 AI 결과 복사</li>
+          <li><kbd>⌘V</kbd>메신저에 붙여넣기</li>
+          <li><kbd>⌘C</kbd>동료가 다시 복사</li>
+          <li><kbd>⌘V</kbd>동료 AI에 붙여넣기</li>
+        </ol>
+        <p class="count"><b>4번</b>한 번 묻는 데 사람이 옮기는 횟수</p>
+        <p class="tell">전하는 사이 맥락이 빠지고, 답이 오면 또 반대로 옮깁니다.</p>
+      </article>
+      <article class="way after card reveal" style="--i:1">
+        <p class="tag good">coworker를 쓰면</p>
+        <div class="direct" id="direct">
+          <span class="node me"><span class="avatar" aria-hidden="true">나</span>내 AI</span>
+          <span class="wire" aria-hidden="true"><i class="spark"></i></span>
+          <span class="node"><span class="avatar" aria-hidden="true">동</span>동료 AI</span>
+        </div>
+        <ul class="roles" aria-label="사람이 하는 일">
+          <li><svg class="i" aria-hidden="true"><use href="#i-eye"/></svg>지켜본다</li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-decide"/></svg>정한다</li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-doc"/></svg>합의문을 읽는다</li>
+        </ul>
+        <p class="count"><b>0번</b>사람이 옮기는 횟수</p>
+        <p class="tell">AI끼리 직접 묻고 답합니다. 사람은 보고, 정하고, 합의문을 읽습니다.</p>
+      </article>
+    </div>
   </div>
 </section>
 
-<!-- ───────────── HOW (scrollytelling) ───────────── -->
-<section class="section how" id="how">
-  <header class="sec-head">
-    <p class="kicker" data-reveal>어떻게</p>
-    <h2 data-split>코드 한 줄로 잇고, 끝나면 합의문</h2>
-  </header>
-  <div class="story">
-    <div class="story-stage" aria-hidden="true">
-      <div class="scene" data-step="1">
-        <div class="nodes">
-          <div class="snode me"><span class="ring"></span><b>내 세션</b><small>Claude Code</small><em class="badge port">7712 포트 열림</em><em class="badge ok">연결됨</em></div>
-          <div class="slink"><span class="drawn"></span><i class="p1"></i><i class="p2"></i><i class="p3"></i></div>
-          <div class="snode peer"><span class="ring"></span><b>동료 세션</b><small>Codex</small><em class="badge ok">연결됨</em></div>
-        </div>
-        <div class="layers">
-          <div class="layer" data-l="1">
-            <p class="say">“coworker 브릿지 열어줘”</p>
-            <div class="codebox"><span class="label">연결 코드</span><code class="typed" data-text="cw1.eyJ2IjoxLCJuYW1lIjoiYXBpLXNlcnZlciDCtyBDbGF1ZGUgQ29kZSIsImFkZHJzIjpbIjE5Mi4xNjguMC4xMiJdLCJwb3J0Ijo3NzEyfQ.Q3x9mK2a"></code><span class="hint">한 번만 · 1시간 뒤 만료 · 끝 8글자는 확인용</span></div>
-          </div>
-          <div class="layer" data-l="2">
-            <div class="chat">
-              <p class="chat-head">메신저 · 동료</p>
-              <p class="bubble mine">이 코드로 연결해 줘<br><code>cw1.eyJ2IjoxLCJuYW1l…Q3x9mK2a</code></p>
-              <p class="bubble theirs">ㅇㅋ 붙일게</p>
-            </div>
-          </div>
-          <div class="layer" data-l="3">
-            <p class="say peer-say">“이 코드로 coworker 연결해줘: cw1.…”</p>
-            <ul class="addrs"><li><span>192.168.0.12:7712</span><b>✓ 닿음</b></li><li><span>10.8.0.5:7712 (VPN)</span><b class="dim">대기</b></li><li><span>macbook.local:7712</span><b class="dim">대기</b></li></ul>
-          </div>
-          <div class="layer" data-l="4">
-            <div class="convo">
-              <p class="q"><span>질문</span>로그인 응답의 token 필드 바뀐 것 반영됐나요?</p>
-              <p class="a"><span>답</span>반영됐어요. <code>auth.ts:42</code> 에서 확인함</p>
-              <p class="q"><span>질문</span>에러 코드 목록도 같이 바뀌었나요?</p>
-              <p class="a"><span>답</span>문서 <code>docs/errors.md</code> 기준 그대로예요</p>
-            </div>
-          </div>
-          <div class="layer" data-l="5">
-            <div class="decide">
-              <p class="decide-q">결정이 필요해요 · <b>배포 순서</b></p>
-              <p class="decide-note">AI는 정하지 않고 상대에게 “사람에게 확인 중”을 알립니다</p>
-              <div class="opts"><span class="opt pick">① API 먼저 <b>추천</b></span><span class="opt">② 웹 먼저</span></div>
-              <p class="decided">사람이 정함 → <b>API 먼저</b> 로 답장</p>
-            </div>
-          </div>
-          <div class="layer" data-l="6">
-            <div class="doc">
-              <p class="doc-title">합의문 · 로그인 API 변경</p>
-              <p class="row r1"><span>결론</span>API 먼저 배포, 웹은 다음 날</p>
-              <p class="row r2"><span>확인한 사실</span><code>auth.ts:42</code> · 동료가 확인</p>
-              <p class="row r3"><span>추측</span>캐시는 하루면 비워짐</p>
-              <p class="row r4"><span>의견이 갈린 점</span>없음</p>
-              <p class="row r5"><span>사람이 정할 것</span>공지 시각</p>
-              <p class="saved">양쪽 PC <code>~/.coworker/agreements/</code> 에 저장</p>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="caption" aria-hidden="true"><span class="num"></span><h3></h3><p></p></div>
-    </div>
-
+<section class="section" id="how" tabindex="-1" aria-labelledby="how-title">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="kicker">어떻게</p>
+      <h2 id="how-title">코드 한 줄로 잇고, 끝나면 합의문</h2>
+    </header>
     <ol class="steps">
-      <li class="step" data-step="1"><span class="num">01</span><h3>브릿지 열기</h3><p>내 세션에 <q>coworker 브릿지 열어줘</q>라고 하면 포트를 열고 <code>cw1.</code>로 시작하는 연결 코드를 보여 줍니다. 세션마다 7700~7799 사이의 다른 포트로 열립니다.</p></li>
-      <li class="step" data-step="2"><span class="num">02</span><h3>코드 보내기</h3><p>그 코드를 메신저로 동료에게 보냅니다. 코드는 한 번만 쓸 수 있고 한 시간 뒤 만료됩니다. 옮겨 적다 한 글자라도 틀리면 연결 전에 알려 줍니다.</p></li>
-      <li class="step" data-step="3"><span class="num">03</span><h3>연결</h3><p>동료가 <q>이 코드로 coworker 연결해줘</q>라고 하면 두 세션이 직접 이어집니다. 사내 IP, VPN 주소, 컴퓨터 이름 순서로 닿는 주소를 찾습니다.</p></li>
-      <li class="step" data-step="4"><span class="num">04</span><h3>묻고 답하기</h3><p>양쪽 AI가 코드와 문서에서 답을 찾아 바로 답합니다. 주고받을 때마다 각자의 세션에서 사람에게 정리해 알려 줍니다. 그만하라고 할 때까지 계속 듣습니다.</p></li>
-      <li class="step" data-step="5"><span class="num">05</span><h3>결정은 사람에게</h3><p>선택지, 우선순위, 일정처럼 정해야 하는 건 AI가 정하지 않습니다. 상대에게 <q>사람에게 확인 중</q>이라고 알리고, 내 사람에게 선택지와 추천을 붙여 묻습니다.</p></li>
-      <li class="step" data-step="6"><span class="num">06</span><h3>합의문</h3><p>끝나면 결론, 확인한 사실과 근거, 추측, 의견이 갈린 점, 사람이 정할 것을 나눠 적은 합의문을 양쪽 PC에 남깁니다.</p></li>
+      <li class="step card reveal">
+        <div class="art" aria-hidden="true">
+          <p class="say">coworker 브릿지 열어줘</p>
+          <p class="codechip">cw1.eyJ2IjoxLCJuYW1l…Q3x9mK2a</p>
+          <p class="hint">한 번만 · 1시간 뒤 만료 · 끝 8글자는 확인용</p>
+        </div>
+        <p class="step-no">01</p>
+        <h3>브릿지 열기</h3>
+        <p class="step-text">내 세션에 <q>coworker 브릿지 열어줘</q>라고 하면 포트를 열고 <code>cw1.</code>로 시작하는 연결 코드를 보여 줍니다. 세션마다 7700~7799 사이의 다른 포트로 열립니다.</p>
+      </li>
+      <li class="step card reveal">
+        <div class="art" aria-hidden="true">
+          <p class="b r">이 코드로 연결해 줘<br><span class="codechip">cw1.eyJ2…mK2a</span></p>
+          <p class="b l">ㅇㅋ 붙일게</p>
+        </div>
+        <p class="step-no">02</p>
+        <h3>코드 보내기</h3>
+        <p class="step-text">그 코드를 메신저로 동료에게 보냅니다. 코드는 한 번만 쓸 수 있고 한 시간 뒤 만료됩니다. 옮겨 적다 한 글자라도 틀리면 연결 전에 알려 줍니다.</p>
+      </li>
+      <li class="step card reveal">
+        <div class="art" aria-hidden="true">
+          <p class="row hit"><code>192.168.0.12:7712</code><span><svg class="i"><use href="#i-check"/></svg>닿음</span></p>
+          <p class="row"><code>10.8.0.5:7712</code><span>VPN · 대기</span></p>
+          <p class="row"><code>macbook.local:7712</code><span>대기</span></p>
+        </div>
+        <p class="step-no">03</p>
+        <h3>연결</h3>
+        <p class="step-text">동료가 <q>이 코드로 coworker 연결해줘</q>라고 하면 두 세션이 직접 이어집니다. 사내 IP, VPN 주소, 컴퓨터 이름 순서로 닿는 주소를 찾습니다.</p>
+      </li>
+      <li class="step card reveal">
+        <div class="art" aria-hidden="true">
+          <p class="b r"><b>질문</b>에러 코드 목록도 같이 바뀌었나요?</p>
+          <p class="b l"><b>답</b><code>docs/errors.md</code> 기준 그대로예요</p>
+        </div>
+        <p class="step-no">04</p>
+        <h3>묻고 답하기</h3>
+        <p class="step-text">양쪽 AI가 코드와 문서에서 답을 찾아 바로 답합니다. 주고받을 때마다 각자의 세션에서 사람에게 정리해 알려 줍니다. 그만하라고 할 때까지 계속 듣습니다.</p>
+      </li>
+      <li class="step card reveal">
+        <div class="art" aria-hidden="true">
+          <p class="ask">배포 순서를 정해 주세요</p>
+          <div class="opts"><span class="opt pick">① API 먼저 <em>추천</em></span><span class="opt">② 웹 먼저</span></div>
+          <p class="hint">상대에게는 「사람에게 확인 중」이라고 알립니다</p>
+        </div>
+        <p class="step-no">05</p>
+        <h3>결정은 사람에게</h3>
+        <p class="step-text">선택지, 우선순위, 일정처럼 정해야 하는 건 AI가 정하지 않습니다. 상대에게 사람에게 확인 중이라고 알리고, 내 사람에게 선택지와 추천을 붙여 묻습니다.</p>
+      </li>
+      <li class="step card reveal">
+        <div class="art" aria-hidden="true">
+          <dl class="doc paper">
+            <div><dt>결론</dt><dd>API 먼저 배포</dd></div>
+            <div><dt>확인한 사실</dt><dd>auth.ts:42</dd></div>
+            <div><dt>추측</dt><dd>캐시는 하루면 비워짐</dd></div>
+            <div><dt>사람이 정할 것</dt><dd>공지 시각</dd></div>
+          </dl>
+        </div>
+        <p class="step-no">06</p>
+        <h3>합의문</h3>
+        <p class="step-text">끝나면 결론, 확인한 사실과 근거, 추측, 의견이 갈린 점, 사람이 정할 것을 나눠 적은 합의문을 양쪽 PC의 <code>~/.coworker/agreements/</code>에 남깁니다.</p>
+      </li>
     </ol>
   </div>
 </section>
 
-<!-- ───────────── FEATURES ───────────── -->
-<section class="section features" id="features">
-  <header class="sec-head">
-    <p class="kicker" data-reveal>기능</p>
-    <h2 data-split>필요한 건 다 들어 있습니다</h2>
-  </header>
-  <div class="bento">
-    <article class="tile t-channel" data-reveal>
-      <div class="viz" aria-hidden="true">
-        <div class="mini-term">
-          <p class="dim">› 다른 일 하는 중…</p>
-          <p class="push">← coworker · 질문이 왔어요</p>
-          <p class="act">⏺ 코드 확인하고 답하는 중</p>
+<section class="section" id="viewer" tabindex="-1" aria-labelledby="viewer-title">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="kicker">대화 화면</p>
+      <h2 id="viewer-title">오간 대화는 브라우저로 지켜봅니다</h2>
+      <p class="sec-sub">AI가 알려 주는 링크를 열면 됩니다. 내 PC에서만 열리고, 새 글이 오면 바로 보입니다. 아래는 꾸민 대화가 흐르는 실제 화면입니다.</p>
+    </header>
+    <div class="shot card reveal" id="shot">
+      <div class="shot-bar" aria-hidden="true"><i></i><i></i><i></i><span>127.0.0.1:7760/?t=••••</span></div>
+      <div class="shot-view" id="shotView">
+        <div class="shot-still">
+          <svg class="logo" viewBox="0 0 28 28" aria-hidden="true"><path d="M9 14h10"/><circle class="l1" cx="7" cy="14" r="5"/><circle class="l2" cx="21" cy="14" r="5"/></svg>
+          <p class="still-load">미리보기를 불러오는 중입니다.</p>
+          <p class="still-off">모션을 켜면 여기에 움직이는 미리보기가 나옵니다. 데모는 아래 단추로 엽니다.</p>
+          <p class="still-plain">대화 화면이 어떻게 보이는지는 아래 단추로 여는 데모에서 볼 수 있습니다.</p>
         </div>
-        <p class="meter">기다리는 동안 사용량 <b>0</b></p>
+        <a class="shot-link" href="demo/" tabindex="-1" aria-hidden="true"></a>
       </div>
-      <h3>채널로 바로 도착</h3>
-      <p>Claude Code를 채널로 켜면 상대가 보낸 질문이 세션에 바로 들어옵니다. 기다리는 동안에는 사용량이 들지 않습니다.</p>
-    </article>
-
-    <article class="tile t-group" data-reveal style="--d:.06s">
-      <div class="viz" aria-hidden="true">
-        <svg viewBox="0 0 220 130">
-          <g class="edges">
-            <line x1="40" y1="40" x2="110" y2="25"/><line x1="110" y1="25" x2="180" y2="45"/><line x1="40" y1="40" x2="70" y2="105"/><line x1="70" y1="105" x2="150" y2="100"/><line x1="150" y1="100" x2="180" y2="45"/>
-            <line class="late" x1="110" y1="70" x2="40" y2="40"/><line class="late" x1="110" y1="70" x2="110" y2="25"/><line class="late" x1="110" y1="70" x2="180" y2="45"/><line class="late" x1="110" y1="70" x2="70" y2="105"/><line class="late" x1="110" y1="70" x2="150" y2="100"/>
-          </g>
-          <g class="dots"><circle cx="40" cy="40" r="7"/><circle cx="110" cy="25" r="7"/><circle cx="180" cy="45" r="7"/><circle cx="70" cy="105" r="7"/><circle cx="150" cy="100" r="7"/><circle class="newbie" cx="110" cy="70" r="9"/></g>
-        </svg>
+      <div class="shot-foot">
+        <span class="live"><i class="beacon" aria-hidden="true"></i>이름과 대화는 꾸민 것입니다</span>
+        <button class="chip" type="button" data-motion>모션 끄기</button>
+        <a class="btn btn-primary btn-sm" href="demo/">데모 열기 <svg class="i" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       </div>
-      <h3>그룹으로 연결</h3>
-      <p>그룹 코드로 들어온 세션은 그룹 전체와 자동으로 이어집니다. 둘만 잇는 개인용 코드도 있습니다. 이어지면 서로 어느 AI 도구이고 무슨 모델인지 알립니다.</p>
-    </article>
-
-    <article class="tile t-ask" data-reveal style="--d:.12s">
-      <div class="viz" aria-hidden="true">
-        <div class="radar">
-          <span class="c">나</span>
-          <span class="r r1"></span><span class="r r2"></span><span class="r r3"></span>
-          <span class="n n1">A</span><span class="n n2 win">B</span><span class="n n3">C</span><span class="n n4">D</span>
-        </div>
-        <p class="radar-note"><b>한 명만 답</b> · 먼저 온 B의 답을 받고 나머지는 마감</p>
-      </div>
-      <h3>한 명, 몇 명, 전체</h3>
-      <p>받을 사람을 골라 묻습니다. 모두의 답을 받거나, 먼저 온 한 명의 답만 받습니다.</p>
-    </article>
-
-    <article class="tile t-human" data-reveal>
-      <div class="viz" aria-hidden="true">
-        <div class="ask-card">
-          <p>배포 순서를 정해 주세요</p>
-          <span class="o o1">① API 먼저 <b>추천</b></span>
-          <span class="o o2">② 웹 먼저</span>
-          <i class="cursor"></i>
-        </div>
-      </div>
-      <h3>결정은 사람이</h3>
-      <p>정해야 하는 건 AI가 정하지 않습니다. 선택지와 추천을 붙여 사람에게 묻고, 사람이 정한 답을 보냅니다.</p>
-    </article>
-
-    <article class="tile t-agree" data-reveal style="--d:.06s">
-      <div class="viz" aria-hidden="true">
-        <div class="sort">
-          <div class="col"><p>확인한 사실</p><span class="it i1">auth.ts:42 · 내가 확인</span><span class="it i3">errors.md · 동료가 확인</span></div>
-          <div class="col guess"><p>추측</p><span class="it i2">캐시는 하루면 비워짐</span></div>
-        </div>
-      </div>
-      <h3>사실과 추측을 나눈 합의문</h3>
-      <p>사실마다 근거와 직접 확인한 쪽을 적습니다. AI 둘이 맞장구친 건 근거가 되지 않습니다.</p>
-    </article>
-
-    <article class="tile t-secret" data-reveal style="--d:.12s">
-      <div class="viz" aria-hidden="true">
-        <div class="scan">
-          <p>테스트용 토큰은 <mark>ghp_8fK2xQ…</mark> 이거 쓰면 돼</p>
-          <i class="beam"></i>
-          <span class="stamp">보내지 않음</span>
-        </div>
-        <p class="scan-note">오류에도 앞 네 글자 <code>ghp_</code> 만 보여 줍니다</p>
-      </div>
-      <h3>비밀값은 보내기 전에 차단</h3>
-      <p>키, 토큰, 비밀번호처럼 보이는 값이 있으면 아무것도 보내지 않습니다.</p>
-    </article>
-
-    <article class="tile t-crypto" data-reveal>
-      <div class="viz" aria-hidden="true">
-        <div class="cipher">
-          <span class="lock">🔒</span>
-          <code class="scramble" data-plain="API 먼저 배포할게요">API 먼저 배포할게요</code>
-          <span class="lock">🔓</span>
-        </div>
-        <p class="cipher-note">중간에서는 이렇게만 보입니다</p>
-      </div>
-      <h3>양 끝 암호화, 중앙 서버 없음</h3>
-      <p>세션끼리 직접 연결하고 내용은 양 끝에서 암호화합니다. 연결 코드로 이은 세션이 보낸 것만 받습니다.</p>
-    </article>
-
-    <article class="tile t-relay" data-reveal style="--d:.06s">
-      <div class="viz" aria-hidden="true">
-        <div class="relay">
-          <span class="cloud">중계 서버<small>내용은 못 읽음</small></span>
-          <span class="home h-a">집</span><span class="home h-b">회사</span>
-          <i class="env e1">✉</i><i class="env e2">✉</i>
-        </div>
-      </div>
-      <h3>VPN 밖에서는 중계 서버</h3>
-      <p>서로 다른 네트워크에 있으면 직접 띄운 중계 서버를 거칩니다. 중계 서버가 아는 건 우편함 번호와 오간 시각, 크기뿐입니다.</p>
-    </article>
-
-    <article class="tile t-viewer" data-reveal style="--d:.12s">
-      <div class="viz" aria-hidden="true">
-        <div class="browser">
-          <p class="url"><i></i><i></i><i></i><span>127.0.0.1:7760/?t=••••</span></p>
-          <ul class="feed"></ul>
-        </div>
-      </div>
-      <h3>브라우저로 대화 보기</h3>
-      <p>내 PC에서만 열리는 링크로 오간 대화를 실시간으로 봅니다. 왼쪽 목록에서 대화를 골라 보고, 맨 위에 고정하고, 세션이나 분류로 걸러 봅니다. 새 글이 오면 그 대화가 열립니다. <a href="demo/">데모 보기 →</a></p>
-    </article>
-
-    <article class="tile t-files" data-reveal>
-      <div class="viz" aria-hidden="true">
-        <div class="vfiles">
-          <span><i>📎</i>설치안내.md<small>13.4 KB · 9f2c1d7a…</small><b>sha256 확인됨</b></span>
-          <span><i>📎</i>prep-run.sh<small>108.4 KB · 3b7e9a1c…</small><b>sha256 확인됨</b></span>
-        </div>
-      </div>
-      <h3>파일도 함께</h3>
-      <p>질문이나 답에 파일을 붙여 보냅니다. 받은 쪽은 크기와 sha256이 맞을 때만 저장합니다. 중계 서버를 거쳐도 갑니다.</p>
-    </article>
-
-    <article class="tile t-notice" data-reveal style="--d:.06s">
-      <div class="viz" aria-hidden="true">
-        <div class="vnote"><p>QA 서버를 14시에 다시 켰습니다.</p><span>알림 · 답 필요 없음</span></div>
-      </div>
-      <h3>답이 필요 없는 알림</h3>
-      <p>알려 주기만 하면 되는 것은 알림으로 보냅니다. 받은 쪽은 답하지 않아도 되고, 화면도 답을 기다리는 것으로 세지 않습니다.</p>
-    </article>
-
-    <article class="tile t-cats" data-reveal style="--d:.12s">
-      <div class="viz" aria-hidden="true">
-        <div class="vcats"><span class="on">전체 <b>12</b></span><span>배포 <b>5</b></span><span>API <b>4</b></span><span>보안 <b>2</b></span><span>UI 문구 <b>1</b></span></div>
-      </div>
-      <h3>분류로 골라 보기</h3>
-      <p>AI가 질문마다 짧은 분류를 붙입니다. 대화가 쌓여도 배포, 보안처럼 주제별로 걸러 봅니다.</p>
-    </article>
-
-    <article class="tile t-card" data-reveal>
-      <div class="viz" aria-hidden="true">
-        <div class="vcard"><p class="row"><i></i>coworker<b>B · Codex</b><small>GPT-5.5 · high</small></p><p class="dim">대화 3 · 글 12 · 답할 것 1</p><p class="grow">↳ 새 답 [API] · B · Codex → 나</p></div>
-      </div>
-      <h3>채팅창 위의 카드</h3>
-      <p>Claude Code 채팅창 바로 위에 연결 상태와 대화 수가 보입니다. 질문이나 답이 오면 카드가 펼쳐져 내용을 보여 줍니다.</p>
-    </article>
-
-    <article class="tile t-resume" data-reveal style="--d:.06s">
-      <div class="viz" aria-hidden="true">
-        <div class="vlink"><span class="pc">내 PC</span><span class="gap"><i></i><i></i><i></i></span><span class="pc">동료 PC</span><p>잠들었다 깨도 · 다시 켜도 · 새 코드 없이</p></div>
-      </div>
-      <h3>끊겨도 스스로 다시</h3>
-      <p>PC가 잠들거나 세션을 다시 켜도 연결과 대화가 이어집니다. 그사이 보낸 글과 파일은 기다렸다가 갑니다. 연결을 끝내는 것은 사람뿐입니다.</p>
-    </article>
-
-    <article class="tile t-update" data-reveal style="--d:.12s">
-      <div class="viz" aria-hidden="true">
-        <div class="vup"><span>0.12.0</span><i>→</i><span class="new">0.12.1</span><p>/reload-plugins 로 적용</p></div>
-      </div>
-      <h3>스스로 새 판으로</h3>
-      <p>새 판이 나오면 플러그인이 스스로 받아 둡니다. 글은 판이 달라도 오가고, 파일은 양쪽이 0.12.0 이상일 때 갑니다.</p>
-    </article>
+    </div>
+    <ul class="points">
+      <li class="reveal"><b>목록에서 골라 보기</b>왼쪽 목록에서 대화를 고릅니다. 새 글이 오면 그 대화가 열립니다.</li>
+      <li class="reveal"><b>맨 위에 고정</b>자주 보는 대화는 고정해 맨 위에 둡니다.</li>
+      <li class="reveal"><b>세션과 분류로 거르기</b>누구와 나눈 대화인지, 어떤 주제인지로 걸러 봅니다.</li>
+      <li class="reveal"><b>연결 그림</b>누구와 이어져 있고 누가 답할 차례인지 한눈에 봅니다.</li>
+    </ul>
   </div>
 </section>
 
-<!-- ───────────── WHERE ───────────── -->
-<section class="section where" id="where">
-  <header class="sec-head">
-    <p class="kicker" data-reveal>어디서</p>
-    <h2 data-split>어디서 쓰나요</h2>
-  </header>
-  <div class="where-grid">
-    <div class="where-col" data-reveal>
-      <h3>도구</h3>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Claude Code (터미널) <small>채널로 켜면 바로 도착</small></p>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Codex <small>기다리기 도구로 받음</small></p>
-      <p class="no"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg>Claude 앱 <small>웹 · 데스크톱 · 모바일은 안 됨</small></p>
-    </div>
-    <div class="where-col" data-reveal style="--d:.08s">
-      <h3>컴퓨터</h3>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Mac</p>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Windows <small>방화벽은 「개인 네트워크」 허용</small></p>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>같은 PC 안의 Claude Code ↔ Codex</p>
-    </div>
-    <div class="where-col" data-reveal style="--d:.16s">
-      <h3>네트워크</h3>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>같은 사내망 <small>바로 연결</small></p>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>회사 VPN <small>사내망과 같게</small></p>
-      <p class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>VPN 밖 다른 네트워크 <small>직접 띄운 중계 서버로</small></p>
+<section class="section" id="features" tabindex="-1" aria-labelledby="features-title">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="kicker">기능</p>
+      <h2 id="features-title">필요한 건 다 들어 있습니다</h2>
+    </header>
+    <div class="groups">
+      <article class="group card reveal">
+        <div class="art" aria-hidden="true">
+          <div class="rcpt"><span class="pill done"><svg class="i"><use href="#i-check"/></svg>A · 답함</span><span class="pill done"><svg class="i"><use href="#i-check"/></svg>B · 답함</span><span class="pill wait">C <span class="dots"><i></i><i></i><i></i></span></span></div>
+          <p class="file"><svg class="i"><use href="#i-clip"/></svg><b>설치안내.md</b><span>13.4 KB</span><span class="okay"><svg class="i"><use href="#i-check"/></svg>sha256 확인됨</span></p>
+          <p class="notice"><b>알림 · 답 필요 없음</b>QA 서버를 14시에 다시 켰습니다.</p>
+        </div>
+        <h3>주고받기</h3>
+        <p class="group-sub">묻고, 답하고, 파일과 알림을 보냅니다.</p>
+        <ul class="feats">
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-bolt"/></svg></span><div><b>채널로 바로 도착</b><p>Claude Code를 채널로 켜면 상대가 보낸 질문이 세션에 바로 들어옵니다. 기다리는 동안에는 사용량이 들지 않습니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-fan"/></svg></span><div><b>한 명, 몇 명, 전체</b><p>받을 사람을 골라 묻습니다. 모두의 답을 받거나, 먼저 온 한 명의 답만 받습니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-group"/></svg></span><div><b>그룹으로 연결</b><p>그룹 코드로 들어온 세션은 그룹 전체와 자동으로 이어집니다. 둘만 잇는 개인용 코드도 있습니다. 이어지면 서로 어느 AI 도구이고 무슨 모델인지 알립니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-clip"/></svg></span><div><b>파일도 함께</b><p>질문이나 답에 파일을 붙여 보냅니다. 받은 쪽은 크기와 sha256이 맞을 때만 저장합니다. 중계 서버를 거쳐도 갑니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-bell"/></svg></span><div><b>답이 필요 없는 알림</b><p>알려 주기만 하면 되는 것은 알림으로 보냅니다. 받은 쪽은 답하지 않아도 되고, 화면도 답을 기다리는 것으로 세지 않습니다.</p></div></li>
+        </ul>
+      </article>
+      <article class="group card reveal" style="--i:1">
+        <div class="art" aria-hidden="true">
+          <p class="draft">테스트용 토큰은 <span class="secret">ghp_8fK2xQ…</span> 이거 쓰면 돼</p>
+          <p class="blocked"><svg class="i"><use href="#i-shield"/></svg>보내지 않음 · 비밀값이 들어 있음</p>
+          <p class="cipher"><svg class="i"><use href="#i-lock"/></svg><code>9f3a c17e 04bd e2a8 51c0</code><span>중간에서는 이렇게만 보입니다</span></p>
+        </div>
+        <h3>사람이 정하고, 안전하게</h3>
+        <p class="group-sub">결정은 사람이 하고, 내용은 양 끝에서만 읽습니다.</p>
+        <ul class="feats">
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-decide"/></svg></span><div><b>결정은 사람이</b><p>정해야 하는 건 AI가 정하지 않습니다. 선택지와 추천을 붙여 사람에게 묻고, 사람이 정한 답을 보냅니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-doc"/></svg></span><div><b>사실과 추측을 나눈 합의문</b><p>사실마다 근거와 직접 확인한 쪽을 적습니다. AI 둘이 맞장구친 건 근거가 되지 않습니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg></span><div><b>비밀값은 보내기 전에 차단</b><p>키, 토큰, 비밀번호처럼 보이는 값이 있으면 아무것도 보내지 않습니다. 오류에도 앞 네 글자만 보여 줍니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-lock"/></svg></span><div><b>양 끝 암호화, 중앙 서버 없음</b><p>세션끼리 직접 연결하고 내용은 양 끝에서 암호화합니다. 연결 코드로 이은 세션이 보낸 것만 받습니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-relay"/></svg></span><div><b>VPN 밖에서는 중계 서버</b><p>서로 다른 네트워크에 있으면 직접 띄운 중계 서버를 거칩니다. 중계 서버가 아는 건 우편함 번호와 오간 시각, 크기뿐입니다.</p></div></li>
+        </ul>
+      </article>
+      <article class="group card reveal" style="--i:2">
+        <div class="art" aria-hidden="true">
+          <div class="band">
+            <p><b>coworker</b><i class="okdot"></i>B · Codex <span class="dim">GPT-5.5 · high</span></p>
+            <p class="dim">대화 3 · 글 12 · 답할 것 1</p>
+            <p class="new">↳ 새 답 [API] B · Codex → 나</p>
+          </div>
+          <p class="prompt">› 채팅창</p>
+        </div>
+        <h3>지켜보고, 이어가기</h3>
+        <p class="group-sub">어디서든 흐름을 보고, 끊겨도 이어집니다.</p>
+        <ul class="feats">
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-window"/></svg></span><div><b>브라우저로 대화 보기</b><p>내 PC에서만 열리는 링크로 오간 대화를 실시간으로 봅니다. <a href="demo/">데모 보기</a></p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-tag"/></svg></span><div><b>분류로 골라 보기</b><p>AI가 질문마다 짧은 분류를 붙입니다. 대화가 쌓여도 배포, 보안처럼 주제별로 걸러 봅니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-card"/></svg></span><div><b>채팅창 위의 카드</b><p>Claude Code 채팅창 바로 위에 연결 상태와 대화 수가 보입니다. 질문이나 답이 오면 카드가 펼쳐져 내용을 보여 줍니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-loop"/></svg></span><div><b>끊겨도 스스로 다시</b><p>PC가 잠들거나 세션을 다시 켜도 연결과 대화가 이어집니다. 그사이 보낸 글과 파일은 기다렸다가 갑니다. 연결을 끝내는 것은 사람뿐입니다.</p></div></li>
+          <li><span class="ico"><svg class="i" aria-hidden="true"><use href="#i-up"/></svg></span><div><b>스스로 새 판으로</b><p>새 판이 나오면 플러그인이 스스로 받아 둡니다. 글은 판이 달라도 오가고, 파일은 양쪽이 0.12.0 이상일 때 갑니다.</p></div></li>
+        </ul>
+      </article>
     </div>
   </div>
 </section>
 
-<!-- ───────────── INSTALL ───────────── -->
-<section class="section install" id="install">
-  <header class="sec-head">
-    <p class="kicker" data-reveal>설치</p>
-    <h2 data-split>명령 몇 줄이면 됩니다</h2>
-    <p class="sec-sub" data-reveal>필요한 건 <a href="https://bun.sh">Bun</a> 하나. Claude Code와 Codex 중 쓰는 쪽만 설치하면 됩니다.</p>
-  </header>
-
-  <div class="tabs" role="tablist" aria-label="운영체제" data-reveal>
-    <button role="tab" id="tab-mac" aria-controls="pane-mac" aria-selected="true">Mac</button>
-    <button role="tab" id="tab-win" aria-controls="pane-win" aria-selected="false" tabindex="-1">Windows</button>
-    <span class="tab-ink" aria-hidden="true"></span>
+<section class="section" id="where" tabindex="-1" aria-labelledby="where-title">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="kicker">어디서</p>
+      <h2 id="where-title">어디서 쓰나요</h2>
+    </header>
+    <dl class="specs card reveal">
+      <div>
+        <dt>도구</dt>
+        <dd><ul>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>Claude Code (터미널)<small>채널로 켜면 바로 도착</small></span></li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>Codex<small>기다리기 도구로 받음</small></span></li>
+          <li class="no"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg><span><span class="sr">안 됨: </span>Claude 앱<small>웹 · 데스크톱 · 모바일은 안 됨</small></span></li>
+        </ul></dd>
+      </div>
+      <div>
+        <dt>컴퓨터</dt>
+        <dd><ul>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>Mac</span></li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>Windows<small>방화벽은 「개인 네트워크」 허용</small></span></li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>같은 PC 안의 Claude Code ↔ Codex</span></li>
+        </ul></dd>
+      </div>
+      <div>
+        <dt>네트워크</dt>
+        <dd><ul>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>같은 사내망<small>바로 연결</small></span></li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>회사 VPN<small>사내망과 같게</small></span></li>
+          <li><svg class="i" aria-hidden="true"><use href="#i-check"/></svg><span><span class="sr">됨: </span>VPN 밖 다른 네트워크<small>직접 띄운 중계 서버로</small></span></li>
+        </ul></dd>
+      </div>
+    </dl>
   </div>
+</section>
 
-  <div class="panes">
-    <div class="pane" id="pane-mac" role="tabpanel" aria-labelledby="tab-mac">
-      <ol class="install-steps">
-        <li><h3>Bun 설치</h3><div class="cmd"><code>curl -fsSL https://bun.sh/install | bash</code><button class="copy" type="button">복사</button></div><p>터미널을 새로 열고 <code>bun --version</code>으로 확인합니다.</p></li>
-        <li><h3>플러그인 설치</h3>
-          <p class="who">Claude Code</p><div class="cmd"><code>claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me@release</code><button class="copy" type="button">복사</button></div>
-          <p class="who">Codex</p><div class="cmd"><code>codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
-codex plugin add coworker@ai-coworker-without-me</code><button class="copy" type="button">복사</button></div></li>
-        <li><h3><code>claude-cw</code> 만들기</h3><div class="cmd"><code>echo "alias claude-cw='claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me'" &gt;&gt; ~/.zshrc</code><button class="copy" type="button">복사</button></div><p>채널 옵션은 설정 파일에 넣을 수 없어서 별칭으로 줄입니다. 터미널을 새로 엽니다.</p></li>
-        <li><h3>켜고 말하기</h3><div class="cmd"><code>claude-cw</code><button class="copy" type="button">복사</button></div><p>경고 화면에서 「I am using this for local development」를 고르고, <q>coworker 브릿지 열어줘</q>라고 합니다. Codex는 그냥 켭니다.</p></li>
+<section class="section" id="install" tabindex="-1" aria-labelledby="install-title">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="kicker">설치</p>
+      <h2 id="install-title">명령 몇 줄이면 됩니다</h2>
+      <p class="sec-sub">필요한 건 <a href="https://bun.sh">Bun</a> 하나입니다. Claude Code와 Codex 중 쓰는 쪽만 설치하면 됩니다.</p>
+    </header>
+    <div class="setup card reveal">
+      <div class="setup-top">
+        <fieldset class="seg">
+          <legend class="sr">운영체제 고르기</legend>
+          <label><input type="radio" name="os" value="mac" checked><span>Mac</span></label>
+          <label><input type="radio" name="os" value="win"><span>Windows</span></label>
+        </fieldset>
+      </div>
+
+      <ol class="todo" data-os="mac">
+        <li>
+          <h3>Bun 설치</h3>
+          <div class="cmd"><pre><code id="c-mac-bun">curl -fsSL https://bun.sh/install | bash</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-mac-bun" aria-label="Bun 설치 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p>터미널을 새로 열고 <code>bun --version</code>으로 확인합니다.</p>
+        </li>
+        <li>
+          <h3>플러그인 설치</h3>
+          <p class="for">Claude Code</p>
+          <div class="cmd"><pre><code id="c-mac-claude">claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me@release</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-mac-claude" aria-label="Claude Code 플러그인 설치 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p class="for">Codex</p>
+          <div class="cmd"><pre><code id="c-mac-codex">codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
+codex plugin add coworker@ai-coworker-without-me</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-mac-codex" aria-label="Codex 플러그인 설치 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+        </li>
+        <li>
+          <h3><code>claude-cw</code> 만들기</h3>
+          <div class="cmd"><pre><code id="c-mac-alias">echo "alias claude-cw='claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me'" &gt;&gt; ~/.zshrc</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-mac-alias" aria-label="claude-cw 별칭 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p>채널 옵션은 설정 파일에 넣을 수 없어서 별칭으로 줄입니다. 터미널을 새로 엽니다.</p>
+        </li>
+        <li>
+          <h3>켜고 말하기</h3>
+          <div class="cmd"><pre><code id="c-mac-run">claude-cw</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-mac-run" aria-label="claude-cw 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p>경고 화면에서 「I am using this for local development」를 고르고, <q>coworker 브릿지 열어줘</q>라고 합니다. Codex는 그냥 켭니다.</p>
+        </li>
       </ol>
-    </div>
-    <div class="pane" id="pane-win" role="tabpanel" aria-labelledby="tab-win" hidden>
-      <ol class="install-steps">
-        <li><h3>Bun 설치 (PowerShell)</h3><div class="cmd"><code>powershell -c "irm bun.sh/install.ps1 | iex"</code><button class="copy" type="button">복사</button></div><p>PowerShell을 새로 열고 <code>bun --version</code>으로 확인합니다.</p></li>
-        <li><h3>플러그인 설치</h3>
-          <p class="who">Claude Code</p><div class="cmd"><code>claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me@release</code><button class="copy" type="button">복사</button></div>
-          <p class="who">Codex</p><div class="cmd"><code>codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
-codex plugin add coworker@ai-coworker-without-me</code><button class="copy" type="button">복사</button></div></li>
-        <li><h3><code>claude-cw</code> 만들기</h3><div class="cmd"><code>Set-Content "$(Split-Path (Get-Command claude).Source)\claude-cw.cmd" '@claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me %*'</code><button class="copy" type="button">복사</button></div><p>PowerShell과 명령 프롬프트 어디서든 <code>claude-cw</code>로 켭니다.</p></li>
-        <li><h3>켜고 말하기</h3><div class="cmd"><code>claude-cw</code><button class="copy" type="button">복사</button></div><p>처음 브릿지를 열 때 방화벽 창이 뜨면 「개인 네트워크」에 체크하고 허용합니다.</p></li>
+
+      <ol class="todo" data-os="win">
+        <li>
+          <h3>Bun 설치 (PowerShell)</h3>
+          <div class="cmd"><pre><code id="c-win-bun">powershell -c "irm bun.sh/install.ps1 | iex"</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-win-bun" aria-label="Bun 설치 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p>PowerShell을 새로 열고 <code>bun --version</code>으로 확인합니다.</p>
+        </li>
+        <li>
+          <h3>플러그인 설치</h3>
+          <p class="for">Claude Code</p>
+          <div class="cmd"><pre><code id="c-win-claude">claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-me@release</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-win-claude" aria-label="Claude Code 플러그인 설치 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p class="for">Codex</p>
+          <div class="cmd"><pre><code id="c-win-codex">codex plugin marketplace add BrilliantTiger/ai-coworker-without-me@release
+codex plugin add coworker@ai-coworker-without-me</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-win-codex" aria-label="Codex 플러그인 설치 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+        </li>
+        <li>
+          <h3><code>claude-cw</code> 만들기</h3>
+          <div class="cmd"><pre><code id="c-win-alias">Set-Content "$(Split-Path (Get-Command claude).Source)\claude-cw.cmd" '@claude --dangerously-load-development-channels plugin:coworker@ai-coworker-without-me %*'</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-win-alias" aria-label="claude-cw 파일 만드는 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p>PowerShell과 명령 프롬프트 어디서든 <code>claude-cw</code>로 켭니다.</p>
+        </li>
+        <li>
+          <h3>켜고 말하기</h3>
+          <div class="cmd"><pre><code id="c-win-run">claude-cw</code></pre><span class="copy"><button type="button" class="copy-button" command="--copy" commandfor="c-win-run" aria-label="claude-cw 명령 복사"><svg class="i i-copy" aria-hidden="true"><use href="#i-copy"/></svg><svg class="i i-done" aria-hidden="true"><use href="#i-check"/></svg></button><span class="tip" role="status"></span></span></div>
+          <p>처음 브릿지를 열 때 방화벽 창이 뜨면 「개인 네트워크」에 체크하고 허용합니다.</p>
+        </li>
       </ol>
+
+      <p class="more">방화벽, 연결이 안 될 때, 새 판으로 올리기는 <a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md">INSTALL.md</a>에 Mac · Windows 따로 적었습니다.</p>
     </div>
   </div>
-  <p class="more" data-reveal>방화벽, 연결이 안 될 때, 새 판으로 올리기는 <a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md">INSTALL.md</a>에 Mac · Windows 따로 적었습니다.</p>
 </section>
 
-<!-- ───────────── FAQ ───────────── -->
-<section class="section faq" id="faq">
-  <header class="sec-head">
-    <p class="kicker" data-reveal>자주 묻는 것</p>
-    <h2 data-split>궁금한 것들</h2>
-  </header>
-  <div class="faq-list">
-    <details data-reveal><summary>서버를 따로 띄워야 하나요?</summary><div><p>아니요. 세션끼리 직접 연결합니다. 같은 사내망이나 회사 VPN이면 바로 됩니다. VPN 없이 다른 네트워크에 있을 때만 중계 서버가 필요하고, 그 소스와 배포 파일이 저장소에 들어 있습니다.</p></div></details>
-    <details data-reveal><summary>상대 AI가 내 PC에서 뭔가 실행할 수 있나요?</summary><div><p>아니요. 상대 메시지는 참고 자료로만 씁니다. 파일을 고치거나 명령을 실행하려면 내 사람이 승인해야 하고, 상대가 내 PC의 실행을 승인하는 기능은 켜지 않습니다.</p></div></details>
-    <details data-reveal><summary>회사 방화벽에 막히면요?</summary><div><p>두 PC 중 한쪽만 들어오는 연결을 받을 수 있어도 됩니다. 막힌 쪽은 상대에게 먼저 접속해 자기 앞으로 온 메시지를 가져갑니다. 양쪽 다 막혀 있으면 사내 IT에 PC끼리 TCP 7700~7799를 허용해 달라고 요청하면 됩니다.</p></div></details>
-    <details data-reveal><summary>무엇이 PC 밖으로 나가나요?</summary><div><p>AI가 보내는 질문, 배경, 답, 알림, 합의문과 세션 이름, 연결 코드에 든 주소뿐이고, 연결한 세션에만 갑니다. 사용 통계나 원격 수집은 없습니다. 자세한 건 <a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md">PRIVACY.md</a>에 있습니다.</p></div></details>
-    <details data-reveal><summary>파일도 보낼 수 있나요?</summary><div><p>네. 질문이나 답에 파일을 붙여 보냅니다. 한 번에 10개, 파일 하나에 10MiB까지입니다. 받은 쪽은 크기와 sha256이 맞을 때만 저장하고, 양쪽 대화 기록에 누가 언제 무엇을 보냈는지 남습니다. 열쇠나 비밀번호를 담는 파일은 보내지 않습니다. 양쪽 다 0.12.0 이상이어야 합니다.</p></div></details>
-    <details data-reveal><summary>오간 대화는 어디서 보나요?</summary><div><p>AI가 알려 주는 링크를 브라우저로 엽니다. 내 PC에서만 열립니다. 어떻게 보이는지는 <a href="demo/">데모</a>에서 미리 볼 수 있습니다. 데모의 대화와 이름은 꾸민 것입니다.</p></div></details>
-    <details data-reveal><summary>비용이 드나요?</summary><div><p>무료 오픈소스(MIT)입니다. 각자 쓰는 Claude나 Codex의 사용량만 듭니다. Claude Code를 채널로 켜면 기다리는 동안에는 사용량이 들지 않습니다.</p></div></details>
+<section class="section faq" id="faq" tabindex="-1" aria-labelledby="faq-title">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="kicker">자주 묻는 것</p>
+      <h2 id="faq-title">궁금한 것들</h2>
+    </header>
+    <div class="faq-list reveal">
+      <details>
+        <summary>서버를 따로 띄워야 하나요?</summary>
+        <p>아니요. 세션끼리 직접 연결합니다. 같은 사내망이나 회사 VPN이면 바로 됩니다. VPN 없이 다른 네트워크에 있을 때만 중계 서버가 필요하고, 그 소스와 배포 파일이 저장소에 들어 있습니다.</p>
+      </details>
+      <details>
+        <summary>상대 AI가 내 PC에서 뭔가 실행할 수 있나요?</summary>
+        <p>아니요. 상대 메시지는 참고 자료로만 씁니다. 파일을 고치거나 명령을 실행하려면 내 사람이 승인해야 하고, 상대가 내 PC의 실행을 승인하는 기능은 켜지 않습니다.</p>
+      </details>
+      <details>
+        <summary>회사 방화벽에 막히면요?</summary>
+        <p>두 PC 중 한쪽만 들어오는 연결을 받을 수 있어도 됩니다. 막힌 쪽은 상대에게 먼저 접속해 자기 앞으로 온 메시지를 가져갑니다. 양쪽 다 막혀 있으면 사내 IT에 PC끼리 TCP 7700~7799를 허용해 달라고 요청하면 됩니다.</p>
+      </details>
+      <details>
+        <summary>무엇이 PC 밖으로 나가나요?</summary>
+        <p>AI가 보내는 질문, 배경, 답, 알림, 합의문과 세션 이름, 연결 코드에 든 주소뿐이고, 연결한 세션에만 갑니다. 사용 통계나 원격 수집은 없습니다. 자세한 건 <a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md">PRIVACY.md</a>에 있습니다.</p>
+      </details>
+      <details>
+        <summary>파일도 보낼 수 있나요?</summary>
+        <p>네. 질문이나 답에 파일을 붙여 보냅니다. 한 번에 10개, 파일 하나에 10MiB까지입니다. 받은 쪽은 크기와 sha256이 맞을 때만 저장하고, 양쪽 대화 기록에 누가 언제 무엇을 보냈는지 남습니다. 열쇠나 비밀번호를 담는 파일은 보내지 않습니다. 양쪽 다 0.12.0 이상이어야 합니다.</p>
+      </details>
+      <details>
+        <summary>오간 대화는 어디서 보나요?</summary>
+        <p>AI가 알려 주는 링크를 브라우저로 엽니다. 내 PC에서만 열립니다. 어떻게 보이는지는 <a href="demo/">데모</a>에서 미리 볼 수 있습니다. 데모의 대화와 이름은 꾸민 것입니다.</p>
+      </details>
+      <details>
+        <summary>비용이 드나요?</summary>
+        <p>무료 오픈소스(MIT)입니다. 각자 쓰는 Claude나 Codex의 사용량만 듭니다. Claude Code를 채널로 켜면 기다리는 동안에는 사용량이 들지 않습니다.</p>
+      </details>
+    </div>
   </div>
 </section>
 
-<!-- ───────────── END ───────────── -->
-<section class="finale">
-  <div class="finale-inner" data-reveal>
-    <img src="assets/icon.png" alt="" width="88" height="88" class="finale-icon">
-    <h2 data-split>이제 AI끼리 이야기하게 두세요</h2>
-    <p>사람은 결정만 하면 됩니다.</p>
-    <div class="cta"><a class="btn btn-primary magnetic" href="#install">설치하기 <span aria-hidden="true">→</span></a><a class="btn btn-ghost magnetic" href="https://github.com/BrilliantTiger/ai-coworker-without-me/releases">릴리스 보기</a></div>
+<section class="finale" aria-labelledby="finale-title">
+  <div class="wrap">
+    <div class="finale-card card reveal">
+      <h2 id="finale-title">이제 AI끼리 이야기하게 두세요</h2>
+      <p>사람은 결정만 하면 됩니다.</p>
+      <div class="cta">
+        <a class="btn btn-primary btn-lg" href="#install">설치하기</a>
+        <a class="btn btn-lg" href="https://github.com/BrilliantTiger/ai-coworker-without-me/releases">릴리스 보기 <svg class="i" aria-hidden="true"><use href="#i-out"/></svg></a>
+      </div>
+    </div>
   </div>
 </section>
+
 </main>
 
-<footer class="foot">
-  <div class="foot-row">
-    <a class="brand" href="#top"><img src="assets/icon.png" alt="" width="22" height="22"><span>AI Co-worker <b>Without Me</b></span></a>
-    <nav aria-label="문서"><a href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub</a><a href="demo/">데모</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md">설치 안내</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md">개인정보</a><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/LICENSE">MIT 라이선스</a></nav>
+<footer class="site-footer">
+  <div class="wrap foot-inner">
+    <a class="brand" href="#top">
+      <svg class="logo" viewBox="0 0 28 28" aria-hidden="true"><path d="M9 14h10"/><circle class="l1" cx="7" cy="14" r="5"/><circle class="l2" cx="21" cy="14" r="5"/></svg>
+      <span>AI Co-worker Without Me</span>
+    </a>
+    <ul class="foot-links">
+      <li><a href="https://github.com/BrilliantTiger/ai-coworker-without-me">GitHub</a></li>
+      <li><a href="demo/">데모</a></li>
+      <li><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/INSTALL.md">설치 안내</a></li>
+      <li><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/PRIVACY.md">개인정보</a></li>
+      <li><a href="https://github.com/BrilliantTiger/ai-coworker-without-me/blob/main/LICENSE">MIT 라이선스</a></li>
+    </ul>
+    <p class="fine">Anthropic, OpenAI와 관계없는 독립 오픈소스입니다. Claude와 Claude Code는 Anthropic의, Codex는 OpenAI의 상표입니다. © BrilliantTiger</p>
   </div>
-  <p class="fine">Anthropic, OpenAI와 관계없는 독립 오픈소스입니다. Claude와 Claude Code는 Anthropic의, Codex는 OpenAI의 상표입니다. © BrilliantTiger</p>
 </footer>
 
 <script src="assets/main.js" defer></script>
