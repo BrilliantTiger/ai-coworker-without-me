@@ -7,7 +7,8 @@ import { PAGE } from '../src/page'
 // 사람에게 확인하고, 합의문을 쓰는 것까지 차례로 흘려보낸 뒤 처음부터 되풀이한다.
 //   bun scripts/viewer-demo.ts [포트]
 
-type Message = { id: string; from: 'me' | 'peer'; kind: string; text: string; context?: string; human?: boolean; noAnswer?: boolean; at: string }
+type FileNote = { id: string; name: string; size: number; sha256: string; path?: string; ok?: boolean; problem?: string }
+type Message = { id: string; from: 'me' | 'peer'; kind: string; text: string; context?: string; human?: boolean; noAnswer?: boolean; files?: FileNote[]; at: string }
 type Conversation = {
   id: string
   peer: string
@@ -153,7 +154,16 @@ const steps: [number, () => void][] = [
         category: '배포',
         startedBy: 'peer',
         status: 'your_turn',
-        messages: [message('peer', 'question', '배포 공지를 사내 게시판에 올렸습니다. 같은 내용을 두 번 올리지 않도록 그쪽에서는 따로 올리지 않으셔도 됩니다.', { noAnswer: true })],
+        // 파일이 붙은 글. 받은 파일은 저장한 자리와 확인 결과가 보인다.
+        messages: [
+          message('peer', 'question', '배포 공지를 사내 게시판에 올렸습니다. 같은 내용을 두 번 올리지 않도록 그쪽에서는 따로 올리지 않으셔도 됩니다. 공지문과 점검표를 붙입니다.', {
+            noAnswer: true,
+            files: [
+              { id: 'f1', name: '배포공지_1118.md', size: 13_730, sha256: '9f2c1d7a4be05c3381f6a0d2e4b7c9015a6e3f8d2b4c7e1a9d0f3b5c6e8a1d47', path: '~/.coworker/files/abcd1234/received/t5/배포공지_1118.md', ok: true },
+              { id: 'f2', name: '점검표.xlsx', size: 111_026, sha256: '3b7e9a1c5d2f4086b9c1e3a5d7f9021b4c6e8a0d2f4b6c8e0a1c3e5f7092b4d6', ok: false, problem: 'sha256' },
+            ],
+          }),
+        ],
       })
       state.unread = ['t5']
     },

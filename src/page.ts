@@ -268,6 +268,15 @@ button.sess:hover { background: var(--soft); }
 .dir { font-weight: 500; color: var(--muted); }
 .time { color: var(--muted); font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; margin-left: auto; }
 .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 3px; }
+/* 글에 붙은 파일: 이름, 온전히 받았는지, 크기와 sha256 */
+.files { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.file { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1px 8px; align-items: center; padding: 6px 10px; border-radius: 9px; background: color-mix(in srgb, var(--card) 60%, transparent); border: 1px solid color-mix(in srgb, var(--b) 22%, transparent); font-size: 12.5px; }
+.file svg { width: 14px; height: 14px; fill: none; stroke: var(--b); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.fname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fstate { font-size: 11.5px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.file.good .fstate { color: var(--ok); }
+.file.bad .fstate { color: var(--warn); }
+.fmeta { grid-column: 2 / 4; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 details { margin-top: 6px; font-size: 13px; color: var(--muted); }
 summary { cursor: pointer; width: fit-content; }
 details .text { color: var(--text); }
@@ -882,6 +891,39 @@ function makeCard(id) {
   item.addEventListener('click', () => activate(id, true))
   return v
 }
+// 글에 붙은 파일. 이름, 크기, sha256 앞부분, 그리고 온전히 받았는지를 보인다. 받은 파일에는 저장한 자리도 적는다.
+// 보낸 파일은 상대가 받아서 확인하면 표시가 바뀐다. 그래서 글을 그릴 때마다 달라졌는지 본다.
+const FILE_WHY = { incomplete: '다 오지 않음', size: '크기가 다름', sha256: 'sha256이 다름', limit: '크기 한도를 넘음', no_folder: '저장할 폴더가 없음' }
+const CLIP_PATH = 'M13.2 7.4l-5 5a3 3 0 0 1-4.3-4.3l5.3-5.3a2 2 0 0 1 2.9 2.9l-5.3 5.3a1 1 0 0 1-1.5-1.5l4.9-4.9'
+function howBig(n) {
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+function syncFiles(li, m) {
+  const files = Array.isArray(m.files) ? m.files : [], sig = files.length ? JSON.stringify(files) : ''
+  if ((li.dataset.files || '') === sig) return
+  li.dataset.files = sig
+  if (li.files) li.files.remove()
+  li.files = null
+  if (!files.length) return
+  const box = el('ul', 'files'), mine = m.from === 'me', SVG = 'http://www.w3.org/2000/svg'
+  for (const f of files) {
+    const row = el('li', 'file' + (f.ok === true ? ' good' : f.ok === false ? ' bad' : ''))
+    const clip = document.createElementNS(SVG, 'svg'), path = document.createElementNS(SVG, 'path')
+    clip.setAttribute('viewBox', '0 0 16 16')
+    clip.setAttribute('aria-hidden', 'true')
+    path.setAttribute('d', CLIP_PATH)
+    clip.append(path)
+    const state = f.ok === true ? (mine ? '상대가 받아서 확인함' : '저장함 · sha256 확인됨') : f.ok === false ? (mine ? '상대가 받지 못함 · ' : '받지 못함 · ') + (FILE_WHY[f.problem] || '확인 실패') : mine ? '보냄 · 확인 기다리는 중' : ''
+    const where = !mine && f.path ? ' · ' + f.path : ''
+    row.append(clip, el('span', 'fname', String(f.name)), el('span', 'fstate', state), el('span', 'fmeta', howBig(Number(f.size) || 0) + ' · sha256 ' + String(f.sha256).slice(0, 16) + '…' + where))
+    row.title = 'sha256 ' + f.sha256 + (f.path ? ' · ' + f.path : '')
+    box.append(row)
+  }
+  li.firstChild.append(box)
+  li.files = box
+}
 function bubble(c, m, everyone) {
   const cls = m.kind === 'agreement' ? 'agreement' : m.kind === 'note' || m.kind === 'closed' ? 'note' : m.from === 'me' ? 'mine' : 'peer'
   const li = el('li', 'msg ' + cls), b = el('div', 'bubble'), who = el('div', 'who'), at = el('time', 'time', shortTime(m.at))
@@ -1034,6 +1076,7 @@ function paint(v, room, live, index, news) {
       v.msgs.insertBefore(node, after)
       if (live) news.unshift({ c: it.c, m: it.m, v, node })
     }
+    syncFiles(node, it.m)
     after = node
   }
 }

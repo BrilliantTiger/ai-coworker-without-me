@@ -1,13 +1,13 @@
-import { randomUUID } from 'node:crypto'
-import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, extname, join } from 'node:path'
 import type { Server } from 'bun'
 import { isAgreement, renderAgreement, type Agreement } from './agreement'
 import { decodeCode, encodeCode } from './code'
 import { fromB64, newKeyPair, open, randomToken, ReplayGuard, seal, toB64, type KeyPair, type Sealed } from './crypto'
 import { hostForUrl, localAddresses } from './net'
 import { boxOf } from './box'
-import { assertNoSecrets } from './secrets'
+import { assertNoSecrets, findSecrets, type Found } from './secrets'
 import { LinkLog, MAX_LOG_LINES, type LogEntry } from './linklog'
 
 // 사내 방화벽에 열어 달라고 요청하기 쉽게 정해 둔 범위.
@@ -77,6 +77,8 @@ export type Peer = {
   key: string
   name: string
   about?: About
+  // 그 세션의 판이 할 수 있는 것(예: files). 인사에 적어 온 것만 있다. 옛 판은 적지 않는다.
+  can?: string[]
   addrs: string[]
   port: number
   lastAddr?: string
@@ -121,6 +123,62 @@ export type AnswerMode = 'all' | 'one'
 export type AskInfo = { id: string; to: string[]; answers: AnswerMode }
 export const EVERYONE = ['everyone', 'all']
 
+// 파일 주고받기(2026-11-17, 사람이 정함: 「coworker 로 파일을 주고받을 수 있게」, 「중계서버도 가능하게」).
+// 파일은 조각으로 나눠 글과 같은 길(바로, 중계 서버, 상대가 가져가기)로 보낸다. 조각 하나가 중계 서버와 브릿지의 요청 한도(1 MiB)에 들어간다.
+// 조각을 먼저 보내고 글을 뒤에 보낸다. 받은 쪽은 글이 닿을 때 크기와 sha256 을 견주고, 맞으면 받은 자리에 저장한다.
+export const FILE_CHUNK = 256 * 1024
+export const MAX_FILE_BYTES = 10 * 1024 * 1024
+export const MAX_FILES = 10
+export const MAX_FILES_BYTES = 30 * 1024 * 1024
+// 상대가 가져갈 때 한 번에 넘기는 양. 중계 서버의 답 한도(1 MiB) 안에 들어가게 한다.
+const BATCH_BYTES = 600 * 1024
+// 이 판이 할 수 있는 것. 인사에 적어 보낸다. 상대가 파일을 받을 줄 아는지 이것으로 안다.
+const CAN = ['files']
+const cleanCan = (value: unknown) => (Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && v.length <= 20).slice(0, 20) : undefined)
+// 파일이 온전히 오지 못한 까닭.
+export type FileProblem = 'incomplete' | 'size' | 'sha256' | 'limit' | 'no_folder'
+export const FILE_PROBLEM: Record<FileProblem, string> = {
+  incomplete: 'the file did not arrive completely',
+  size: 'the size differs from what the sender said',
+  sha256: 'the sha256 differs from what the sender said',
+  limit: 'the files of this message are over the size limit',
+  no_folder: 'this session has no folder to save files in',
+}
+// 글에 붙은 파일의 기록. 누가 언제 보냈는지는 그 글(from, at)에 있다.
+export type FileNote = {
+  id: string
+  name: string
+  size: number
+  sha256: string
+  // 보낸 쪽에서는 보낸 파일의 원래 자리, 받은 쪽에서는 저장한 자리.
+  path?: string
+  // 받은 쪽: 크기와 sha256 이 보낸 쪽이 적은 것과 같았다. 보낸 쪽: 상대가 그렇게 확인했다고 알려 왔다. 아직 모르면 없다.
+  ok?: boolean
+  problem?: FileProblem
+}
+type WireFile = { id: string; name: string; size: number; sha256: string }
+const FILE_ID = /^[A-Za-z0-9-]{8,64}$/
+const SHA256 = /^[0-9a-f]{64}$/
+// 열쇠나 비밀번호를 담는 파일의 이름. 이런 파일은 보내지 않는다.
+const SECRET_FILE = /^(?:\.env(?:\..*)?|\.netrc|\.npmrc|\.pypirc|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|.*\.(?:pem|key|p12|pfx|jks|keystore|kdbx))$/i
+// 받은 파일의 이름에서 폴더와 제어 글자를 뺀다. 숨김 파일이 되지 않게 앞의 점도 뺀다. 상대가 적어 보낸 이름은 믿지 않는다.
+export function safeFileName(name: unknown): string {
+  const base = String(name ?? '').split(/[\\/]/).pop() ?? ''
+  const clean = base
+    .replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_')
+    .replace(/^\.+/, '')
+    .trim()
+    .slice(0, 150)
+  return clean || 'file'
+}
+// 같은 이름이 이미 있으면 덮어쓰지 않고 이름 뒤에 번호를 붙인다.
+function freePath(folder: string, name: string) {
+  const ext = extname(name), stem = name.slice(0, name.length - ext.length)
+  let path = join(folder, name)
+  for (let n = 2; existsSync(path); n++) path = join(folder, `${stem} (${n})${ext}`)
+  return path
+}
+
 export type ThreadMessage = {
   id: string
   from: 'me' | 'peer'
@@ -132,6 +190,8 @@ export type ThreadMessage = {
   human?: boolean
   // 답이 필요 없는 알림으로 보낸 질문(2026-11-16). 받은 쪽은 답하지 않아도 되고, 답해도 된다.
   noAnswer?: boolean
+  // 글에 붙여 보내거나 받은 파일.
+  files?: FileNote[]
   at: string
 }
 
@@ -196,6 +256,8 @@ export type BridgeEvent =
       no_answer_needed?: boolean
       // 그 대화에 붙은 분류.
       category?: string
+      // 글에 붙어 온 파일. verified: 크기와 sha256 이 보낸 쪽이 적은 것과 같아서 saved_to 에 저장했다. 아니면 problem 에 까닭이 있고 저장하지 않았다.
+      files?: { name: string; size: number; sha256: string; saved_to?: string; verified: boolean; problem?: string }[]
       at: string
     }
   | { type: 'peer_closed'; peer: string; at: string }
@@ -248,6 +310,8 @@ type WireMessage = {
   noAnswer?: boolean
   // 질문에 붙인 분류. 대화의 첫 글에만 쓴다.
   category?: string
+  // 글에 붙인 파일. 내용은 이 글보다 먼저 조각(file)으로 간다. 이 항목을 모르는 옛 판에는 보내지 않는다.
+  files?: WireFile[]
   at: string
 }
 
@@ -301,14 +365,14 @@ export type AgreementInput = {
 // 이미 이어진 상대도 주소나 포트가 바뀌면 hello 로 알린다. back 은 그 상대가 다시 켜져 돌아왔다는 뜻이다.
 type Payload =
   // rejoin: 받는 쪽이 보내는 쪽을 잊었다가 다시 붙을 때 들고 올 토큰. 보내는 쪽이 받는 쪽 키에만 쓰이게 만들어 건넨다.
-  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean; rejoin?: string; about?: About }
-  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean; rejoin?: string; about?: About }
+  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean; rejoin?: string; about?: About; can?: string[] }
+  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean; rejoin?: string; about?: About; can?: string[] }
   | { type: 'introduce'; member: Member }
   | { type: 'msg'; msg: WireMessage }
   | { type: 'ok' }
   | { type: 'ping' }
   // waiting: 받는 쪽이 이 상대와의 대화에서 자기 사람에게 묻는 중인 것. 0.7 이하 판은 보내지 않는다.
-  | { type: 'pong'; waiting?: WaitState[] }
+  | { type: 'pong'; waiting?: WaitState[]; can?: string[] }
   | { type: 'bye' }
   | { type: 'poll'; wait: number; ack?: string[] }
   | { type: 'batch'; items: { id: string; payload: Payload }[] }
@@ -318,6 +382,17 @@ type Payload =
   // 끊긴 까닭을 함께 보려고 상대의 연결 기록 가운데 이쪽에 관한 줄을 달라고 한다. 메시지 내용은 기록에 없다.
   | { type: 'log_request'; lines?: number }
   | { type: 'log'; entries: LogEntry[] }
+  // 파일 조각. seq 번째이고 모두 of 개다. data 는 base64 다. 줄에 서 있는 동안에는 data 가 없고, 보낼 때 사본에서 읽어 붙인다.
+  | { type: 'file'; id: string; seq: number; of: number; size: number; data?: string }
+  // 파일이 붙은 글을 받은 쪽이, 파일마다 크기와 sha256 이 맞았는지 알려 준다.
+  | { type: 'receipt'; thread: string; msg: string; files: { id: string; ok: boolean; problem?: string }[] }
+
+// 글에 붙여 보내는 파일의 이름표. 내용은 조각으로 따로 간다.
+const wireFiles = (files: FileNote[]) => (files.length ? { files: files.map(({ id, name, size, sha256 }) => ({ id, name, size, sha256 })) } : {})
+// 보내기 도구가 AI에게 돌려주는 파일 목록.
+const sentFiles = (files: FileNote[]) => (files.length ? { files: files.map(({ name, size, sha256 }) => ({ name, size, sha256 })) } : {})
+// 받은 파일을 AI에게 알리는 모양.
+const seenFile = (f: FileNote) => ({ name: f.name, size: f.size, sha256: f.sha256, ...(f.path ? { saved_to: f.path } : {}), verified: f.ok === true, ...(f.problem ? { problem: FILE_PROBLEM[f.problem] } : {}) })
 
 // 상대가 가져간 뒤 「받았다」고 알려 와야 줄에서 지운다. 가져가던 연결이 끊겨도 다음에 다시 넘긴다.
 export type Outgoing = { id: string; peer: string; payload: Payload; thread?: string; since: number }
@@ -473,7 +548,7 @@ const isoOf = (ms: number | undefined) => (ms ? new Date(ms).toISOString() : und
 // 기억해 두는 「쓴 코드」와 「끝난 연결」의 수.
 const MAX_USED = 500
 const MAX_ENDED = 20
-const savedPeer = (p: Peer) => ({ key: p.key, name: p.name, about: p.about, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given })
+const savedPeer = (p: Peer) => ({ key: p.key, name: p.name, about: p.about, can: p.can, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given })
 // 이 PC가 잠들었다고 보는 시계의 빈틈. 5초마다 재는데 이만큼 넘게 비면 그동안 멈춰 있었다.
 const TICK_MS = 5000
 const PAUSE_MS = 30_000
@@ -582,6 +657,7 @@ export class Bridge {
         key: p.key,
         name: p.name,
         about: cleanAbout(p.about),
+        can: cleanCan((p as { can?: unknown }).can),
         addrs: p.addrs,
         port: p.port,
         private: p.private || undefined,
@@ -792,22 +868,27 @@ export class Bridge {
   }
 
   // 한 세션에 묻는다. 대화 하나가 생긴다.
-  async ask(to: string | undefined, question: string, context?: string) {
+  // files: 글에 붙여 보낼 파일의 경로. reviewed: 파일 안의 비밀번호처럼 보이는 곳을 사람이 보고 진짜가 아니라고 했다.
+  async ask(to: string | undefined, question: string, context?: string, files?: string[], reviewed = false) {
     const peer = await this.resolvePeer(to)
-    return this.sendQuestion(peer, question, context)
+    if (files?.length) await this.assertTakesFiles([peer])
+    return this.sendQuestion(peer, question, context, undefined, false, undefined, this.stage(files, reviewed))
   }
 
   // to 가 여러 명이나 everyone 이면 받는 사람마다 대화를 하나씩 만들고 같은 ask 로 묶는다. 한 명이면 ask 와 같다.
   // noAnswer: 답이 필요 없는 알림으로 보낸다. 받은 쪽은 답하지 않아도 되고, 답해도 된다.
   // category: 사람이 골라 볼 수 있게 붙이는 짧은 분류.
-  async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all', noAnswer = false, category?: string) {
+  async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all', noAnswer = false, category?: string, files?: string[], reviewed = false) {
     const peers = await this.resolvePeers(to)
-    if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context, undefined, noAnswer, category)
+    // 파일은 아무에게도 보내기 전에 모두 확인한다. 받는 사람마다 사본을 따로 둔다(한 사람에게 다 가면 그 사본만 지운다).
+    if (files?.length) await this.assertTakesFiles(peers)
+    const staged = peers.map(() => this.stage(files, reviewed))
+    if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context, undefined, noAnswer, category, staged[0])
     const ask: AskInfo = { id: randomUUID().slice(0, 8), to: peers.map(p => p.name), answers }
     const sent = await Promise.all(
-      peers.map(peer =>
+      peers.map((peer, i) =>
         // 한 곳이 거절해도 나머지는 보낸다.
-        this.sendQuestion(peer, question, context, ask, noAnswer, category).catch(e => ({
+        this.sendQuestion(peer, question, context, ask, noAnswer, category, staged[i]).catch(e => ({
           thread: undefined,
           to: peer.name,
           delivery: 'refused' as const,
@@ -818,7 +899,7 @@ export class Bridge {
     return { ask: ask.id, answers, to: ask.to, sent }
   }
 
-  private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false, category?: string) {
+  private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false, category?: string, files: FileNote[] = []) {
     assertNoSecrets({ question, context, category })
     const label = cleanCategory(category)
     const thread: Thread = {
@@ -836,12 +917,15 @@ export class Bridge {
     this.threads.set(thread.id, thread)
     // 표시하지 않고 글에 답이 필요 없다고만 적어도 알림으로 보낸다.
     const notice = noAnswer || saysNoAnswer(question) ? { noAnswer: true } : {}
-    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, ...notice, category: label, at: now() }
-    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, ...notice, at: msg.at })
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, ...notice, category: label, ...wireFiles(files), at: now() }
+    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, ...notice, ...(files.length ? { files } : {}), at: msg.at })
     this.changed()
     try {
-      return { thread: thread.id, to: peer.name, delivery: await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) }
+      return { thread: thread.id, to: peer.name, delivery: await this.sendMessage(peer, msg, thread.id), ...sentFiles(files) }
     } catch (e) {
+      // 보내다 만 파일 조각과 사본도 함께 치운다.
+      this.outbox = this.outbox.filter(o => o.thread !== thread.id)
+      this.unspool({ type: 'msg', msg })
       this.threads.delete(thread.id)
       this.changed()
       throw e
@@ -849,21 +933,23 @@ export class Bridge {
   }
 
   // human: 사람이 정한 답이다. 합의문이 「사람이 정할 것」으로 남긴 것은 합의문을 쓴 뒤에도 사람이 정해 보낼 수 있다.
-  async reply(threadId: string, text: string, opts: { human?: boolean } = {}) {
+  async reply(threadId: string, text: string, opts: { human?: boolean; files?: string[]; reviewed?: boolean } = {}) {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     if (!(opts.human && thread.status === 'agreed')) this.assertOpen(thread)
     assertNoSecrets({ answer: text })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
+    if (opts.files?.length) await this.assertTakesFiles([peer])
+    const files = this.stage(opts.files, opts.reviewed)
     const human = opts.human ? { human: true } : {}
-    const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, ...human, at: now() }
-    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, ...human, at: msg.at })
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, ...human, ...wireFiles(files), at: now() }
+    thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, ...human, ...(files.length ? { files } : {}), at: msg.at })
     // 상대가 자기 사람에게 묻는 중에 이쪽이 재촉해도, 상대는 여전히 사람의 결정을 기다린다.
     if (thread.status !== 'agreed' && !(thread.status === 'peer_checking_with_their_human' && thread.humanSince)) thread.status = 'waiting_for_peer'
     this.changed()
-    const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
-    return { thread: thread.id, to: peer.name, delivery, status: thread.status }
+    const delivery = await this.sendMessage(peer, msg, thread.id)
+    return { thread: thread.id, to: peer.name, delivery, status: thread.status, ...sentFiles(files) }
   }
 
   // 결정이 필요해 이쪽 사람에게 묻는 동안, 상대가 막연히 기다리지 않게 알린다.
@@ -1064,6 +1150,12 @@ export class Bridge {
       if (this.forget) rmSync(this.opts.saveTo, { force: true })
       else this.save()
     }
+    // 사람이 브릿지를 닫았으면 보내려고 둔 사본과 받다 만 조각을 지운다. 받은 파일은 사람의 것이라 남긴다.
+    if (this.forget)
+      for (const kind of ['out', 'partial'] as const) {
+        const dir = this.filesDir(kind)
+        if (dir) rmSync(dir, { recursive: true, force: true })
+      }
     if (this.forget) this.keptRelaySecret = undefined
     this.forget = false
     this.abort.abort()
@@ -1148,14 +1240,14 @@ export class Bridge {
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
-      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), about: cleanAbout(payload.about), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined }
+      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), about: cleanAbout(payload.about), can: cleanCan(payload.can), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined }
       // 그룹 코드로 들어왔으면, 이쪽 그룹의 다른 세션과 서로 소개한다. 소개받아 온 세션은 더 퍼뜨리지 않는다.
       const members = token && !token.private ? this.groupPeers().filter(p => p.key !== from) : []
       for (const m of members) void this.sendOrQueue(m, { type: 'introduce', member: memberOf(added) }).catch(() => {})
       const rejoin = this.rejoinFor(added)
       const again = !!token && 'again' in token
       this.addPeer(added, { emit: true, via: invited ? invite!.by : undefined, again, how: invited ? 'introduced' : again ? 'came back with its token' : 'code' })
-      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about })
+      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about, can: CAN })
     }
 
     // 상대에게서 무엇이든 왔으면 상대는 깨어 있다. 다시 붙기를 기다리던 중이면 바로 다시 붙어 본다.
@@ -1166,6 +1258,7 @@ export class Bridge {
       peer.lastPollAt = Date.now()
       const acked = new Set(Array.isArray(payload.ack) ? payload.ack : [])
       if (acked.size) {
+        for (const o of this.outbox) if (o.peer === peer.key && acked.has(o.id)) this.unspool(o.payload)
         this.outbox = this.outbox.filter(o => !(o.peer === peer.key && acked.has(o.id)))
         this.dirty()
       }
@@ -1252,15 +1345,15 @@ export class Bridge {
     if (hello.back) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
     else this.changed()
     void this.flush()
-    this.learn(peer, hello.about)
-    return { type: 'hello_ack', name: this.name, rejoin: this.rejoinFor(peer), about: this.about }
+    this.learn(peer, hello.about, hello.can)
+    return { type: 'hello_ack', name: this.name, rejoin: this.rejoinFor(peer), about: this.about, can: CAN }
   }
 
   // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
   private process(peer: Peer, payload: Payload): Payload | null {
     switch (payload.type) {
       case 'ping':
-        return { type: 'pong', waiting: this.waitingFor(peer) }
+        return { type: 'pong', waiting: this.waitingFor(peer), can: CAN }
       case 'msg':
         this.receive(peer, payload.msg)
         return { type: 'ok' }
@@ -1271,11 +1364,17 @@ export class Bridge {
         if (!isHelloFields(payload)) return null
         peer.addrs = payload.addrs
         peer.port = payload.port
-        this.learn(peer, payload.about)
-        return { type: 'hello_ack', name: this.name, about: this.about }
+        this.learn(peer, payload.about, payload.can)
+        return { type: 'hello_ack', name: this.name, about: this.about, can: CAN }
       case 'introduce':
         // 개인용 코드로 이어진 상대가 소개하는 세션은 받지 않는다.
         if (!peer.private) this.invite(payload.member, peer.name)
+        return { type: 'ok' }
+      case 'file':
+        this.takeChunk(peer, payload)
+        return { type: 'ok' }
+      case 'receipt':
+        this.takeReceipt(peer, payload)
         return { type: 'ok' }
       case 'log_request':
         // 이 상대에 관한 줄과 이 PC 전체에 관한 줄만 준다. 다른 상대에 관한 줄은 주지 않는다.
@@ -1375,6 +1474,7 @@ export class Bridge {
     this.log.write('ended', { id: peerId(peer.key), peer: peer.name, by: 'the other side\'s human (close_bridge)' })
     // 사람이 끝낸 연결이다. 그 상대가 들고 있는 토큰으로는 다시 들어오지 못한다. 다시 이으려면 새 코드가 있어야 한다.
     for (const [token, u] of this.used) if (u.key === peer.key) this.used.delete(token)
+    for (const o of this.outbox) if (o.peer === peer.key) this.unspool(o.payload)
     this.outbox = this.outbox.filter(o => o.peer !== peer.key)
     this.wakeRetry(peer.key)
     const id = peerId(peer.key)
@@ -1424,7 +1524,20 @@ export class Bridge {
 
   // 상대가 가져가러 왔을 때: 아직 「받았다」를 못 들은 것을 순서대로 넘기고, 없으면 새로 생길 때까지 붙잡아 둔다.
   private async pending(key: string, waitMs: number): Promise<{ id: string; payload: Payload }[]> {
-    const take = () => this.outbox.filter(o => o.peer === key).map(o => ({ id: o.id, payload: o.payload }))
+    // 파일 조각은 내용을 붙여 넘긴다. 한 번에 넘기는 양이 중계 서버의 답 한도를 넘지 않게 끊는다. 남은 것은 다음에 가져간다.
+    const take = () => {
+      const out: { id: string; payload: Payload }[] = []
+      let bytes = 0
+      for (const o of this.outbox) {
+        if (o.peer !== key) continue
+        const payload = this.withData(o.payload)
+        const size = JSON.stringify(payload).length
+        if (out.length && bytes + size > BATCH_BYTES) break
+        out.push({ id: o.id, payload })
+        bytes += size
+      }
+      return out
+    }
     const ready = take()
     if (ready.length || waitMs === 0 || !this.server) return ready
     await new Promise<void>(resolve => {
@@ -1530,7 +1643,10 @@ export class Bridge {
     const human = msg.human === true ? { human: true } : {}
     // 표시 없이 글로만 답이 필요 없다고 적어 보낸 알림도 알아본다(옛 판, 또는 표시를 잊은 AI).
     const notice = msg.kind === 'question' && (msg.noAnswer === true || saysNoAnswer(msg.text))
-    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, ...human, ...(notice ? { noAnswer: true } : {}), at: now() })
+    const files = this.collect(peer, thread, msg.files)
+    thread.messages.push({ id: msg.id, from: 'peer', kind: msg.kind, text, context, agreement, ...human, ...(notice ? { noAnswer: true } : {}), ...(files ? { files } : {}), at: now() })
+    // 파일마다 크기와 sha256 이 맞았는지 보낸 쪽에 알린다.
+    if (files) void this.sendOrQueue(peer, { type: 'receipt', thread: thread.id, msg: msg.id, files: files.map(f => ({ id: f.id, ok: f.ok === true, problem: f.problem })) }, thread.id).catch(() => {})
     // 이미 마감한 질문에 늦게 온 답은 남기기만 하고, 마감 상태는 그대로 둔다.
     if (thread.status === 'closed' || msg.kind === 'closed') thread.status = 'closed'
     else if (agreement) thread.status = 'agreed'
@@ -1550,7 +1666,7 @@ export class Bridge {
       if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer.name, thread.id)
       ask = this.askProgress(thread.ask)
     }
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...human, ...(notice ? { no_answer_needed: true } : {}), ...(thread.category ? { category: thread.category } : {}), at: now() })
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...(files ? { files: files.map(seenFile) } : {}), ...human, ...(notice ? { no_answer_needed: true } : {}), ...(thread.category ? { category: thread.category } : {}), at: now() })
   }
 
   private peerAsksHuman(thread: Thread, inText: boolean) {
@@ -1848,8 +1964,8 @@ export class Bridge {
 
   // 인사한다. 상대가 이쪽을 잊으면 들고 올 토큰을 함께 건네고, 상대가 건넨 토큰은 받아 둔다.
   private async sayHello(peer: Peer, extra: { token?: string; back?: boolean } = {}) {
-    const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, ...extra })
-    if (reply.type === 'hello_ack') this.learn(peer, reply.about)
+    const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, can: CAN, ...extra })
+    if (reply.type === 'hello_ack') this.learn(peer, reply.about, reply.can)
     if (reply.type === 'hello_ack' && isToken(reply.rejoin)) {
       peer.token = reply.rejoin
       if (this.peers.has(peer.key)) this.dirty()
@@ -1858,10 +1974,11 @@ export class Bridge {
   }
 
   // 상대가 인사에 적어 보낸 자기 소개를 기억한다. 달라졌으면 화면에도 알린다.
-  private learn(peer: Peer, about: unknown) {
-    const next = cleanAbout(about)
-    if (JSON.stringify(next) === JSON.stringify(peer.about)) return
+  private learn(peer: Peer, about: unknown, can?: unknown) {
+    const next = cleanAbout(about), skills = cleanCan(can)
+    if (JSON.stringify(next) === JSON.stringify(peer.about) && JSON.stringify(skills) === JSON.stringify(peer.can)) return
     peer.about = next
+    peer.can = skills
     if (this.peers.has(peer.key)) this.changed()
   }
 
@@ -1887,6 +2004,185 @@ export class Bridge {
     }
     if (changed) this.changed()
     return changed
+  }
+
+  // 파일을 두는 자리. 보내려고 둔 사본(out), 받는 중인 조각(partial), 받은 파일(received). 세션마다 따로다.
+  private filesDir(kind: 'out' | 'partial' | 'received') {
+    return this.opts.home ? join(this.opts.home, 'files', this.route, kind) : undefined
+  }
+
+  // 파일을 받을 줄 아는 상대인지 본다. 모르면 한 번 물어본다(상대가 그사이 새 판으로 올렸을 수 있다).
+  private async assertTakesFiles(peers: Peer[]) {
+    for (const peer of peers) {
+      if (peer.can?.includes('files')) continue
+      try {
+        const pong = await this.deliver(peer, { type: 'ping' })
+        if (pong.type === 'pong') this.learn(peer, peer.about, pong.can)
+      } catch {}
+      if (!peer.can?.includes('files'))
+        throw new Error(`nothing was sent: ${peer.name} cannot receive files. It runs a coworker version older than 0.12.0, or it has not answered since it was updated. Ask its human to update coworker and try again, or send the content another way`)
+    }
+  }
+
+  // 보낼 파일을 확인하고 이 세션의 보낼 자리에 사본을 둔다. 사본이 있어서, 상대가 꺼져 있다가 돌아와도 처음 확인한 그 내용이 간다.
+  private stage(paths: string[] | undefined, reviewed = false): FileNote[] {
+    if (!paths?.length) return []
+    const dir = this.filesDir('out')
+    if (!dir) throw new Error('nothing was sent: this session has no folder to keep files in')
+    const unique = [...new Set(paths)]
+    if (unique.length > MAX_FILES) throw new Error(`nothing was sent: one message takes at most ${MAX_FILES} files`)
+    const read = unique.map(path => {
+      const name = basename(path)
+      if (SECRET_FILE.test(name)) throw new Error(`nothing was sent: ${name} looks like a file that holds keys or passwords. Humans share secrets their own way, never through coworker`)
+      let bytes: Buffer
+      try {
+        const stat = statSync(path)
+        if (!stat.isFile()) throw new Error('not a file')
+        if (stat.size > MAX_FILE_BYTES) throw new RangeError()
+        bytes = readFileSync(path)
+      } catch (e) {
+        if (e instanceof RangeError) throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`)
+        throw new Error(`nothing was sent: cannot read the file ${path}. Give the full path of a file on this PC`)
+      }
+      if (bytes.length > MAX_FILE_BYTES) throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`)
+      return { path, name: safeFileName(name), bytes }
+    })
+    if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES) throw new Error(`nothing was sent: the files are larger than ${MAX_FILES_BYTES >> 20} MiB together, the most one message can carry`)
+    // 글로 된 파일은 글과 같은 눈으로 본다. 0 바이트가 섞였거나 2 MiB 를 넘으면 글로 보지 않는다.
+    const texts: Record<string, string> = {}
+    for (const f of read) if (f.bytes.length <= 2 * 1024 * 1024 && !f.bytes.subarray(0, 8192).includes(0)) texts[`the file ${f.name}`] = f.bytes.toString('utf8')
+    const found = findSecrets(texts)
+    const list = (items: Found[]) => [...new Set(items.map(f => `${f.kind} in ${f.field} ("${f.preview}")`))].slice(0, 12).join(', ')
+    // 모양이 정해진 열쇠와 토큰은 사람이 뭐라 해도 보내지 않는다.
+    const sure = found.filter(f => f.kind !== 'password or secret')
+    if (sure.length) throw new Error(`nothing was sent: a file contains a secret (${list(sure)}). Humans share secrets their own way, never through coworker`)
+    // 「password = 값」 꼴은 스크립트와 설정 파일에 흔하다. 진짜 비밀값이 아닐 때가 많아서, 사람이 보고 아니라고 하면 보낸다.
+    const maybe = found.filter(f => f.kind === 'password or secret')
+    if (maybe.length && !reviewed)
+      throw new Error(
+        `nothing was sent: a file may contain a password or secret (${list(maybe)}). Scripts and settings files often look like this without holding a real secret. Show these places to your human. If your human says none of them is a real secret, send again with files_reviewed_by_human: true`,
+      )
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    return read.map(f => {
+      const id = randomUUID()
+      writeFileSync(join(dir, id), f.bytes, { mode: 0o600 })
+      return { id, name: f.name, size: f.bytes.length, sha256: createHash('sha256').update(f.bytes).digest('hex'), path: f.path }
+    })
+  }
+
+  // 파일 조각을 먼저 보내고 글을 뒤에 보낸다. 한 줄에 순서대로 서므로, 글이 닿을 때는 파일이 이미 가 있다.
+  private async sendMessage(peer: Peer, msg: WireMessage, thread: string) {
+    let queued = false
+    for (const f of msg.files ?? []) {
+      const of = Math.max(1, Math.ceil(f.size / FILE_CHUNK))
+      for (let seq = 0; seq < of; seq++) if ((await this.sendOrQueue(peer, { type: 'file', id: f.id, seq, of, size: f.size }, thread, !queued)) === 'queued') queued = true
+    }
+    return this.sendOrQueue(peer, { type: 'msg', msg }, thread, !queued)
+  }
+
+  // 줄에 서 있는 파일 조각에는 내용이 없다. 보낼 때 사본에서 그 조각을 읽어 붙인다.
+  private withData(payload: Payload): Payload {
+    if (payload.type !== 'file' || payload.data !== undefined) return payload
+    const dir = this.filesDir('out')
+    let data = ''
+    try {
+      const fd = openSync(join(dir!, payload.id), 'r')
+      try {
+        const buf = Buffer.alloc(FILE_CHUNK)
+        data = buf.subarray(0, readSync(fd, buf, 0, FILE_CHUNK, payload.seq * FILE_CHUNK)).toString('base64')
+      } finally {
+        closeSync(fd)
+      }
+    } catch {}
+    return { ...payload, data }
+  }
+
+  // 글이 상대에게 넘어갔거나 버려졌으면, 그 글에 붙여 보내려고 둔 사본을 지운다.
+  private unspool(payload: Payload) {
+    if (payload.type !== 'msg' || !payload.msg.files?.length) return
+    const dir = this.filesDir('out')
+    if (dir) for (const f of payload.msg.files) rmSync(join(dir, f.id), { force: true })
+  }
+
+  // 파일 조각을 받아 이어 붙인다. 조각마다 자리가 정해져 있어서, 같은 조각이 다시 와도 한 번만 붙는다.
+  // 받다 만 것이 얼마나 있는지는 파일 크기로 안다. 그래서 이 세션이 다시 켜져도 이어서 받는다.
+  private takeChunk(peer: Peer, p: Extract<Payload, { type: 'file' }>) {
+    const dir = this.filesDir('partial')
+    if (!dir || typeof p.id !== 'string' || !FILE_ID.test(p.id) || typeof p.data !== 'string') return
+    if (!Number.isInteger(p.size) || p.size < 0 || p.size > MAX_FILE_BYTES) return
+    const of = Math.max(1, Math.ceil(p.size / FILE_CHUNK))
+    if (!Number.isInteger(p.seq) || p.seq < 0 || p.seq >= of || p.of !== of) return
+    const bytes = Buffer.from(p.data, 'base64')
+    // 마지막 조각만 짧다. 길이가 다르면 받지 않는다.
+    if (bytes.length !== (p.seq < of - 1 ? FILE_CHUNK : p.size - FILE_CHUNK * (of - 1))) return
+    const prefix = `${peerId(peer.key)}-`, path = join(dir, prefix + p.id)
+    try {
+      if (p.seq === 0) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 })
+        // 한 상대가 받다 만 조각을 끝없이 쌓지 못하게 한다. 하루 넘게 묵은 것은 치운다.
+        const mine = readdirSync(dir).filter(n => n.startsWith(prefix))
+        for (const n of mine) if (Date.now() - statSync(join(dir, n)).mtimeMs > 24 * 60 * 60_000) rmSync(join(dir, n), { force: true })
+        if (!existsSync(path) && readdirSync(dir).filter(n => n.startsWith(prefix)).length >= MAX_FILES * 2) return
+        writeFileSync(path, bytes, { mode: 0o600 })
+      } else if (existsSync(path) && statSync(path).size === p.seq * FILE_CHUNK) appendFileSync(path, bytes)
+    } catch {}
+  }
+
+  // 글에 붙어 온 파일을 확인하고 받은 자리로 옮긴다. 크기와 sha256 이 보낸 쪽이 적은 것과 같아야 받은 것으로 친다.
+  // 아니면 받다 만 것을 지우고 까닭을 적는다. 상대가 적어 보낸 이름과 대화 번호는 폴더 이름으로 쓰기 전에 다듬는다.
+  private collect(peer: Peer, thread: Thread, sent: unknown): FileNote[] | undefined {
+    if (!Array.isArray(sent) || !sent.length) return undefined
+    const partial = this.filesDir('partial'), received = this.filesDir('received')
+    let total = 0
+    const notes = sent.slice(0, MAX_FILES).flatMap((f: Partial<WireFile> | null): FileNote[] => {
+      if (!f || typeof f.id !== 'string' || !FILE_ID.test(f.id) || typeof f.name !== 'string' || !Number.isInteger(f.size) || f.size! < 0 || typeof f.sha256 !== 'string' || !SHA256.test(f.sha256)) return []
+      const note: FileNote = { id: f.id, name: safeFileName(f.name), size: f.size!, sha256: f.sha256 }
+      const from = partial ? join(partial, `${peerId(peer.key)}-${f.id}`) : undefined
+      const fail = (problem: FileProblem): FileNote[] => {
+        if (from) rmSync(from, { force: true })
+        return [{ ...note, ok: false, problem }]
+      }
+      if (!from || !received) return fail('no_folder')
+      total += note.size
+      if (note.size > MAX_FILE_BYTES || total > MAX_FILES_BYTES) return fail('limit')
+      let size = -1
+      try {
+        size = statSync(from).size
+      } catch {}
+      if (size < note.size) return fail('incomplete')
+      if (size > note.size) return fail('size')
+      try {
+        if (createHash('sha256').update(readFileSync(from)).digest('hex') !== note.sha256) return fail('sha256')
+        const folder = join(received, safeFileName(thread.id).slice(0, 64))
+        mkdirSync(folder, { recursive: true, mode: 0o700 })
+        const to = freePath(folder, note.name)
+        renameSync(from, to)
+        chmodSync(to, 0o600)
+        return [{ ...note, name: basename(to), path: to, ok: true }]
+      } catch {
+        return fail('no_folder')
+      }
+    })
+    return notes.length ? notes : undefined
+  }
+
+  // 보낸 파일을 상대가 받아서 확인한 결과. 대화 기록에 적고, 온전히 가지 못한 것이 있으면 AI에게 알린다.
+  private takeReceipt(peer: Peer, r: Extract<Payload, { type: 'receipt' }>) {
+    const thread = typeof r.thread === 'string' ? this.threads.get(r.thread) : undefined
+    if (!thread || thread.peer !== peer.key || !Array.isArray(r.files)) return
+    const message = thread.messages.find(m => m.id === r.msg && m.from === 'me')
+    if (!message?.files) return
+    const failed: string[] = []
+    for (const got of r.files) {
+      const note = message.files.find(f => f.id === got?.id)
+      if (!note || note.ok !== undefined) continue
+      note.ok = got.ok === true
+      if (note.ok) continue
+      note.problem = typeof got.problem === 'string' && got.problem in FILE_PROBLEM ? (got.problem as FileProblem) : 'incomplete'
+      failed.push(`${note.name} (${FILE_PROBLEM[note.problem]})`)
+    }
+    this.changed()
+    if (failed.length) this.emit({ type: 'undelivered', to: peer.name, thread: thread.id, reason: `the message arrived, but these files did not arrive intact: ${failed.join(', ')}. Send them again`, at: now() })
   }
 
   // 이 PC 쪽 일을 기록한다: 잠들었다 깸(시계가 비었다), 주소가 바뀜(다른 네트워크로 옮김).
@@ -1993,7 +2289,7 @@ export class Bridge {
 
   // 주소를 앞에서부터 하나씩 시도한다. 상대 키로 봉인된 답이 와야 닿은 것으로 본다.
   private async deliver(peer: Peer, payload: Payload): Promise<Payload> {
-    const body = JSON.stringify(seal(payload, fromB64(peer.key), this.keys))
+    const body = JSON.stringify(seal(this.withData(payload), fromB64(peer.key), this.keys))
     const addrs = [...new Set([...(peer.lastAddr ? [peer.lastAddr] : []), ...peer.addrs])]
     let refused = false
     for (const addr of addrs) {
@@ -2059,7 +2355,8 @@ export class Bridge {
     }
   }
 
-  private async sendOrQueue(peer: Peer, payload: Payload, thread?: string): Promise<'delivered' | 'queued'> {
+  // patient: 상대가 가져가는 중이면 가져갈 때까지 잠깐 기다려 본다. 파일 조각이 이미 줄에 섰으면 뒤의 것은 기다리지 않고 줄만 세운다.
+  private async sendOrQueue(peer: Peer, payload: Payload, thread?: string, patient = true): Promise<'delivered' | 'queued'> {
     // 앞에 밀린 것이 있으면 순서를 지키려고 뒤에 줄 세운다.
     // 바로 못 보내는 상대가 스스로 가져가는 중이면, 바로 보내기는 건너뛴다.
     const skipDirect = peer.directFailed && this.isPulling(peer)
@@ -2067,6 +2364,7 @@ export class Bridge {
       try {
         await this.deliver(peer, payload)
         peer.directFailed = false
+        this.unspool(payload)
         return 'delivered'
       } catch (e) {
         // 닿지 않거나 상대가 이쪽을 모른다고 해도 버리지 않는다. 줄에 세워 두고, 다시 붙으면 순서대로 보낸다.
@@ -2074,9 +2372,10 @@ export class Bridge {
         if (e instanceof DeliveryError && e.reason === 'rejected') void this.rejoin(peer)
       }
     }
-    if (this.isPulling(peer)) return (await this.handOver(peer, payload, 3000, thread)) ? 'delivered' : 'queued'
+    if (this.isPulling(peer) && patient) return (await this.handOver(peer, payload, 3000, thread)) ? 'delivered' : 'queued'
     this.outbox.push({ id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() })
     this.dirty()
+    this.wakePoll(peer.key)
     return 'queued'
   }
 
@@ -2090,6 +2389,7 @@ export class Bridge {
         const peer = this.peers.get(item.peer)
         const drop = (reason: string) => {
           this.log.write('undelivered', { id: peerId(item.peer), reason })
+          this.unspool(item.payload)
           this.outbox = this.outbox.filter(o => o !== item)
           this.emit({ type: 'undelivered', to: peer?.name ?? 'disconnected session', thread: item.thread, reason, at: now() })
         }
@@ -2104,6 +2404,7 @@ export class Bridge {
         }
         try {
           await this.deliver(peer, item.payload)
+          this.unspool(item.payload)
           this.outbox = this.outbox.filter(o => o !== item)
           this.dirty()
         } catch (e) {

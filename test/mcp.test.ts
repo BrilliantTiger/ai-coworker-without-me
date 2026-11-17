@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ElicitRequestSchema, type ElicitRequest, type ElicitResult } from '@modelcontextprotocol/sdk/types.js'
@@ -83,6 +83,27 @@ test('a Claude Code session and a Codex session talk through the tools', async (
   const plain = await codex('send_question', { question: 'QA 서버를 14시에 다시 켰습니다. (답 필요 없습니다)' })
   expect(plain.next).toContain('do not wait for an answer')
   expect((await claude('wait_for_message', { timeout_sec: 5 })).events[0]).toMatchObject({ type: 'message', kind: 'question', thread: plain.thread, no_answer_needed: true })
+
+  // 파일을 붙여 보낸다. 보낸 AI는 이름과 크기와 sha256 을, 받은 AI는 저장한 자리와 확인 결과를 본다.
+  const attach = join(home, 'bundle-note.md')
+  writeFileSync(attach, '# bundle\n')
+  const withFile = await codex('send_question', { question: 'Here is the note for the bundle.', files: [attach] })
+  // 견주기 전에 값을 꺼내 둔다(견주는 함수가 견준 자리를 바꿔 놓는다).
+  const sha256: string = withFile.files[0].sha256
+  expect(sha256).toMatch(/^[0-9a-f]{64}$/)
+  expect(withFile).toMatchObject({ delivery: 'delivered', files: [{ name: 'bundle-note.md', size: 9, sha256 }] })
+  expect(withFile.next).toContain('which files went')
+  const arrived = (await claude('wait_for_message', { timeout_sec: 5 })).events[0]
+  const savedTo: string = arrived.files[0].saved_to
+  expect(savedTo).toStartWith(join(home, 'files'))
+  expect(arrived).toMatchObject({ type: 'message', thread: withFile.thread, files: [{ name: 'bundle-note.md', size: 9, sha256, verified: true, saved_to: savedTo }] })
+  expect(readFileSync(savedTo, 'utf8')).toBe('# bundle\n')
+  // 주고받은 파일은 양쪽 대화 기록에 남는다: 누가, 언제, 이름, sha256.
+  expect((await claude('read_conversation', { thread: arrived.thread })).messages[0]).toMatchObject({ from: 'peer', at: expect.any(String), files: [{ name: 'bundle-note.md', sha256, ok: true }] })
+  for (let i = 0; i < 40 && (await codex('read_conversation', { thread: withFile.thread })).messages[0].files[0].ok !== true; i++) await Bun.sleep(50)
+  expect((await codex('read_conversation', { thread: withFile.thread })).messages[0]).toMatchObject({ from: 'me', files: [{ name: 'bundle-note.md', sha256, ok: true }] })
+  // 전체 경로가 아니면 보내지 않는다.
+  await expect(codex('send_question', { question: 'With a relative path.', files: ['bundle-note.md'] })).rejects.toThrow('full path')
 
   expect((await codex('inbox')).conversations[0]).toMatchObject({ id: asked.thread, status: 'your_turn', messages: 2 })
 
