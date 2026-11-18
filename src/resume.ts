@@ -1,11 +1,18 @@
 import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-import { isSavedBridge, routeId, type SavedBridge } from './bridge'
+import { join, resolve } from 'node:path'
+import { isSavedBridge, pathInside, routeId, type SavedBridge } from './bridge'
 
 // 다시 켠 세션이 되살릴 브릿지 상태는 ~/.coworker/sessions/<이름표>.json 에 있다.
 // 사람이 close_bridge 로 닫을 때만 지운다. 시간이 지났다고 지우지 않는다(사람이 정함, 2026-11-10).
 
-export const savedPath = (home: string, id: string) => join(home, 'sessions', `${id.replace(/[^A-Za-z0-9._-]/g, '_')}.json`)
+export function savedPath(home: string, id: string): string {
+  const dir = join(resolve(home), 'sessions')
+  const stem = String(id ?? '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^\.+/, '')
+    .slice(0, 120) || 'session'
+  return pathInside(dir, `${stem}.json`) ?? join(dir, 'session.json')
+}
 
 export function readSaved(path: string): SavedBridge | undefined {
   try {
@@ -51,16 +58,19 @@ export async function findSession(home: string, id: string | undefined): Promise
 
 // 이 PC에 저장된 브릿지. 새 세션이 앞 세션의 브릿지를 이어받을 때 고른다. 최근에 저장한 것부터.
 export function listSaved(home: string): { id: string; saved: SavedBridge }[] {
+  const dir = join(resolve(home), 'sessions')
   let names: string[]
   try {
-    names = readdirSync(join(home, 'sessions'))
+    names = readdirSync(dir)
   } catch {
     return []
   }
   const found: { id: string; saved: SavedBridge }[] = []
   for (const name of names) {
     if (!name.endsWith('.json')) continue
-    const saved = readSaved(join(home, 'sessions', name))
+    const path = pathInside(dir, name)
+    if (!path) continue
+    const saved = readSaved(path)
     if (saved) found.push({ id: name.slice(0, -'.json'.length), saved })
   }
   return found.sort((a, b) => b.saved.savedAt.localeCompare(a.saved.savedAt))
@@ -82,7 +92,7 @@ export async function waitUntilStopped(saved: SavedBridge) {
 
 // 저장하다 멈춘 프로세스가 남긴 임시 파일만 지운다. 상태 파일은 건드리지 않는다.
 export function pruneSaved(home: string) {
-  const dir = join(home, 'sessions')
+  const dir = join(resolve(home), 'sessions')
   let names: string[]
   try {
     names = readdirSync(dir)
@@ -90,7 +100,8 @@ export function pruneSaved(home: string) {
     return
   }
   for (const name of names) {
-    const path = join(dir, name)
+    const path = pathInside(dir, name)
+    if (!path) continue
     try {
       if (name.endsWith('.tmp') && Date.now() - statSync(path).mtimeMs > 60_000) rmSync(path, { force: true })
     } catch {}
