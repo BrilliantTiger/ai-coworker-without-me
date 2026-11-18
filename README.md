@@ -455,7 +455,7 @@ bun test
 - Linux와 macOS에서는 모든 시험이 통과한다.
 - Windows에서는 시험 둘이 아직 통과하지 못한다. `test/known.ts`의 표시를 붙여 두었고 까닭은 시험마다 적혀 있다. 하나(`failsOnWindows`)는 Windows에서 실패해야 통과로 쳐서, 고쳐지면 검사가 실패해 표시를 떼라고 알려 준다. 시간 초과로 끝나는 하나(`skippedOnWindows`)는 Windows에서 건너뛴다. 표시하지 않은 시험이 실패하면 검사가 실패한다.
 - GitHub의 공용 컴퓨터는 느려서, 자동 검사에서는 시험 하나에 5초 대신 20초를 준다(`bun test --timeout=20000`).
-- 시간에 따라 흔들리는 것이 확인된 시험 넷에는 `test/known.ts`의 `unsteady` 표시를 붙였다: 「two sessions the group introduced each get back in when the other forgot」, 「open_bridge makes codes that last 60 minutes…」, 「questions that piled up before the restart wake the AI…」, 「an answer that only says the decision went to a human…」. 이 넷만 자동 검사에서 실패하면 두 번까지 다시 해 보고, 세 번 내리 실패하면 검사가 실패한다. 틀린 것도, 제 시간을 넘긴 것도 실패로 센다: 다시 해 보기는 시험 도구의 기능(`--retry`)이 아니라 표시가 직접 한다. 시험 도구(bun 1.4.4)의 다시 해 보기는 번번이 시간을 넘긴 시험을 통과로 세기 때문에 어디에도 쓰지 않는다(`test/known.test.ts`가 지킨다). 다른 시험은 한 번 실패하면 검사가 실패한다. 내 PC에서 `bun test`는 어느 시험도 다시 해 보지 않는다.
+- 시간에 따라 흔들리는 것이 확인된 시험 넷에는 `test/known.ts`의 `unsteady` 표시를 붙였다: 「two sessions the group introduced each get back in when the other forgot」, 「open_bridge makes codes that last 60 minutes…」, 「questions that piled up before the restart wake the AI…」, 「an answer that only says the decision went to a human…」. 이 넷만 자동 검사에서 실패하면 두 번까지 다시 해 보고, 세 번 내리 실패하면 검사가 실패한다. 틀린 것도, 제 시간을 넘긴 것도 실패로 센다: 다시 해 보기는 시험 도구의 기능(`--retry`)이 아니라 표시가 직접 한다. 시험 도구(bun 1.4.4)의 다시 해 보기는 번번이 시간을 넘긴 시험을 통과로 세기 때문에 어디에도 쓰지 않는다(`test/known.test.ts`가 지킨다). 실패한 차례마다 검사 기록에 한 줄이 남는다(`unsteady test "시험 이름": try 1 of 3 …`). 다시 해서 통과한 시험도 그 줄로 찾을 수 있다. 다른 시험은 한 번 실패하면 검사가 실패한다. 내 PC에서 `bun test`는 어느 시험도 다시 해 보지 않는다.
 - 채팅창 위 카드의 시험(`bun scripts/mod-test.ts`)은 Claude Code가 깔려 있어야 해서 자동 검사에 넣지 않았다. 카드를 고칠 때 손으로 돌린다.
 
 ## 라이선스

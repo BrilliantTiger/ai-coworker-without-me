@@ -18,13 +18,19 @@ type Body = () => void | Promise<unknown>
 
 // 몸통을 tries 번까지 돌린다. 한 번에 limitMs 를 넘기면 그 한 번은 실패다. 마지막까지 실패하면 마지막 실패를 던진다.
 // 시간을 넘긴 몸통은 멈출 수 없어서 뒤에서 마저 돈다. 다시 돌린 것과 겹칠 수 있다.
-export async function tryAgain(body: Body, tries: number, limitMs: number): Promise<void> {
+// 실패한 차례마다 한 줄을 적는다(시험 이름, 몇 번째인지, 까닭). 다시 해서 통과한 시험도 무엇이 흔들렸는지 기록에 남는다.
+// 한 번에 통과하면 아무것도 적지 않는다.
+export async function tryAgain(body: Body, tries: number, limitMs: number, name = '', write: (line: string) => void = console.log): Promise<void> {
   let last: unknown
   for (let attempt = 1; attempt <= tries; attempt++) {
     let timer: ReturnType<typeof setTimeout> | undefined
+    let outOfTime = false
     try {
       const late = new Promise<never>((_, fail) => {
-        timer = setTimeout(() => fail(new Error(`ran out of time (${limitMs} ms)${tries > 1 ? `, try ${attempt} of ${tries}` : ''}`)), limitMs)
+        timer = setTimeout(() => {
+          outOfTime = true
+          fail(new Error(`ran out of time (${limitMs} ms)${tries > 1 ? `, try ${attempt} of ${tries}` : ''}`))
+        }, limitMs)
       })
       const run = Promise.resolve().then(body)
       // 시간을 넘긴 뒤에 몸통이 던지는 것은 받는 곳이 없다. 흘려 둔다.
@@ -33,6 +39,8 @@ export async function tryAgain(body: Body, tries: number, limitMs: number): Prom
       return
     } catch (e) {
       last = e
+      const why = outOfTime ? `ran out of time (${limitMs} ms)` : `failed: ${(e instanceof Error ? e.message : String(e)).split('\n')[0]}`
+      write(`unsteady test "${name}": try ${attempt} of ${tries} ${why}`)
     } finally {
       clearTimeout(timer)
     }
@@ -52,5 +60,5 @@ export const unsteady = (name: string, body: Body, timeout?: number) => {
   if (tries === 1) return timeout === undefined ? test(name, body) : test(name, body, timeout)
   const limit = limitFor(process.env, timeout)
   // 시험 도구가 마지막 차례보다 먼저 끊지 않게, 도구에는 모든 차례를 더한 것보다 조금 긴 시간을 준다.
-  return test(name, () => tryAgain(body, tries, limit), tries * limit + 5_000)
+  return test(name, () => tryAgain(body, tries, limit, name), tries * limit + 5_000)
 }
