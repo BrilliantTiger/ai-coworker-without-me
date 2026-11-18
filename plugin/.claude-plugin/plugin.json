@@ -35,6 +35,7 @@
             {
               "type": "command",
               "command": "bun --no-install \"${CLAUDE_PLUGIN_ROOT}/coworker.js\" wake",
+              "async": true,
               "asyncRewake": true,
               "timeout": 2147483,
               "rewakeMessage": "From the coworker plugin, after this session restarted:",

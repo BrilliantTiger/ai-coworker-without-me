@@ -833,6 +833,26 @@ test('the restart hook ends quietly when the AI listens by itself, or when there
   await waiting
 }, 30_000)
 
+test('the restart hook ends within seconds after its session ends, so a session that answers once and ends is not held at its end', async () => {
+  const own = mkdtempSync(join(tmpdir(), 'coworker-wake-'))
+  const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'wake-ends', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }
+  const first = new Client({ name: 'claude-code', version: '1.0.0' })
+  await (await session('claude-code', env, first))('open_bridge', {})
+  await ended(first, own, 'wake-ends')
+  // 다시 켠 세션. 훅이 기다리고 있다.
+  const second = new Client({ name: 'claude-code', version: '1.0.0' })
+  await session('claude-code', env, second)
+  const hook = wakeHook(own, 'wake-ends', env.CLAUDE_PLUGIN_ROOT)
+  await Bun.sleep(700)
+  expect(hook.exitCode).toBeNull()
+  // 세션이 끝났다. 깨울 AI가 없으니 훅도 곧 조용히 끝난다. 전에는 서버가 돌아오기를 2분 기다렸다.
+  const started = Date.now()
+  await ended(second, own, 'wake-ends')
+  expect(await hook.exited).toBe(0)
+  expect(Date.now() - started).toBeLessThan(15_000)
+  expect(await new Response(hook.stderr).text()).toBe('')
+}, 30_000)
+
 unsteady('questions that piled up before the restart wake the AI as soon as the session is back', async () => {
   const own = mkdtempSync(join(tmpdir(), 'coworker-wake-'))
   const env = { COWORKER_HOME: own, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'wake-piled', CLAUDE_PLUGIN_ROOT: join(own, 'plugin') }

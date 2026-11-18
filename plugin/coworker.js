@@ -31076,6 +31076,9 @@ function restartApp(script) {
 }
 
 // src/wake.ts
+var COMING_MS = 120000;
+var GONE_MS = 5000;
+var ASK_MS = 1000;
 async function wake(home, input) {
   let sessionId;
   try {
@@ -31084,28 +31087,33 @@ async function wake(home, input) {
   if (typeof sessionId !== "string" || !sessionId)
     return 0;
   const path = savedPath(home, `${sessionId}${process.env.CLAUDE_PLUGIN_ROOT ? "" : ".direct"}`);
-  let misses = 0;
+  let reached = false;
+  let seen = Date.now();
   for (;; ) {
     const saved = readSaved(path);
     if (!saved)
       return 0;
     if (saved.viewer) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${saved.viewer.port}/${saved.viewer.token}/wake`);
-        if (res.ok) {
-          const text = (await res.text()).trim();
-          if (text.startsWith(AFTER_RESTART)) {
-            process.stderr.write(`${text}
+      const at = `http://127.0.0.1:${saved.viewer.port}/${saved.viewer.token}`;
+      if (await fetch(`${at}/status`, { signal: AbortSignal.timeout(ASK_MS) }).then((res) => res.ok, () => false)) {
+        reached = true;
+        try {
+          const res = await fetch(`${at}/wake`);
+          if (res.ok) {
+            const text = (await res.text()).trim();
+            if (text.startsWith(AFTER_RESTART)) {
+              process.stderr.write(`${text}
 `);
-            return 2;
+              return 2;
+            }
+            if (text)
+              return 0;
           }
-          if (text)
-            return 0;
-          misses = 0;
-        }
-      } catch {}
+        } catch {}
+        seen = Date.now();
+      }
     }
-    if (++misses > 600)
+    if (Date.now() - seen > (reached ? GONE_MS : COMING_MS))
       return 0;
     await Bun.sleep(200);
   }
