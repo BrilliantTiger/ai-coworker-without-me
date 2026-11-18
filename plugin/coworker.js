@@ -16577,11 +16577,12 @@ import { readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync as r
 import { join as join3, resolve as resolve3 } from "path";
 
 // src/bridge.ts
-import { createHash as createHash3, randomUUID } from "crypto";
+import { createHash as createHash4, randomUUID } from "crypto";
 import { appendFileSync as appendFileSync2, chmodSync, closeSync, existsSync as existsSync3, mkdirSync as mkdirSync3, openSync, readdirSync, readFileSync as readFileSync2, readSync, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
 import { basename, dirname as dirname2, extname, isAbsolute, relative, resolve as resolve2 } from "path";
 
 // src/agreement.ts
+import { createHash } from "crypto";
 var isText = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
 var isList = (v) => Array.isArray(v) && v.length <= 50 && v.every((s) => isText(s, 2000));
 function isAgreement(a) {
@@ -16615,11 +16616,25 @@ ${bullets(a.forHumans)}`
 
 `);
 }
+var THREAD_ID = /^[0-9a-f]{8}$/;
+var DAY = /^\d{4}-\d{2}-\d{2}$/;
+function agreementFileName(startedAt, threadId, peerKey) {
+  if (typeof threadId !== "string" || threadId.length !== 8 || !THREAD_ID.test(threadId))
+    return;
+  if (typeof peerKey !== "string" || !peerKey)
+    return;
+  const keyBytes = Buffer.from(peerKey, "base64");
+  if (keyBytes.length !== 32)
+    return;
+  const day = typeof startedAt === "string" && DAY.test(startedAt.slice(0, 10)) ? startedAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const peerHash = createHash("sha256").update(keyBytes).digest("hex").slice(0, 24);
+  return `${day}-${threadId}-${peerHash}.md`;
+}
 
 // src/code.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 var PREFIX = "cw1.";
-var check = (body) => createHash("sha256").update(body).digest("base64url").slice(0, 8);
+var check = (body) => createHash2("sha256").update(body).digest("base64url").slice(0, 8);
 function encodeCode(code) {
   const body = Buffer.from(JSON.stringify(code)).toString("base64url");
   return `${PREFIX}${body}.${check(body)}`;
@@ -16737,8 +16752,8 @@ var shortHostname = () => hostname().replace(/\.local$/, "");
 var hostForUrl = (addr) => addr.includes(":") ? `[${addr}]` : addr;
 
 // src/box.ts
-import { createHash as createHash2 } from "crypto";
-var boxOf = (secret) => createHash2("sha256").update(secret).digest("base64url").slice(0, 22);
+import { createHash as createHash3 } from "crypto";
+var boxOf = (secret) => createHash3("sha256").update(secret).digest("base64url").slice(0, 22);
 
 // src/secrets.ts
 var KEYWORDS = "password|passwd|passphrase|secret|api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|\uBE44\uBC00\uBC88\uD638|\uD328\uC2A4\uC6CC\uB4DC|\uC554\uD638";
@@ -16915,8 +16930,8 @@ var FILE_PROBLEM = {
 };
 var FILE_ID = /^[A-Za-z0-9-]{8,64}$/;
 var SHA256 = /^[0-9a-f]{64}$/;
-var THREAD_ID = /^[0-9a-f]{8}$/;
-var isThreadId = (value) => typeof value === "string" && value.length === 8 && THREAD_ID.test(value);
+var THREAD_ID2 = /^[0-9a-f]{8}$/;
+var isThreadId = (value) => typeof value === "string" && value.length === 8 && THREAD_ID2.test(value);
 var WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 function pathInside(folder, name) {
   if (!folder || !name || name === "." || name === "..")
@@ -18491,7 +18506,7 @@ ${f.evidence}`).join(`
       if (!file)
         throw new Error("nothing was sent: this session has no folder to keep files in");
       writeFileSync2(file, f.bytes, { mode: 384 });
-      return { id, name: f.name, size: f.bytes.length, sha256: createHash3("sha256").update(f.bytes).digest("hex"), path: f.path };
+      return { id, name: f.name, size: f.bytes.length, sha256: createHash4("sha256").update(f.bytes).digest("hex"), path: f.path };
     });
   }
   async sendMessage(peer, msg, thread) {
@@ -18610,7 +18625,7 @@ ${f.evidence}`).join(`
       if (size > note.size)
         return fail("size");
       try {
-        if (createHash3("sha256").update(readFileSync2(from)).digest("hex") !== note.sha256)
+        if (createHash4("sha256").update(readFileSync2(from)).digest("hex") !== note.sha256)
           return fail("sha256");
         const folder = pathInside(received, thread.id);
         if (!folder)
@@ -18888,8 +18903,8 @@ ${f.evidence}`).join(`
     if (!dir)
       return;
     const started = thread.messages[0]?.at ?? now();
-    const day = /^\d{4}-\d{2}-\d{2}$/.test(started.slice(0, 10)) ? started.slice(0, 10) : now().slice(0, 10);
-    const path = pathInside(dir, `${day}-${thread.id}.md`);
+    const name = agreementFileName(started, thread.id, thread.peer);
+    const path = name ? pathInside(dir, name) : undefined;
     if (!path)
       return;
     const latest = new Map;

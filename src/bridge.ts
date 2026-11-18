@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Server } from 'bun'
-import { isAgreement, renderAgreement, type Agreement } from './agreement'
+import { agreementFileName, isAgreement, renderAgreement, type Agreement } from './agreement'
 import { decodeCode, encodeCode } from './code'
 import { fromB64, newKeyPair, open, randomToken, ReplayGuard, seal, toB64, type KeyPair, type Sealed } from './crypto'
 import { hostForUrl, localAddresses } from './net'
@@ -2482,8 +2482,8 @@ export class Bridge {
     const dir = pathInside(this.opts.home, 'agreements')
     if (!dir) return undefined
     const started = thread.messages[0]?.at ?? now()
-    const day = /^\d{4}-\d{2}-\d{2}$/.test(started.slice(0, 10)) ? started.slice(0, 10) : now().slice(0, 10)
-    const path = pathInside(dir, `${day}-${thread.id}.md`)
+    const name = agreementFileName(started, thread.id, thread.peer)
+    const path = name ? pathInside(dir, name) : undefined
     if (!path) return undefined
     const latest = new Map<string, ThreadMessage>()
     for (const m of thread.messages) if (m.agreement) latest.set(m.agreement.by, m)
