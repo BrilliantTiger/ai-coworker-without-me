@@ -464,6 +464,13 @@ https://brillianttigercorp.com/ai-coworker-without-me/ 는 `gh-pages` 브랜치�
 bun test
 ```
 
+올릴 때마다(모든 push와 pull request) GitHub가 Linux, macOS, Windows에서 타입 검사와 `bun test`를 돌리고, 빌드한 번들이 저장소의 `plugin/coworker.js`와 같은지 본다(`.github/workflows/ci.yml`).
+
+- Linux와 macOS에서는 모든 시험이 통과한다.
+- Windows에서는 시험 넷이 아직 실패한다. `test/known.ts`의 표시를 붙여 두었고 까닭은 시험마다 적혀 있다. 셋(`failsOnWindows`)은 Windows에서 실패해야 통과로 쳐서, 고쳐지면 검사가 실패해 표시를 떼라고 알려 준다. 시간 초과로 끝나는 하나(`skippedOnWindows`)는 Windows에서 건너뛴다. 표시하지 않은 시험이 실패하면 검사가 실패한다.
+- GitHub의 공용 컴퓨터는 느리고 고르지 않아서, 자동 검사에서는 시험 하나에 5초 대신 20초를 주고 실패한 시험을 두 번까지 다시 해 본다(`bun test --timeout=20000 --retry=2`). 세 번 내리 실패하면 검사가 실패한다. 처음 돌렸을 때 시간에 따라 흔들린 시험은 「a session the other side forgot is not dropped」, 「two sessions the group introduced each get back in when the other forgot」, 「open_bridge makes codes that last 60 minutes…」, 「questions that piled up before the restart wake the AI…」, 「an answer that only says the decision went to a human…」다. 내 PC에서 `bun test`는 다시 해 보기 없이 돈다.
+- 채팅창 위 카드의 시험(`bun scripts/mod-test.ts`)은 Claude Code가 깔려 있어야 해서 자동 검사에 넣지 않았다. 카드를 고칠 때 손으로 돌린다.
+
 ## 라이선스
 
 [MIT](LICENSE)
