@@ -19903,7 +19903,7 @@ import { platform as platform4 } from "os";
 import { basename as basename2, resolve as resolve4 } from "path";
 import { fileURLToPath } from "url";
 // package.json
-var version2 = "0.12.2";
+var version2 = "0.13.0";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
