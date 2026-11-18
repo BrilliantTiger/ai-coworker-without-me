@@ -486,4 +486,63 @@ describe('paths built from peer data', () => {
     expect(readFileSync(updated.file!, 'utf8')).toContain('Pre-update conclusion.')
     expect(readFileSync(updated.file!, 'utf8')).toContain('Post-update addition.')
   })
+
+  test('two bridges on one home joined to the same peer write separate agreement files for the same thread id', async () => {
+    const peerHome = join(sandbox, 'shared-peer')
+    mkdirSync(peerHome, { recursive: true })
+
+    const one = make('One · Claude Code', { home })
+    const two = make('Two · Claude Code', { home })
+    const peer = make('Shared Peer · Codex', { home: peerHome })
+
+    one.open()
+    two.open()
+    await peer.connect(one.newCode())
+    await peer.connect(two.newCode())
+    await one.wait(200)
+    await two.wait(200)
+
+    const asked = await one.ask(undefined, 'Which port does service one use?')
+    await peer.wait(200)
+    const firstWrote = await one.agree(asked.thread!, {
+      conclusion: 'Service one uses port 7701.',
+      facts: [{ fact: 'one.toml maps 7701', evidence: 'one.toml:3', checkedBy: 'me' }],
+    })
+    expect(firstWrote.file).toBeDefined()
+    const firstBytes = Buffer.from(readFileSync(firstWrote.file!))
+
+    const peerAgreement: Agreement = {
+      by: 'Shared Peer · Codex',
+      conclusion: 'Service two uses port 9900.',
+      facts: [{ fact: 'two.toml maps 9900', evidence: 'two.toml:5', checkedBy: 'Shared Peer · Codex' }],
+      guesses: [],
+      disagreements: [],
+      forHumans: [],
+    }
+    const res = await sendRaw(peer, two, {
+      type: 'msg',
+      msg: {
+        id: randomUUID(),
+        thread: asked.thread!,
+        subject: 'Service two port',
+        kind: 'agreement',
+        text: renderAgreement(peerAgreement),
+        agreement: peerAgreement,
+        at: new Date().toISOString(),
+      },
+    })
+    expect(res.status).toBe(200)
+    const secondGot = (await two.wait(300)).find(e => e.type === 'message') as Extract<BridgeEvent, { type: 'message' }>
+    expect(secondGot.file).toBeDefined()
+
+    expect(secondGot.file).not.toBe(firstWrote.file)
+    expect(walkFiles(join(home, 'agreements'))).toHaveLength(2)
+    expect(Buffer.compare(readFileSync(firstWrote.file!), firstBytes)).toBe(0)
+    expect(readFileSync(secondGot.file!, 'utf8')).toContain('Service two uses port 9900.')
+
+    const pairTag = (ownKey: string, peerKey: string) =>
+      createHash('sha256').update(Buffer.from(ownKey, 'base64')).update(Buffer.from(peerKey, 'base64')).digest('hex').slice(0, 24)
+    expect(basename(firstWrote.file!)).toMatch(new RegExp(`^\\d{4}-\\d{2}-\\d{2}-${asked.thread}-${pairTag(one.key, peer.key)}\\.md$`))
+    expect(basename(secondGot.file!)).toMatch(new RegExp(`^\\d{4}-\\d{2}-\\d{2}-${asked.thread}-${pairTag(two.key, peer.key)}\\.md$`))
+  })
 })
