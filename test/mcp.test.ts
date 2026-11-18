@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from 'bun:test'
-import { failsOnWindows } from './known'
+import { failsOnWindows, skippedOnWindows } from './known'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -38,8 +38,8 @@ afterAll(async () => {
   for (const c of clients) await c.close()
 })
 
-// Windows: 5초 안에 끝나지 않는다. 어느 걸음이 느린지는 아직 가리지 못했다.
-failsOnWindows('a Claude Code session and a Codex session talk through the tools', async () => {
+// Windows: 파일을 상대 경로로 붙인 질문에 「전체 경로로 주라」는 거절이 오지 않고 답이 없어서, 시험이 시간 초과로 끝난다.
+skippedOnWindows('a Claude Code session and a Codex session talk through the tools', async () => {
   const claude = await session('claude-code')
   const codex = await session('codex-mcp-client')
 

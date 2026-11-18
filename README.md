@@ -453,7 +453,7 @@ bun test
 올릴 때마다(모든 push와 pull request) GitHub가 Linux, macOS, Windows에서 타입 검사와 `bun test`를 돌리고, 빌드한 번들이 저장소의 `plugin/coworker.js`와 같은지 본다(`.github/workflows/ci.yml`).
 
 - Linux와 macOS에서는 모든 시험이 통과한다.
-- Windows에서는 시험 넷이 아직 실패한다. `test/known.ts`의 `failsOnWindows`로 표시해 두었고 까닭은 시험마다 적혀 있다. 표시하지 않은 시험이 실패하거나, 표시한 시험이 고쳐져 통과하면 검사가 실패한다.
+- Windows에서는 시험 넷이 아직 실패한다. `test/known.ts`의 표시를 붙여 두었고 까닭은 시험마다 적혀 있다. 셋(`failsOnWindows`)은 Windows에서 실패해야 통과로 쳐서, 고쳐지면 검사가 실패해 표시를 떼라고 알려 준다. 시간 초과로 끝나는 하나(`skippedOnWindows`)는 Windows에서 건너뛴다. 표시하지 않은 시험이 실패하면 검사가 실패한다.
 - 채팅창 위 카드의 시험(`bun scripts/mod-test.ts`)은 Claude Code가 깔려 있어야 해서 자동 검사에 넣지 않았다. 카드를 고칠 때 손으로 돌린다.
 
 ## 라이선스
