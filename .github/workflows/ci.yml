@@ -48,7 +48,9 @@ jobs:
         run: bun run typecheck
       - name: Test
         # The shared runners are slower than a desk computer, so a test gets 20 seconds instead of 5.
-        # Only the tests marked as unsteady in test/known.ts are tried again when they fail (up to two more times).
+        # Only the tests marked as unsteady in test/known.ts are tried again when they fail or run out of time
+        # (up to two more times). The marker does that itself: the runner's own option for it is not used anywhere,
+        # because it counts a test that runs out of time on every try as passed.
         # Any other test fails the check the first time it fails.
         run: bun test --timeout=20000
       - name: Build
