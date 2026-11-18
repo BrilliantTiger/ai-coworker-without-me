@@ -47,10 +47,10 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
       - name: Test
-        # The shared runners are slower and less steady than a desk computer, and some tests depend on timing.
-        # So a test gets 20 seconds instead of 5, and a test that fails is tried up to two more times.
-        # A test that fails three times in a row fails the check. The README lists the tests seen to need this.
-        run: bun test --timeout=20000 --retry=2
+        # The shared runners are slower than a desk computer, so a test gets 20 seconds instead of 5.
+        # Only the tests marked as unsteady in test/known.ts are tried again when they fail (up to two more times).
+        # Any other test fails the check the first time it fails.
+        run: bun test --timeout=20000
       - name: Build
         run: bun run build
       - name: The committed bundle is what the build makes
