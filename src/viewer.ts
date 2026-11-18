@@ -1,5 +1,5 @@
 import type { Server } from 'bun'
-import { openQuestion } from './bridge'
+import { openQuestion, OUTSIDE_ONLY } from './bridge'
 import type { Bridge, BridgeEvent, ViewerAddress } from './bridge'
 import { randomToken } from './crypto'
 import { PAGE, QUIET_AFTER_MS } from './page'
@@ -111,24 +111,44 @@ export class Viewer {
   private async introduce(req: Request, headers: Record<string, string>): Promise<Response> {
     if (!this.mine(req)) return new Response('forbidden', { status: 403 })
     const body = (await req.json().catch(() => null)) as { model?: unknown; effort?: unknown } | null
-    this.bridge.setAbout({ ...(typeof body?.model === 'string' ? { model: body.model } : {}), ...(typeof body?.effort === 'string' ? { effort: body.effort } : {}) })
+    // 외부용 코드로 이어진 세션이 있으면, 이 컴퓨터에 관한 것이 든 소개는 받지 않는다(이름과 같은 확인).
+    try {
+      this.bridge.setAbout({ ...(typeof body?.model === 'string' ? { model: body.model } : {}), ...(typeof body?.effort === 'string' ? { effort: body.effort } : {}) })
+    } catch (e) {
+      return Response.json({ error: 'unsafe', message: e instanceof Error ? e.message : String(e), about: this.bridge.describe().about ?? {} }, { status: 400, headers })
+    }
     return Response.json({ about: this.bridge.describe().about ?? {} }, { headers })
   }
 
   // 사람이 화면에서 접근키(연결 코드)를 새로 만든다. 사람을 더할 때, 그리고 끊긴 상대가 다시 들어오게 할 때 쓴다
   // (2026-11-16, 사람이 정함: 「끊겼을경우 웹에서 접근키를 재생성」, 「유저 추가가 필요할때 접근키 발급」).
-  // AI가 open_bridge 로 만드는 코드와 같다: 그룹 코드이고, 한 번만 쓸 수 있고, 60분 동안 쓸 수 있다.
+  // AI가 open_bridge 로 만드는 코드와 같다: 한 번만 쓸 수 있고, 60분 동안 쓸 수 있다.
+  // 어떤 코드를 만들지는 화면이 kind 로 말한다(group: 동료용 그룹 코드, outside: 외부용 코드). 답에도 만든 코드의 종류를 적는다.
+  // 말하지 않으면 브릿지가 만들 수 있는 것을 만든다: 외부용으로만 연 브릿지는 외부용 코드, 그 밖에는 그룹 코드.
+  // 외부용으로만 연 브릿지는 동료용 코드를 만들지 않는다. 외부용 코드를 만들지 못하면(중계 서버가 없거나 닿지 않음) 까닭을 알리고, 다른 코드로 바꾸지 않는다.
   // 화면 주소의 토큰을 아는 이 PC의 사람만 부를 수 있다. 다른 웹페이지가 부르지 못하게 이 화면에서 온 요청인지도 본다:
   // 화면이 붙이는 표시 헤더가 있어야 하고(다른 사이트가 붙이면 브라우저가 먼저 허락을 묻는데, 이 서버는 허락하지 않는다),
   // 브라우저가 알려 주는 출처가 이 화면이어야 한다.
-  private issue(req: Request, headers: Record<string, string>): Response {
+  private async issue(req: Request, headers: Record<string, string>): Promise<Response> {
     if (!this.mine(req)) return new Response('forbidden', { status: 403 })
+    const asked = ((await req.json().catch(() => null)) as { kind?: unknown } | null)?.kind
+    const only = this.bridge.isOutsideOnly
+    const kind: 'group' | 'outside' = asked === 'outside' || asked === 'group' ? asked : only ? 'outside' : 'group'
     // 브릿지가 닫혀 있으면 만들지 않는다. 화면에서 누른 것으로 닫힌 브릿지를 다시 열지 않는다.
     if (!this.bridge.isOpen) return Response.json({ error: 'the bridge is closed' }, { status: 409, headers })
     const now = Date.now()
     if (now - this.issuedAt < ISSUE_GAP_MS) return Response.json({ error: 'too many requests' }, { status: 429, headers })
+    if (kind === 'group' && only) return Response.json({ error: 'outside_only', kind, message: OUTSIDE_ONLY }, { status: 400, headers })
     this.issuedAt = now
-    return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers })
+    try {
+      const code = this.bridge.newCode({ outside: kind === 'outside' || undefined, ttlMs: ISSUE_TTL_MS })
+      return Response.json({ code, kind, expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers })
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      // relay: 중계 서버가 없거나 닿지 않는다. unsafe: 이 세션의 이름이나 소개에 이 컴퓨터에 관한 것이 들어 있다.
+      const error = /^cannot open a bridge for outsiders/.test(message) ? 'relay' : /^nothing was sent/.test(message) ? 'unsafe' : 'failed'
+      return Response.json({ error, kind, message }, { status: 503, headers })
+    }
   }
 
   // 사람이 화면에서 대화를 맨 위에 고정하거나 푼다(2026-11-17, 사람이 정함: 「질답 정렬을 고정, 최신 질답, 순으로」).

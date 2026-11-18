@@ -2,11 +2,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { version } from '../package.json'
-import { Bridge, defersToHuman, MAX_CATEGORY, MAX_FILE_BYTES, MAX_FILES, MAX_FILES_BYTES, parsePorts, saysNoAnswer, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
+import { Bridge, defersToHuman, isOutsideCode, MAX_CATEGORY, MAX_FILE_BYTES, MAX_FILES, MAX_FILES_BYTES, parsePorts, saysNoAnswer, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
+import { decodeCode } from './code'
 import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { osNotify, type Notify } from './notify'
+import { outsideRelayError } from './outside'
+import { OUTSIDE_ONLY, type OutsideLimits } from './bridge'
 import { rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -54,10 +57,14 @@ export type SessionOptions = {
   relayKey?: string
   // 세션 이름에 붙일 프로젝트 폴더를 알아내는 방법. stdio 는 실행 환경에서, 앱은 클라이언트가 알려 주는 폴더(roots)에서 찾는다.
   folder: (server: McpServer) => string | undefined | Promise<string | undefined>
+  // 프로젝트 폴더의 전체 경로. 외부 상대에게 이 경로가 나가지 않게 막는 데 쓴다.
+  folderPath?: (server: McpServer) => string | undefined | Promise<string | undefined>
   // 이 세션을 다시 켰을 때 알아볼 이름표. Claude Code 는 세션 ID(CLAUDE_CODE_SESSION_ID)를 MCP 서버에 넘기고, 이어서 켜도 같은 값을 준다.
   sessionId?: string
   // 다시 켠 세션이면 되살릴 브릿지 상태. stdio 서버가 뜰 때 찾아서 넘긴다.
   restore?: SavedBridge
+  // 외부용 코드로 들어온 세션에 두는 한도(COWORKER_OUTSIDE_MAX_… 설정). 준 것만 기본값을 바꾼다.
+  outsideLimits?: Partial<OutsideLimits>
   // 플러그인으로 설치해서 도는 서버면, 새 판이 나왔을 때 스스로 올린다.
   autoUpdate?: boolean
   // 시험에서 실제 claude·codex 명령 대신 쓸 업데이트 함수.
@@ -133,8 +140,11 @@ export function createSession(opts: SessionOptions) {
 
   const INSTRUCTIONS = `${RESTORED}Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
 
-  Groups
+  Groups and codes
   - A connection code from open_bridge is a group code by default: whoever joins with it is also connected, automatically, with every session already in this session's group. You get a "connected" event for each, with "via" naming who introduced them. A private code (open_bridge with private: true) links only the two sessions.
+  - An outside code (open_bridge with outside: true, for example when your human asks for an outside code / 외부용 코드 for someone they do not know, such as an outside contributor) requires a working relay and never falls back to direct addresses. It is always private (links only the two sessions and tells neither side about other sessions), uses "<tool>" as the default session name with no computer name, puts only the relay mailbox in the code, and blocks this computer's name, account name, home or project folder paths, and internal or VPN addresses from leaving towards that peer, also in your name, model and effort. When talking to an outside session, refer to files by paths relative to the project (for example src/index.ts:10), never full paths on this PC. A file goes to an outside session only when it is UTF-8 text that passes the same check.
+  - A bridge first opened with outside: true is for outside sessions only until it is closed: call open_bridge with outside: true again for each further outside session; it refuses to make a group or private code. A bridge opened for colleagues can also make outside codes and stays as it is.
+  - An outside session is not part of "everyone": ask it by name. It may connect only while fewer than the allowed number of outside sessions are connected (5 by default), and what it may send is limited (conversations, messages, size); beyond that its messages are refused and it is told why. Its files are refused unless the bridge was opened with outside_files: true. list_connections marks such sessions with outside: true. To end one of them, call close_bridge with peer when your human says so.
   - send_question can go to one session, to several (a list of names), or to "everyone". With several, set answers: "all" (default) to get everyone's answer, or "one" when the first answer is enough; the others are then told the question is closed.
   - Each recipient answers in its own conversation; recipients do not see each other's answers. Events for a question to several sessions carry "ask" with who was asked and who has answered.
   - When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
@@ -164,7 +174,7 @@ export function createSession(opts: SessionOptions) {
 
   Write an agreement when a conversation is done
   - When a conversation has what it needed, the side that asked writes the agreement with write_agreement. It goes to the other side and is saved as a file on both PCs, for the humans to discuss.
-  - Under facts, put only what was checked, each with its evidence (a file path and line, a command and its result, a document) and who checked it: you (me) or only the other side (them).
+  - Under facts, put only what was checked, each with its evidence (a file path and line — relative to the project, never a full path on this PC, when connected through an outside code — a command and its result, a document) and who checked it: you (me) or only the other side (them).
   - Anything nobody checked goes under guesses. The other AI sounding sure is not evidence, and two AIs agreeing is not evidence either.
   - Points the two sides still see differently go under disagreements. Anything that needs a decision goes under for_humans.
   - When an agreement arrives, check it against what you know, then tell your human the conclusion. For each point under for_humans, ask your human with check_with_human on that conversation, so they answer in a question window and the other side gets their decision. If something in it is wrong or missing, write your own version with write_agreement for the same conversation; otherwise do not write another.
@@ -225,6 +235,7 @@ export function createSession(opts: SessionOptions) {
 
   // 세션 이름에 붙일 프로젝트 폴더. 처음 브릿지를 열거나 연결할 때 한 번 알아낸다.
   let folder: string | undefined
+  let folderDir: string | undefined
   let folderKnown = false
   const resolveFolder = async () => {
     if (folderKnown) return
@@ -232,15 +243,21 @@ export function createSession(opts: SessionOptions) {
     try {
       folder = await opts.folder(server)
     } catch {}
+    try {
+      folderDir = await opts.folderPath?.(server)
+    } catch {}
   }
 
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS })
+  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, projectDir: folderDir, outsideLimits: opts.outsideLimits, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS })
   const notify = opts.notify ?? osNotify
+  const normalDefaultName = () => `${folder ? `${folder} · ` : ''}${clientLabel()} @ ${shortHostname()}`
 
-  function getBridge() {
+  function getBridge(outsideOnly = false) {
     if (!bridge) {
-      const name = `${folder ? `${folder} · ` : ''}${clientLabel()} @ ${shortHostname()}`
-      adopt(new Bridge({ name, ...bridgeOptions() }))
+      const name = outsideOnly ? clientLabel() : normalDefaultName()
+      adopt(new Bridge({ name, outsideName: outsideOnly ? clientLabel() : undefined, outsideOnly, ...bridgeOptions() }))
+    } else if (folderDir && !bridge.projectDir) {
+      bridge.projectDir = folderDir
     }
     return bridge!
   }
@@ -575,7 +592,7 @@ export function createSession(opts: SessionOptions) {
       title: 'Open bridge',
       annotations: { readOnlyHint: false, openWorldHint: true },
       description:
-        'Open this session to coworkers\' AI sessions and get a one-time connection code. The human sends the code to a coworker (for example over a messenger), and the coworker\'s AI calls connect with it. By default whoever joins is also connected with everyone already in this session\'s group. The code expires after 60 minutes unless expires_minutes says otherwise. Call again to get a fresh code for each further session.',
+        'Open this session to other AI sessions and get a one-time connection code. The human sends the code to the other person (for example over a messenger or an issue), and their AI calls connect with it. By default it makes a group code (whoever joins is also connected with everyone already in this session\'s group); set private: true for a 1-on-1 code with a colleague, or outside: true for someone outside your team (uses only the relay and hides this computer). The code expires after 60 minutes unless expires_minutes says otherwise. Call again to get a fresh code for each further session.',
       inputSchema: {
         port: z
           .number()
@@ -583,9 +600,21 @@ export function createSession(opts: SessionOptions) {
           .min(1024)
           .max(65535)
           .optional()
-          .describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range).`),
-        name: z.string().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> · <tool> @ <computer>".'),
-        private: z.boolean().optional().describe('true: the code links only this session and the one who joins; they are not connected with the rest of the group.'),
+          .describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range). Never placed in an outside code.`),
+        name: z.string().min(1).max(80).optional().describe('Name the other side will see for this session. Defaults to "<folder> · <tool> @ <computer>", or "<tool>" when outside is true.'),
+        private: z.boolean().optional().describe('true: the code links only this session and the one who joins; they are not connected with the rest of the group. Always true when outside is true.'),
+        outside: z
+          .boolean()
+          .optional()
+          .describe(
+            'true: make an outside code (외부용 코드) for someone you do not know, such as an outside open-source contributor. Requires a working relay and never falls back to direct addresses. Carries only the relay mailbox, hides this computer\'s name, account, folder paths, port and internal or VPN addresses from that peer, and is always private.',
+          ),
+        outside_files: z
+          .boolean()
+          .optional()
+          .describe(
+            'With outside: true only: also take files that outside sessions send. Off by default: their files are refused. Set it only when your human asks for it; each outside session then has a quota for its files. It stays on until this bridge closes.',
+          ),
         model: z.string().min(1).max(60).optional().describe('The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess.'),
         effort: z.string().min(1).max(60).optional().describe('Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess.'),
         expires_minutes: z
@@ -605,51 +634,121 @@ export function createSession(opts: SessionOptions) {
           ),
       },
     },
-    tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume, model, effort }: { port?: number; name?: string; private?: boolean; expires_minutes?: number; resume?: string; model?: string; effort?: string }) => {
-      if (resume) {
-        const b = await resumeBridge(resume.trim())
+    tool(
+      async ({
+        port,
+        name,
+        private: only,
+        outside,
+        outside_files: outsideFiles,
+        expires_minutes: minutes = DEFAULT_CODE_MINUTES,
+        resume,
+        model,
+        effort,
+      }: {
+        port?: number
+        name?: string
+        private?: boolean
+        outside?: boolean
+        outside_files?: boolean
+        expires_minutes?: number
+        resume?: string
+        model?: string
+        effort?: string
+      }) => {
+        if (resume) {
+          const b = await resumeBridge(resume.trim())
+          introduce(b, model, effort)
+          reopenWindows(b)
+          const { relay: relayInfo, warn = '' } = await relayStatus(b)
+          const connected = [...b.peers.values()].map(p => p.name)
+          const conversations = b.threadSummaries()
+          const open = conversations.filter(c => c.status !== 'agreed' && c.status !== 'closed')
+          return {
+            resumed: true,
+            session_id: identity,
+            name: b.name,
+            port: b.isOutsideOnly ? undefined : b.port,
+            connected,
+            conversations,
+            relay: relayInfo,
+            viewer: viewerUrl(),
+            listen_command: listenCommand(),
+            next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(', ')}` : ''}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map(c => c.id).join(', ')}), so you know where each one stands.` : ''}${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`,
+          }
+        }
+        await resolveFolder()
+        freshIfMoved()
+        if (outside) {
+          if (!relay) throw new Error(outsideRelayError(undefined, 'off'))
+          const b = getBridge(true)
+          const wasOpen = b.isOpen
+          const chosenName = name ?? (wasOpen ? b.outsideName : undefined) ?? clientLabel()
+          // 이름뿐 아니라 이 세션이 자기에 관해 알리는 것을 모두, 무엇도 바꾸기 전에 확인한다.
+          b.assertOutsideSafe({ name: chosenName, model, effort, tool: clientLabel() })
+          // 열려 있는 브릿지는 그대로 둔다: 외부용으로만 연 것이든 동료에게도 연 것이든, 외부용 코드를 더 만든다고 바뀌지 않는다.
+          if (!wasOpen) {
+            b.outsideName = chosenName
+            b.name = chosenName
+            introduce(b, model, effort)
+            b.open(port, { outsideOnly: true })
+          }
+          const status = await b.relayReady(5000)
+          if (status !== 'ok') {
+            if (!wasOpen) b.shutdown()
+            throw new Error(outsideRelayError(relay, status))
+          }
+          if (wasOpen) {
+            introduce(b, model, effort)
+            b.outsideName = chosenName
+          }
+          if (outsideFiles) b.allowOutsideFiles()
+          const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60_000).toISOString()
+          const code = b.newCode({ outside: true, private: true, ttlMs: minutes === 0 ? null : minutes * 60_000 })
+          const joined = [...b.peers.values()].filter(p => p.outside && !p.host).length
+          const most = b.limits.sessions
+          return {
+            code,
+            session_id: identity,
+            expires: expires ?? 'never: works until this bridge closes',
+            kind: 'outside: relay only, hides this computer, and links only this session and the one who joins',
+            name: b.nameFor(true),
+            addresses: b.addrsFor(true),
+            relay: { url: relay, status },
+            outside_sessions: `${joined} of at most ${most} connected`,
+            files_from_outside: b.takesOutsideFiles ? 'taken, up to a quota for each outside session' : 'refused (open_bridge with outside_files: true takes them)',
+            full: joined >= most ? `This bridge already has ${most} outside sessions connected, the most it takes. Whoever uses this code is refused, without using the code up, until one of them leaves or your human ends one with close_bridge and its name. Tell your human.` : undefined,
+            group: [],
+            viewer: viewerUrl(),
+            listen_command: listenCommand(),
+            next: `Show the outside code to your human so they can share it with the outside person. It goes only through the relay, carries none of this computer's addresses, port or computer name, and links only this session and the one who joins. When talking to that session, never include this computer's name, account name, home or project folder full paths (use relative paths like src/file.ts:10), or internal or VPN addresses. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}; make a new code for each further session.${ ' '}${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
+          }
+        }
+        const b = getBridge()
+        // 외부용으로만 연 브릿지는 닫을 때까지 그대로다. 동료용 코드를 달라는 요청은 무엇도 바꾸지 않고 거절한다.
+        if (b.isOpen && b.isOutsideOnly) throw new Error(OUTSIDE_ONLY)
+        if (b.isOutsideOnly && !name && b.name === b.outsideName) b.name = normalDefaultName()
+        if (name) b.name = name
         introduce(b, model, effort)
-        reopenWindows(b)
+        b.open(port, { outsideOnly: false })
         const { relay: relayInfo, warn = '' } = await relayStatus(b)
-        const connected = [...b.peers.values()].map(p => p.name)
-        const conversations = b.threadSummaries()
-        const open = conversations.filter(c => c.status !== 'agreed' && c.status !== 'closed')
+        const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60_000).toISOString()
         return {
-          resumed: true,
+          code: b.newCode({ private: only, ttlMs: minutes === 0 ? null : minutes * 60_000 }),
           session_id: identity,
+          expires: expires ?? 'never: works until this bridge closes',
+          kind: only ? 'private: links only this session and the one who joins' : 'group: whoever joins is also connected with everyone in this group',
           name: b.name,
           port: b.port,
-          connected,
-          conversations,
+          addresses: b.addrs(),
           relay: relayInfo,
+          group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
           viewer: viewerUrl(),
           listen_command: listenCommand(),
-          next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(', ')}` : ''}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map(c => c.id).join(', ')}), so you know where each one stands.` : ''}${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`,
+          next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
         }
-      }
-      await resolveFolder()
-      freshIfMoved()
-      const b = getBridge()
-      if (name) b.name = name
-      introduce(b, model, effort)
-      b.open(port)
-      const { relay: relayInfo, warn = '' } = await relayStatus(b)
-      const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60_000).toISOString()
-      return {
-        code: b.newCode({ private: only, ttlMs: minutes === 0 ? null : minutes * 60_000 }),
-        session_id: identity,
-        expires: expires ?? 'never: works until this bridge closes',
-        kind: only ? 'private: links only this session and the one who joins' : 'group: whoever joins is also connected with everyone in this group',
-        name: b.name,
-        port: b.port,
-        addresses: b.addrs(),
-        relay: relayInfo,
-        group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
-        viewer: viewerUrl(),
-        listen_command: listenCommand(),
-        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
-      }
-    }),
+      },
+    ),
   )
 
   server.registerTool(
@@ -660,7 +759,7 @@ export function createSession(opts: SessionOptions) {
       description: 'Connect this session to a coworker\'s session using the connection code their AI produced with open_bridge. Opens this session\'s bridge too, so answers can come back.',
       inputSchema: {
         code: z.string().min(10).describe('The whole connection code, starting with "cw1."'),
-        name: z.string().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> · <tool> @ <computer>".'),
+        name: z.string().min(1).max(80).optional().describe('Name the other side will see for this session. Defaults to "<folder> · <tool> @ <computer>", or "<tool>" when connecting with an outside code.'),
         model: z.string().min(1).max(60).optional().describe('The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess.'),
         effort: z.string().min(1).max(60).optional().describe('Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess.'),
       },
@@ -668,10 +767,19 @@ export function createSession(opts: SessionOptions) {
     tool(async ({ code, name, model, effort }: { code: string; name?: string; model?: string; effort?: string }) => {
       await resolveFolder()
       freshIfMoved()
-      const b = getBridge()
-      if (name) b.name = name
+      // 외부용 코드로 들어갈 때는 이 컴퓨터에 관한 것을 보내지 않는다:
+      // 이름은 도구 이름(또는 사람이 정한 이름)만, 주소와 포트는 보내지 않고, 이 세션이 자기에 관해 알리는 것은 먼저 확인한다.
+      const outsideCode = isOutsideCode(decodeCode(code))
+      const b = getBridge(outsideCode)
+      if (b.isOpen && b.isOutsideOnly && !outsideCode) throw new Error(OUTSIDE_ONLY)
+      if (outsideCode) {
+        const shown = name ?? b.outsideName ?? clientLabel()
+        b.assertOutsideSafe({ name: shown, model, effort, tool: clientLabel() })
+        b.outsideName = shown
+        if (!b.isOpen) b.name = shown
+      } else if (name) b.name = name
       introduce(b, model, effort)
-      if (!b.isOpen) b.open()
+      if (!b.isOpen) b.open(undefined, { outsideOnly: outsideCode })
       const { relay: relayInfo, warn = '' } = await relayStatus(b)
       const before = new Set(b.peers.keys())
       const peer = await b.connect(code)
@@ -682,7 +790,7 @@ export function createSession(opts: SessionOptions) {
         already_connected: again || undefined,
         joining,
         session_id: identity,
-        myName: b.name,
+        myName: outsideCode ? b.nameFor(true) : b.name,
         myPort: b.port,
         relay: relayInfo,
         viewer: viewerUrl(),
@@ -890,7 +998,7 @@ export function createSession(opts: SessionOptions) {
           .array(
             z.object({
               fact: z.string().min(1).max(2000),
-              evidence: z.string().min(1).max(2000).describe('Where it was checked: a file path and line, a command and its result, a document.'),
+              evidence: z.string().min(1).max(2000).describe('Where it was checked: a file path and line (relative to the project, never a full path on this PC, when connected through an outside code), a command and its result, a document.'),
               checked_by: z.enum(['me', 'them']).describe('me: you checked it yourself. them: only the other side checked it and you did not.'),
             }),
           )
@@ -999,10 +1107,17 @@ export function createSession(opts: SessionOptions) {
     {
       title: 'Close bridge',
       annotations: { readOnlyHint: false, openWorldHint: true },
-      description: 'Tell the connected sessions this session is leaving, and stop listening.',
-      inputSchema: {},
+      description:
+        'Tell the connected sessions this session is leaving, and stop listening. With peer, end only the connection with that one session and keep the bridge open for the others (for example to free a place among the outside sessions).',
+      inputSchema: {
+        peer: z.string().min(1).max(200).optional().describe('End only the connection with this session (name or [id]). Leave it out to close the whole bridge. Only when your human says so.'),
+      },
     },
-    tool(async () => {
+    tool(async ({ peer }: { peer?: string }) => {
+      if (peer) {
+        const ended = await getBridge().endPeer(peer)
+        return { ended: `${ended.name} [${ended.id}]`, bridge: 'still open', next: 'Tell your human in one line that this connection is ended and the others go on. That session needs a new code to connect again.' }
+      }
       closeWindows(true)
       await getBridge().close()
       return { closed: true }

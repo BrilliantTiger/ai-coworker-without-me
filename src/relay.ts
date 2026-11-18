@@ -26,11 +26,16 @@ export type RelayOptions = {
   aliveMs?: number
 }
 
-type Request_ = { id: string; body: string; reply: (status: number, body: string) => void }
+type Request_ = { id: string; body: string; source: string; reply: (status: number, body: string) => void }
 type Box = { queue: Request_[]; waiting: Map<string, Request_>; lastSeen: number; wake?: () => void }
 
 const MAX_BODY = 1 << 20
 const MAX_QUEUE = 200
+// 한 우편함에서 기다리는 요청 가운데 한 보낸 쪽(주소 하나)이 차지할 수 있는 수.
+// 한 곳에서 요청을 쏟아부어 자기 몫을 다 채워도, 다른 보낸 쪽이 그 우편함에 넣을 자리는 남는다.
+const MAX_PER_SOURCE = 50
+// 사설·루프백 주소. 이런 주소에서 바로 온 연결이 X-Forwarded-For 를 달고 있으면 앞에 둔 프록시(Caddy 등)가 넘긴 것이다.
+const LOCAL_SOURCE = /^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|::1$|f[cd][0-9a-f]{2}:|fe80:)/i
 const MAX_BOXES = 10_000
 const MAX_INBOX_WAIT = 25_000
 
@@ -52,6 +57,13 @@ export function startRelay(options: RelayOptions = {}): Server<undefined> {
     return !!secret && boxOf(secret) === box
   }
   const text = (status: number, body: string) => new Response(body, { status, headers: { 'content-type': 'text/plain; charset=utf-8' } })
+  // 보낸 쪽의 주소. 프록시 뒤에 있으면 연결은 모두 프록시에서 오므로, 프록시가 적어 준 마지막 주소를 쓴다.
+  // 인터넷에서 바로 온 연결이 적어 보낸 X-Forwarded-For 는 믿지 않는다.
+  const sourceOf = (req: Request, server: Server<undefined>) => {
+    const direct = server.requestIP(req)?.address.replace(/^::ffff:/, '') ?? 'unknown'
+    const forwarded = req.headers.get('x-forwarded-for')?.split(',').pop()?.trim()
+    return forwarded && LOCAL_SOURCE.test(direct) ? forwarded.slice(0, 64) : direct
+  }
 
   // 오래 다녀가지 않은 우편함은 치운다. 기다리던 요청에는 「닿지 않음」으로 답한다.
   const sweep = setInterval(() => {
@@ -68,7 +80,7 @@ export function startRelay(options: RelayOptions = {}): Server<undefined> {
     hostname: options.hostname ?? '0.0.0.0',
     maxRequestBodySize: MAX_BODY + 4096,
     idleTimeout: 0,
-    async fetch(req) {
+    async fetch(req, server) {
       const url = new URL(req.url)
       const [, v, action, id] = url.pathname.split('/')
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/healthz')) return text(200, 'coworker relay\n')
@@ -80,12 +92,18 @@ export function startRelay(options: RelayOptions = {}): Server<undefined> {
         if (!box || Date.now() - box.lastSeen > aliveMs) return text(404, 'no such session')
         // 꺼내 가서 답을 기다리는 것까지 센다. 그러지 않으면 우편함 번호를 아는 쪽이 계속 밀어 넣어 메모리를 채울 수 있다.
         if (box.queue.length + box.waiting.size >= MAX_QUEUE) return text(503, 'that session has too many waiting requests')
+        const source = sourceOf(req, server)
+        let mine = 0
+        for (const q of box.queue) if (q.source === source) mine++
+        for (const q of box.waiting.values()) if (q.source === source) mine++
+        if (mine >= MAX_PER_SOURCE) return text(503, 'too many waiting requests from one sender for that session')
         const body = await req.text()
         if (body.length > MAX_BODY) return text(413, 'too large')
         return await new Promise<Response>(resolve => {
           const r: Request_ = {
             id: `${Date.now().toString(36)}-${(++seq).toString(36)}`,
             body,
+            source,
             reply: (status, answer) => {
               clearTimeout(timer)
               box.waiting.delete(r.id)

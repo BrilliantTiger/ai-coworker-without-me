@@ -166,8 +166,9 @@ describe('paths built from peer data', () => {
     // 연결 기록은 거절한 횟수를 세되, 상대가 보낸 글이나 잘못된 ID 문자열은 남기지 않는다.
     const logEntries = a.log.read({ lines: 300 })
     const refused = logEntries.filter(e => e.event === 'refused_thread_id')
-    expect(refused.length).toBe(badThreadIds.length)
-    expect(refused.at(-1)?.count).toBe(badThreadIds.length)
+    // 거절이 되풀이돼도 기록이 그 줄로 가득 차지 않게 1번째, 10번째, 100번째… 에만 적는다. 횟수는 연결 상태에서 본다.
+    expect(refused.map(e => e.count)).toEqual([1, 10])
+    expect((await a.connections()).peers[0]?.refused).toBe(badThreadIds.length)
     const rawLog = JSON.stringify(logEntries)
     expect(rawLog).not.toContain('distinct-peer-marker-9912')
     expect(rawLog).not.toContain('distinct-subject-marker-9912')

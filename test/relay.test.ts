@@ -170,3 +170,29 @@ test('both sides restart and still find each other through the relay, because ea
   await a2.reply(thread, 'yes')
   expect(await next(b2, 'message')).toMatchObject({ kind: 'answer', text: 'yes' })
 }, 20_000)
+
+test('one sender cannot fill a mailbox: its waiting requests are capped, and another sender still gets in', async () => {
+  const url = relay()
+  const secret = 'owner-secret'
+  const box = boxOf(secret)
+  // 주인이 한 번 다녀가 우편함을 연다. 그 뒤로는 꺼내 가지 않아서 넣은 요청이 그대로 기다린다.
+  await fetch(`${url}/v1/inbox/${box}`, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: '{"wait":0}' })
+  // 프록시 뒤에서는 보낸 쪽을 X-Forwarded-For 로 안다(이 시험의 연결은 루프백에서 온다).
+  const put = (from: string) =>
+    Promise.race([
+      fetch(`${url}/v1/box/${box}`, { method: 'POST', headers: { 'x-forwarded-for': from }, body: '{}' }).then(r => r.status),
+      Bun.sleep(700).then(() => 'waiting' as const),
+    ])
+  const flood: Promise<number | 'waiting'>[] = []
+  for (let i = 0; i < 60; i++) {
+    if (i % 20 === 0) await Bun.sleep(30)
+    flood.push(put('203.0.113.5'))
+  }
+  const results = await Promise.all(flood)
+  expect(results.filter(r => r === 'waiting').length).toBe(50)
+  expect(results.filter(r => r === 503).length).toBe(10)
+  // 다른 보낸 쪽의 요청은 받아서 기다리게 한다.
+  expect(await put('203.0.113.9')).toBe('waiting')
+  // 같은 보낸 쪽은 여전히 거절된다.
+  expect(await put('203.0.113.5')).toBe(503)
+})

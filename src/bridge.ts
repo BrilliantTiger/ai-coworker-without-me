@@ -3,12 +3,13 @@ import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, 
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Server } from 'bun'
 import { agreementFileName, isAgreement, renderAgreement, type Agreement } from './agreement'
-import { decodeCode, encodeCode } from './code'
+import { decodeCode, encodeCode, type ConnectionCode } from './code'
 import { fromB64, newKeyPair, open, randomToken, ReplayGuard, seal, toB64, type KeyPair, type Sealed } from './crypto'
 import { hostForUrl, localAddresses } from './net'
 import { boxOf } from './box'
 import { assertNoSecrets, findSecrets, type Found } from './secrets'
 import { LinkLog, MAX_LOG_LINES, type LogEntry } from './linklog'
+import { assertNoComputerInfo, findComputerInfo, outsideRelayError, relayPortOf, utf8Text } from './outside'
 
 // 사내 방화벽에 열어 달라고 요청하기 쉽게 정해 둔 범위.
 export const DEFAULT_PORTS: [number, number] = [7700, 7799]
@@ -35,6 +36,8 @@ const CLOCK_FIX =
 const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' || addr === 'localhost'
 // 주소 목록에서 http(s):// 로 시작하는 것은 중계 서버의 우편함이다. 나머지는 IP나 컴퓨터 이름이다.
 export const isRelayAddr = (addr: string) => /^https?:\/\//.test(addr)
+// 외부용 코드인지. 표시가 있어도 중계 서버의 우편함이 아닌 주소가 섞여 있으면 외부용 코드로 보지 않는다.
+export const isOutsideCode = (code: ConnectionCode) => code.outside === true && code.addrs.every(isRelayAddr)
 
 // 상대에게 닿지 못한 까닭. no_route: 그 주소로 가는 길이 없다(꺼짐, 잠자기, 다른 네트워크로 옮김).
 // refused: 그 PC는 있지만 그 포트에서 브릿지가 받지 않는다. cut: 이어져 있다가 도중에 끊겼다. timeout: 정한 시간 안에 답이 없다.
@@ -85,6 +88,11 @@ export type Peer = {
   directFailed?: boolean
   lastPollAt?: number
   private?: boolean
+  // 외부용 코드로 들어온 상대. 개인용이고, 중계 서버로만 오가며, 이 컴퓨터에 관한 값을 보내지 않는다.
+  outside?: boolean
+  // 외부용 코드를 만든 쪽이다(이쪽이 그 코드로 들어갔다). 주소는 코드에 적힌 우편함 그대로 쓰고, 인사로 바꾸지 않는다.
+  // outside 이면서 host 가 아니면 이쪽이 만든 외부용 코드로 들어온 세션이다. 그 세션이 적어 보낸 주소로는 아무것도 보내지 않는다.
+  host?: boolean
   lastSeen?: number
   lastError?: { kind: LinkError; at: number; detail?: string; addr?: string }
   retryAt?: number
@@ -133,16 +141,52 @@ export const MAX_FILES_BYTES = 30 * 1024 * 1024
 // 상대가 가져갈 때 한 번에 넘기는 양. 중계 서버의 답 한도(1 MiB) 안에 들어가게 한다.
 const BATCH_BYTES = 600 * 1024
 // 이 판이 할 수 있는 것. 인사에 적어 보낸다. 상대가 파일을 받을 줄 아는지 이것으로 안다.
-const CAN = ['files']
+// refusals: 보낸 것을 상대가 받지 않으면 그 까닭(refused)을 알아듣는다.
+const CAN = ['files', 'refusals']
+
+// 외부용 코드로 들어온 세션 하나가 이쪽에 남길 수 있는 양. 모르는 사람의 세션이므로 한도를 둔다. 한도를 넘으면 받지 않고 까닭을 알려 준다.
+// sessions: 한 브릿지에 이어 두는 외부 세션의 수. conversations: 그 세션이 연 대화의 수. messages: 그 세션이 보낸 글의 수.
+// messageBytes: 글 하나의 크기. totalBytes: 그 세션이 보낸 글을 모두 합친 크기. fileBytes: 파일을 받기로 했을 때 그 세션의 파일을 모두 합친 크기.
+export type OutsideLimits = { sessions: number; conversations: number; messages: number; messageBytes: number; totalBytes: number; fileBytes: number }
+export const OUTSIDE_LIMITS: OutsideLimits = {
+  sessions: 5,
+  conversations: 20,
+  messages: 200,
+  messageBytes: 64 * 1024,
+  totalBytes: 2 * 1024 * 1024,
+  fileBytes: 20 * 1024 * 1024,
+}
+// COWORKER_OUTSIDE_MAX_SESSIONS 같은 설정에서 한도를 읽는다. 크기는 KiB 와 MiB 로 적는다. 비었거나 숫자가 아니면 기본값이다.
+export function outsideLimitsFrom(env: Record<string, string | undefined>): Partial<OutsideLimits> {
+  const read = (name: string, unit = 1) => {
+    const n = Number(env[name])
+    return env[name]?.trim() && Number.isFinite(n) && n >= 0 ? Math.floor(n * unit) : undefined
+  }
+  const out: Partial<OutsideLimits> = {
+    sessions: read('COWORKER_OUTSIDE_MAX_SESSIONS'),
+    conversations: read('COWORKER_OUTSIDE_MAX_CONVERSATIONS'),
+    messages: read('COWORKER_OUTSIDE_MAX_MESSAGES'),
+    messageBytes: read('COWORKER_OUTSIDE_MAX_MESSAGE_KB', 1024),
+    totalBytes: read('COWORKER_OUTSIDE_MAX_TOTAL_MB', 1024 * 1024),
+    fileBytes: read('COWORKER_OUTSIDE_MAX_FILES_MB', 1024 * 1024),
+  }
+  for (const k of Object.keys(out) as (keyof OutsideLimits)[]) if (out[k] === undefined) delete out[k]
+  return out
+}
+// 외부용으로만 연 브릿지에 동료용 코드를 달라고 하거나 동료용 코드로 이으려 할 때.
+export const OUTSIDE_ONLY =
+  'this bridge was opened for outside sessions only, and it stays that way until it is closed: it listens on this computer only and makes outside codes only. Nothing was changed. For a code for a colleague, use another session, or close this bridge with close_bridge first (that ends its connections) and open a new one'
+const MAX_ID = 100
 const cleanCan = (value: unknown) => (Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && v.length <= 20).slice(0, 20) : undefined)
 // 파일이 온전히 오지 못한 까닭.
-export type FileProblem = 'incomplete' | 'size' | 'sha256' | 'limit' | 'no_folder'
+export type FileProblem = 'incomplete' | 'size' | 'sha256' | 'limit' | 'no_folder' | 'refused'
 export const FILE_PROBLEM: Record<FileProblem, string> = {
   incomplete: 'the file did not arrive completely',
   size: 'the size differs from what the sender said',
   sha256: 'the sha256 differs from what the sender said',
   limit: 'the files of this message are over the size limit',
   no_folder: 'this session has no folder to save files in',
+  refused: 'the receiving session does not take this file: it takes no files from an outside session, or the quota for them is used up',
 }
 // 글에 붙은 파일의 기록. 누가 언제 보냈는지는 그 글(from, at)에 있다.
 export type FileNote = {
@@ -183,10 +227,11 @@ export function safeFileName(name: unknown): string {
     .replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_')
     .replace(/^\.+/, '')
     .trim()
-    .replace(/[. ]+$/, '')
     .slice(0, 150)
+    // 150자로 자른 뒤에 끝을 다듬는다. 자른 자리가 점이나 빈칸이면 Windows 가 그 이름을 받지 않는다.
+    .replace(/[. ]+$/, '')
   if (!clean) return 'file'
-  return WINDOWS_RESERVED.test(clean) ? `_${clean}`.slice(0, 150) : clean
+  return WINDOWS_RESERVED.test(clean) ? `_${clean}`.slice(0, 150).replace(/[. ]+$/, '') : clean
 }
 // 같은 이름이 이미 있으면 덮어쓰지 않고 이름 뒤에 번호를 붙인다.
 function freePath(folder: string, name: string): string | undefined {
@@ -268,6 +313,8 @@ export type BridgeEvent =
       ask?: AskInfo | AskProgress
       agreement?: Agreement
       file?: string
+      // 합의문을 파일로 남기지 못했다. 사람에게 알린다.
+      not_saved?: string
       // 상대 쪽 사람이 정한 답이다.
       human?: boolean
       // 답이 필요 없는 알림이다. 답하지 않아도 되고, 덧붙일 것이 있으면 답해도 된다.
@@ -388,6 +435,8 @@ type Payload =
   | { type: 'introduce'; member: Member }
   | { type: 'msg'; msg: WireMessage }
   | { type: 'ok' }
+  // 받지 않았다. 까닭을 적어 준다(외부 세션의 한도를 넘었다, 외부 세션이 꽉 찼다). 이 답을 모르는 옛 판은 받은 것으로 안다.
+  | { type: 'refused'; reason: string }
   | { type: 'ping' }
   // waiting: 받는 쪽이 이 상대와의 대화에서 자기 사람에게 묻는 중인 것. 0.7 이하 판은 보내지 않는다.
   | { type: 'pong'; waiting?: WaitState[]; can?: string[] }
@@ -423,6 +472,16 @@ class DeliveryError extends Error {
 
 export type BridgeOptions = {
   name: string
+  // 외부용 코드와 그 상대에게 보여 줄 이름. 컴퓨터 이름을 넣지 않는다.
+  outsideName?: string
+  // 처음부터 외부용으로만 연 브릿지인지. 그러면 127.0.0.1 에서만 듣고 이 PC 주소를 찾지 않는다.
+  outsideOnly?: boolean
+  // 이 세션이 일하는 프로젝트 폴더의 전체 경로. 외부 상대에게 이 경로가 나가지 않게 막는다.
+  projectDir?: string
+  // 외부용 코드로 들어온 세션에 두는 한도. 준 것만 기본값을 바꾼다.
+  outsideLimits?: Partial<OutsideLimits>
+  // 외부용 코드로 들어온 세션이 보내는 파일을 받을지. 기본은 받지 않는다.
+  outsideFiles?: boolean
   ports?: [number, number]
   home?: string
   addrs?: () => string[]
@@ -456,15 +515,18 @@ export type ViewerAddress = { port: number; token: string }
 export type SavedBridge = {
   v: 1
   name: string
+  outsideName?: string
+  outsideOnly?: boolean
+  outsideFiles?: boolean
   publicKey: string
   secretKey: string
   port: number
   peers: Peer[]
   threads: Thread[]
   outbox: Outgoing[]
-  tokens: { token: string; expires: number | null; private: boolean }[]
+  tokens: { token: string; expires: number | null; private: boolean; outside?: boolean }[]
   // 이미 쓴 코드와 그 코드로 들어온 세션. 같은 세션이 그 코드를 다시 들고 오면 받아 준다.
-  used?: { token: string; key: string; private: boolean }[]
+  used?: { token: string; key: string; private: boolean; outside?: boolean }[]
   ended?: Ended[]
   // 중계 서버 우편함의 비밀. 다시 켜도 같은 우편함을 쓰므로, 양쪽이 다 다시 켜져도 서로의 우편함을 찾는다.
   relaySecret?: string
@@ -487,6 +549,9 @@ export function isSavedBridge(v: unknown): v is SavedBridge {
     !!s &&
     s.v === 1 &&
     typeof s.name === 'string' &&
+    (s.outsideName === undefined || typeof s.outsideName === 'string') &&
+    (s.outsideOnly === undefined || typeof s.outsideOnly === 'boolean') &&
+    (s.outsideFiles === undefined || typeof s.outsideFiles === 'boolean') &&
     typeof s.publicKey === 'string' &&
     typeof s.secretKey === 'string' &&
     Number.isInteger(s.port) &&
@@ -515,6 +580,9 @@ function isHumanQuestion(v: unknown): v is HumanQuestion {
 export type RelayState = 'off' | 'connecting' | 'ok' | { error: string }
 
 const now = () => new Date().toISOString()
+// 합의문을 받아 보여 줬지만 파일로 남기지 못했을 때 AI가 사람에게 전할 말.
+export const AGREEMENT_NOT_SAVED =
+  'this agreement was shown but could not be saved as a file on this PC. Tell your human, and keep its text another way if it is needed later'
 const NO_PEERS =
   'no connected session yet; open the bridge and exchange a connection code first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result'
 // 상대가 이 시간 안에 가져가러 왔으면, 상대는 이쪽 메시지를 스스로 가져가는 중이다.
@@ -555,6 +623,10 @@ const detailOf = (e: unknown) => {
   return String(name ?? err?.code ?? err?.name ?? err?.message ?? e).slice(0, 120)
 }
 const isToken = (t: unknown): t is string => typeof t === 'string' && t.length > 0 && t.length <= 200
+// 상대가 적어 보낸 거절 까닭. 한 줄, 300자까지만 사람과 AI에게 보인다.
+const cleanReason = (r: unknown) => (typeof r === 'string' ? r.replace(/\s+/g, ' ').trim().slice(0, 300) : '') || 'no reason was given'
+// 받지 않아서 보내지 못했다. 줄에 세워 다시 보내지 않는다.
+class RefusedError extends Error {}
 const linkErrorOf = (e: unknown): LinkError => {
   const err = e as { name?: string; code?: string } | undefined
   if (err?.name === 'TimeoutError') return 'timeout'
@@ -566,7 +638,20 @@ const isoOf = (ms: number | undefined) => (ms ? new Date(ms).toISOString() : und
 // 기억해 두는 「쓴 코드」와 「끝난 연결」의 수.
 const MAX_USED = 500
 const MAX_ENDED = 20
-const savedPeer = (p: Peer) => ({ key: p.key, name: p.name, about: p.about, can: p.can, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given })
+const savedPeer = (p: Peer) => ({
+  key: p.key,
+  name: p.name,
+  about: p.about,
+  can: p.can,
+  addrs: p.addrs,
+  port: p.port,
+  private: p.private || undefined,
+  outside: p.outside || undefined,
+  host: p.host || undefined,
+  lastSeen: p.lastSeen,
+  token: p.token,
+  given: p.given,
+})
 // 이 PC가 잠들었다고 보는 시계의 빈틈. 5초마다 재는데 이만큼 넘게 비면 그동안 멈춰 있었다.
 const TICK_MS = 5000
 const PAUSE_MS = 30_000
@@ -578,14 +663,27 @@ export class Bridge {
   readonly key: string
   private readonly route: string
   name: string
+  outsideName?: string
+  projectDir?: string
+  private outsideOnly = false
+  private outsideFiles = false
+  readonly limits: OutsideLimits
+  // 외부 세션마다 지금까지 받아 둔 양. 저장한 대화에서 다시 센다.
+  private kept = new Map<string, { conversations: number; messages: number; bytes: number }>()
+  // 받지 않은 횟수. 세션마다, 그리고 모르는 보낸 쪽 전체에 하나. 기록은 1번째, 10번째, 100번째… 에만 남긴다.
+  private counts = new Map<string, number>()
+  // 받는 중인 파일마다 보낸 쪽이 처음 적은 크기.
+  private partialSizes = new Map<string, number>()
+  // 옛 판 외부 세션에게 한도를 알린 것. 한도마다 한 번만 알린다.
+  private toldLimit = new Set<string>()
   port = 0
   readonly peers = new Map<string, Peer>()
   readonly threads = new Map<string, Thread>()
 
   private server?: Server<undefined>
   private timer?: ReturnType<typeof setInterval>
-  private tokens = new Map<string, { expires: number; private: boolean }>()
-  private used = new Map<string, { key: string; private: boolean }>()
+  private tokens = new Map<string, { expires: number; private: boolean; outside?: boolean }>()
+  private used = new Map<string, { key: string; private: boolean; outside?: boolean }>()
   private ended: Ended[] = []
   // 상대마다 다시 붙기를 기다리는 중이면, 그 기다림을 바로 끝내는 함수.
   private retryWakers = new Map<string, () => void>()
@@ -600,7 +698,6 @@ export class Bridge {
   private invites = new Map<string, Invite>()
   private closedAsks = new Map<string, string>()
   private seen = new Set<string>()
-  private refusedThreads = new Map<string, number>()
   // 예전 봉투를 다시 보내 오는 것을 거른다. 받는 요청과 받은 답 모두.
   private replay: ReplayGuard
   // 시계가 달라 주고받지 못한 상대와 그때. 사람에게는 상대마다 한 시간에 한 번만 알린다.
@@ -625,7 +722,7 @@ export class Bridge {
   private flushing = false
   private lastCode?: string
   private polling = new Set<string>()
-  private pollWaiters = new Map<string, Set<() => void>>()
+  private pollWaiters = new Map<string, Set<(replaced?: boolean) => void>>()
   private abort = new AbortController()
   private relaySecret?: string
   private relayBox?: string
@@ -636,7 +733,7 @@ export class Bridge {
   private saveTimer?: ReturnType<typeof setTimeout>
   // close 로 닫았으면 저장한 상태를 지운다. 프로세스가 끝나서 닫힐 때는 다시 켤 때를 위해 남긴다.
   private forget = false
-  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey' | 'keys' | 'saveTo' | 'clock'>> & {
+  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey' | 'keys' | 'saveTo' | 'clock' | 'outsideName' | 'outsideOnly' | 'projectDir' | 'outsideLimits' | 'outsideFiles'>> & {
     home?: string
     relay?: string
     relayKey?: string
@@ -649,6 +746,11 @@ export class Bridge {
     this.key = toB64(this.keys.publicKey)
     this.route = routeId(this.key)
     this.name = options.name
+    this.outsideName = options.outsideName
+    this.outsideOnly = !!options.outsideOnly
+    this.outsideFiles = !!options.outsideFiles
+    this.limits = { ...OUTSIDE_LIMITS, ...options.outsideLimits }
+    this.projectDir = options.projectDir
     this.opts = {
       ports: DEFAULT_PORTS,
       addrs: localAddresses,
@@ -670,7 +772,14 @@ export class Bridge {
   // 저장해 둔 세션을 같은 키로 되살린다. 전에 쓰던 포트가 비어 있으면 그 포트로 연다.
   // 상대들은 이 세션을 같은 키로 알고 있으므로 새 연결 코드 없이 다시 이어진다. 바뀐 주소와 포트는 인사로 알린다.
   static restore(saved: SavedBridge, options: Omit<BridgeOptions, 'name' | 'keys'>): Bridge {
-    const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } })
+    const b = new Bridge({
+      ...options,
+      name: saved.name,
+      outsideName: saved.outsideName ?? options.outsideName,
+      outsideOnly: saved.outsideOnly ?? options.outsideOnly,
+      outsideFiles: saved.outsideFiles ?? options.outsideFiles,
+      keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) },
+    })
     b.about = cleanAbout(saved.about)
     for (const p of saved.peers)
       b.peers.set(p.key, {
@@ -678,9 +787,13 @@ export class Bridge {
         name: p.name,
         about: cleanAbout(p.about),
         can: cleanCan((p as { can?: unknown }).can),
-        addrs: p.addrs,
+        // 이쪽이 만든 외부용 코드로 들어온 세션에는 주소를 두지 않는다. 그 세션이 스스로 가져간다.
+        addrs: p.outside && !p.host ? [] : p.addrs,
         port: p.port,
-        private: p.private || undefined,
+        private: p.private || p.outside || undefined,
+        outside: p.outside || undefined,
+        host: (p.outside && p.host) || undefined,
+        directFailed: p.outside && !p.host ? true : undefined,
         lastSeen: typeof p.lastSeen === 'number' ? p.lastSeen : undefined,
         token: isToken(p.token) ? p.token : undefined,
         given: isToken(p.given) ? p.given : undefined,
@@ -689,8 +802,9 @@ export class Bridge {
     // 글로만 답이 필요 없다고 적은 알림을 알아보기 전(0.10 이하)에 저장한 대화도 알림으로 표시한다.
     for (const t of b.threads.values()) for (const m of t.messages ?? []) if (m.kind === 'question' && !m.noAnswer && saysNoAnswer(m.text)) m.noAnswer = true
     b.outbox = saved.outbox.filter(o => b.peers.has(o.peer))
-    for (const t of saved.tokens) b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private })
-    for (const u of saved.used ?? []) if (typeof u?.token === 'string' && typeof u.key === 'string') b.used.set(u.token, { key: u.key, private: !!u.private })
+    for (const t of saved.tokens) b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private || !!t.outside, outside: t.outside || undefined })
+    for (const u of saved.used ?? [])
+      if (typeof u?.token === 'string' && typeof u.key === 'string') b.used.set(u.token, { key: u.key, private: !!u.private || !!u.outside, outside: u.outside || undefined })
     b.ended = (saved.ended ?? []).filter(e => typeof e?.name === 'string' && typeof e.id === 'string')
     b.seen = new Set(saved.seen)
     b.closedAsks = new Map(saved.closedAsks)
@@ -700,13 +814,13 @@ export class Bridge {
     if (isToken(saved.relaySecret)) b.keptRelaySecret = saved.relaySecret
     for (const q of saved.asking ?? []) if (q && isThreadId(q.thread)) b.asking.set(q.thread, q)
     try {
-      b.open(saved.port)
+      b.open(saved.port, { outsideOnly: b.outsideOnly })
     } catch {
-      b.open()
+      b.open(undefined, { outsideOnly: b.outsideOnly })
     }
-    b.log.write('restored', { name: b.name, peers: b.peers.size, queued: b.outbox.length })
+    b.log.write('restored', { name: b.outsideOnly ? b.nameFor(true) : b.name, peers: b.peers.size, queued: b.outbox.length })
     for (const peer of b.peers.values()) {
-      void b.sayHello(peer, { back: true }).catch(() => {})
+      b.greet(peer, { back: true })
       void b.pollLoop(peer.key)
     }
     return b
@@ -738,6 +852,9 @@ export class Bridge {
     return {
       v: 1,
       name: this.name,
+      outsideName: this.outsideName,
+      outsideOnly: this.outsideOnly || undefined,
+      outsideFiles: this.outsideFiles || undefined,
       publicKey: toB64(this.keys.publicKey),
       secretKey: toB64(this.keys.secretKey),
       port: this.port,
@@ -747,8 +864,8 @@ export class Bridge {
       outbox: this.outbox,
       tokens: [...this.tokens]
         .filter(([, t]) => t.expires > Date.now())
-        .map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private })),
-      used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private })),
+        .map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private, outside: t.outside || undefined })),
+      used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private, outside: u.outside || undefined })),
       ended: this.ended,
       relaySecret: this.keptRelaySecret,
       seen: [...this.seen].slice(-2000),
@@ -765,22 +882,110 @@ export class Bridge {
     return !!this.server
   }
 
+  get isOutsideOnly() {
+    return this.outsideOnly
+  }
+
+  private relayAddr() {
+    return this.opts.relay && this.relayBox ? `${this.opts.relay}/v1/box/${this.relayBox}` : undefined
+  }
+
+  // 외부 상대에게 보여 줄 이 세션의 이름. 컴퓨터 이름이나 폴더 경로는 넣지 않는다.
+  nameFor(outsideOrPeer: boolean | Peer | undefined): string {
+    const out = typeof outsideOrPeer === 'boolean' ? outsideOrPeer : !!outsideOrPeer?.outside
+    if (!out) return this.name
+    const name = this.outsideName
+      ? this.outsideName
+      : this.about?.app
+        ? this.about.app
+        : this.name.includes(' @ ')
+          ? this.name.replace(/\s*@\s*.*$/, '').replace(/^.*·\s*/, '').trim() || 'coworker'
+          : this.name
+    // 이름은 정할 때 이미 확인한다. 그래도 나가는 자리에서 한 번 더 보고, 걸리면 이름 대신 coworker 라고만 한다.
+    return findComputerInfo({ name }, [this.projectDir]).length ? 'coworker' : name
+  }
+
+  // 외부 상대에게 알리는 이 세션의 소개. 정할 때 이미 확인하지만, 나가는 자리에서 한 번 더 보고 걸리는 항목은 뺀다.
+  private aboutFor(peer: Peer | undefined): About | undefined {
+    if (!peer?.outside || !this.about) return this.about
+    const out: About = {}
+    for (const k of ['app', 'model', 'effort'] as const) if (this.about[k] && !findComputerInfo({ [k]: this.about[k] }, [this.projectDir]).length) out[k] = this.about[k]
+    return Object.keys(out).length ? out : undefined
+  }
+
+  // 상대에게 알리는 「할 수 있는 것」. 이쪽이 만든 외부용 코드로 들어온 세션에는, 파일을 받기로 한 브릿지일 때만 파일을 받는다고 알린다.
+  private canFor(peer: Peer | undefined): string[] {
+    return peer?.outside && !peer.host && !this.outsideFiles ? CAN.filter(c => c !== 'files') : CAN
+  }
+
+  // 이쪽이 만든 외부용 코드로 들어와 있는 세션.
+  private joinedOutside() {
+    return [...this.peers.values()].filter(p => p.outside && !p.host)
+  }
+
+  // 외부용 코드로 이어진 세션이 있거나, 아직 쓰지 않은 외부용 코드가 있다. 그러면 이 세션의 소개도 나가기 전에 확인한다.
+  private facesOutside() {
+    return this.outsideOnly || [...this.peers.values()].some(p => p.outside) || [...this.tokens.values()].some(t => t.outside && t.expires > Date.now())
+  }
+
+  // 외부용 코드로 들어온 세션의 파일도 받는다. 브릿지를 열 때 사람이 그렇게 하자고 했을 때만 켠다.
+  allowOutsideFiles() {
+    if (this.outsideFiles) return
+    this.outsideFiles = true
+    this.dirty()
+    for (const peer of this.joinedOutside()) this.greet(peer)
+  }
+
+  get takesOutsideFiles() {
+    return this.outsideFiles
+  }
+
+  // 외부 상대에게는 중계 서버의 우편함 주소만 알리고 이 PC의 주소는 알리지 않는다.
+  addrsFor(outsideOrPeer: boolean | Peer | undefined): string[] {
+    const out = typeof outsideOrPeer === 'boolean' ? outsideOrPeer : !!outsideOrPeer?.outside
+    if (!out) return this.addrs()
+    const box = this.relayAddr()
+    return box ? [box] : []
+  }
+
+  // 외부 상대에게는 이 PC의 포트를 알리지 않고 중계 서버 주소의 포트만 적는다(0.12.1 호환).
+  portFor(outsideOrPeer: boolean | Peer | undefined): number {
+    const out = typeof outsideOrPeer === 'boolean' ? outsideOrPeer : !!outsideOrPeer?.outside
+    if (!out) return this.port
+    return this.opts.relay ? relayPortOf(this.opts.relay) : 443
+  }
+
+  assertOutsideSafe(fields: Record<string, string | undefined>) {
+    assertNoComputerInfo(fields, [this.projectDir])
+  }
+
   addrs() {
-    const relay = this.relayBox ? [`${this.opts.relay}/v1/box/${this.relayBox}`] : []
+    const box = this.relayAddr()
+    const relay = box ? [box] : []
+    if (this.outsideOnly) return relay
     return [...this.opts.addrs(), ...relay]
   }
 
   // 포트를 열고 받기 시작한다. 포트를 지정하지 않으면 정해 둔 범위에서 비어 있는 번호를 쓴다.
-  open(port?: number) {
+  open(port?: number, options?: { outsideOnly?: boolean }) {
     if (this.server) {
-      if (port && port !== this.port) throw new Error(`bridge is already open on port ${this.port}`)
+      // 외부용으로만 연 브릿지는 닫을 때까지 그대로다. 열려 있는 동안에는 어떤 요청으로도 사내망에서 받게 바꾸지 않는다.
+      if (options?.outsideOnly === false && this.outsideOnly) throw new Error(OUTSIDE_ONLY)
+      if (port && port !== this.port && !this.outsideOnly) throw new Error(`bridge is already open on port ${this.port}`)
       return
     }
-    if (port) {
-      if (!this.listen(port)) throw new Error(`port ${port} is already in use; pick another port or leave it empty`)
+    if (options?.outsideOnly !== undefined) this.outsideOnly = options.outsideOnly
+    const bindHost = this.outsideOnly ? '127.0.0.1' : '0.0.0.0'
+    if (this.outsideOnly) {
+      // 외부용으로만 여는 브릿지는 이 PC 안에서만 받는다(같은 PC의 다른 세션이 이어받을 때만 쓴다). 방화벽에 열어 둔 범위의 번호를 쓸 까닭이 없다.
+      // 그 범위의 번호는 같은 PC의 다른 브릿지가 모든 주소로 받고 있어도 127.0.0.1 로는 또 열려서, 그 브릿지로 가던 같은 PC 연결을 가로챈다.
+      // 그래서 정해 준 번호와 범위를 쓰지 않고 운영체제가 비어 있는 번호를 고르게 한다. 이 번호는 코드에도 인사에도 들어가지 않는다.
+      if (!this.listen(0, bindHost)) throw new Error('cannot listen on this computer (127.0.0.1)')
+    } else if (port) {
+      if (!this.listen(port, bindHost)) throw new Error(`port ${port} is already in use; pick another port or leave it empty`)
     } else {
       const [min, max] = this.opts.ports
-      for (let p = min; p <= max && !this.server; p++) this.listen(p)
+      for (let p = min; p <= max && !this.server; p++) this.listen(p, bindHost)
       if (!this.server) throw new Error(`no free port between ${min} and ${max}`)
     }
     this.abort = new AbortController()
@@ -796,7 +1001,12 @@ export class Bridge {
       void this.tryInvites()
     }, this.opts.retryMs)
     this.timer.unref?.()
-    this.log.write('open', { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay })
+    this.log.write(
+      'open',
+      this.outsideOnly
+        ? { name: this.nameFor(true), relay: this.opts.relay }
+        : { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay },
+    )
     this.watchThisPc()
     this.writeState()
     this.changed()
@@ -806,10 +1016,25 @@ export class Bridge {
 
   // 새 연결 코드. 코드마다 토큰이 달라서 한 코드로는 한 세션만 연결할 수 있다.
   // 그룹 코드로 들어온 세션은 이쪽 그룹의 다른 세션과도 이어 준다. 개인용 코드는 이쪽하고만 잇는다.
+  // 외부용 코드(outside: true)는 중계 서버가 작동할 때만 만들고, 우편함 주소만 담으며 언제나 개인용이다.
   // ttlMs: 코드를 쓸 수 있는 시간. 비우면 tokenTtlMs(기본 60분), null 이면 시간 제한 없이 브릿지를 닫을 때까지 쓴다.
   // 어느 쪽이든 한 번 쓰면 끝난다.
-  newCode(options: { private?: boolean; ttlMs?: number | null } = {}): string {
-    if (!this.server) this.open()
+  newCode(options: { private?: boolean; outside?: boolean; ttlMs?: number | null } = {}): string {
+    if (options.outside) {
+      if (!this.opts.relay) throw new Error(outsideRelayError(undefined, 'off'))
+      if (!this.server || this.relayState !== 'ok' || !this.relayBox) throw new Error(outsideRelayError(this.opts.relay, this.relayState))
+      const shownName = this.outsideName ?? this.nameFor(true)
+      this.assertOutsideSafe({ name: shownName, ...this.about })
+      const token = randomToken()
+      const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs
+      this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: true, outside: true })
+      this.lastCode = encodeCode({ v: 1, name: shownName, addrs: this.addrsFor(true), port: this.portFor(true), key: this.key, token, outside: true })
+      this.writeState()
+      this.dirty()
+      return this.lastCode
+    }
+    if (this.server && this.outsideOnly) throw new Error(OUTSIDE_ONLY)
+    this.open(undefined, { outsideOnly: false })
     const token = randomToken()
     const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs
     this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: !!options.private })
@@ -822,6 +1047,10 @@ export class Bridge {
   async connect(codeText: string): Promise<Peer> {
     const code = decodeCode(codeText)
     if (code.key === this.key) throw new Error('that is this session\'s own code; give it to your coworker instead')
+    // 외부용 코드에는 표시가 있고, 주소는 중계 서버의 우편함뿐이다. 그 상대에게는 이 컴퓨터에 관한 것을 보내지 않는다.
+    const outside = isOutsideCode(code)
+    if (this.server && this.outsideOnly && !outside) throw new Error(OUTSIDE_ONLY)
+    if (outside) this.assertOutsideSafe({ name: this.outsideName ?? this.nameFor(true), ...this.about })
     if (!this.server) this.open()
     const known = this.peers.get(code.key)
     if (known) {
@@ -835,7 +1064,16 @@ export class Bridge {
       this.dirty()
       return known
     }
-    const peer: Peer = { key: code.key, name: code.name, addrs: code.addrs, port: code.port, token: code.token }
+    const peer: Peer = {
+      key: code.key,
+      name: code.name,
+      addrs: code.addrs,
+      port: code.port,
+      outside: outside || undefined,
+      host: outside || undefined,
+      private: outside || undefined,
+      token: code.token,
+    }
     let reply: Payload
     try {
       reply = await this.sayHello(peer, { token: code.token })
@@ -848,14 +1086,18 @@ export class Bridge {
         throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`)
       throw new Error(`cannot reach ${code.name} at ${code.addrs.join(', ')} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`)
     }
+    if (reply.type === 'refused') {
+      this.forgetGiven(peer)
+      throw new Error(`${code.name} did not take this connection: ${cleanReason(reply.reason)}`)
+    }
     if (reply.type !== 'hello_ack') {
       this.forgetGiven(peer)
       throw new Error('unexpected answer from the other session')
     }
-    peer.name = reply.name
-    peer.private = !!reply.private
+    peer.name = String(reply.name).slice(0, MAX_NAME)
+    peer.private = !!reply.private || outside
     peer.token ??= code.token
-    if (peer.given) this.used.set(peer.given, { key: peer.key, private: peer.private })
+    if (peer.given) this.used.set(peer.given, { key: peer.key, private: peer.private, outside: outside || undefined })
     this.addPeer(peer, { how: 'code' })
     if (!peer.private) for (const m of Array.isArray(reply.members) ? reply.members : []) this.invite(m, peer.name)
     return peer
@@ -880,6 +1122,7 @@ export class Bridge {
         id: peerId(peer.key),
         name: peer.name,
         about: peer.about,
+        ...(peer.outside ? { outside: true } : {}),
         state: down ? ('reconnecting' as const) : ('connected' as const),
         since: isoOf(down?.since),
         via: peer.lastAddr ? (isRelayAddr(peer.lastAddr) ? ('relay' as const) : ('direct' as const)) : pulling ? ('pickup' as const) : ('direct' as const),
@@ -891,8 +1134,9 @@ export class Bridge {
   // files: 글에 붙여 보낼 파일의 경로. reviewed: 파일 안의 비밀번호처럼 보이는 곳을 사람이 보고 진짜가 아니라고 했다.
   async ask(to: string | undefined, question: string, context?: string, files?: string[], reviewed = false) {
     const peer = await this.resolvePeer(to)
+    if (peer.outside) this.assertOutsideSafe({ question, context })
     if (files?.length) await this.assertTakesFiles([peer])
-    return this.sendQuestion(peer, question, context, undefined, false, undefined, this.stage(files, reviewed))
+    return this.sendQuestion(peer, question, context, undefined, false, undefined, this.stage(files, reviewed, !!peer.outside))
   }
 
   // to 가 여러 명이나 everyone 이면 받는 사람마다 대화를 하나씩 만들고 같은 ask 로 묶는다. 한 명이면 ask 와 같다.
@@ -900,11 +1144,13 @@ export class Bridge {
   // category: 사람이 골라 볼 수 있게 붙이는 짧은 분류.
   async askMany(to: string | string[] | undefined, question: string, context?: string, answers: AnswerMode = 'all', noAnswer = false, category?: string, files?: string[], reviewed = false) {
     const peers = await this.resolvePeers(to)
+    if (peers.some(p => p.outside)) this.assertOutsideSafe({ question, context, category })
     // 파일은 아무에게도 보내기 전에 모두 확인한다. 받는 사람마다 사본을 따로 둔다(한 사람에게 다 가면 그 사본만 지운다).
     if (files?.length) await this.assertTakesFiles(peers)
-    const staged = peers.map(() => this.stage(files, reviewed))
+    const staged = peers.map(p => this.stage(files, reviewed, !!p.outside))
     if (peers.length === 1) return this.sendQuestion(peers[0]!, question, context, undefined, noAnswer, category, staged[0])
-    const ask: AskInfo = { id: randomUUID().slice(0, 8), to: peers.map(p => p.name), answers }
+    // 함께 물은 세션의 이름은 서로에게 간다. 외부 세션의 이름은 거기에 넣지 않는다.
+    const ask: AskInfo = { id: randomUUID().slice(0, 8), to: peers.filter(p => !p.outside).map(p => p.name), answers }
     const sent = await Promise.all(
       peers.map((peer, i) =>
         // 한 곳이 거절해도 나머지는 보낸다.
@@ -916,11 +1162,12 @@ export class Bridge {
         })),
       ),
     )
-    return { ask: ask.id, answers, to: ask.to, sent }
+    return { ask: ask.id, answers, to: peers.map(p => p.name), sent }
   }
 
   private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false, category?: string, files: FileNote[] = []) {
     assertNoSecrets({ question, context, category })
+    if (peer.outside) this.assertOutsideSafe({ question, context, category })
     const label = cleanCategory(category)
     const thread: Thread = {
       id: randomUUID().slice(0, 8),
@@ -936,8 +1183,10 @@ export class Bridge {
     }
     this.threads.set(thread.id, thread)
     // 표시하지 않고 글에 답이 필요 없다고만 적어도 알림으로 보낸다.
+    // 외부 상대에게는 다른 연결된 세션 이름 목록(ask.to)을 보내지 않는다.
     const notice = noAnswer || saysNoAnswer(question) ? { noAnswer: true } : {}
-    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ask, ...notice, category: label, ...wireFiles(files), at: now() }
+    const wireAsk = peer.outside ? {} : { ask }
+    const msg: WireMessage = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: 'question', text: question, context, ...wireAsk, ...notice, category: label, ...wireFiles(files), at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, ...notice, ...(files.length ? { files } : {}), at: msg.at })
     this.changed()
     try {
@@ -960,15 +1209,19 @@ export class Bridge {
     assertNoSecrets({ answer: text })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
+    if (peer.outside) this.assertOutsideSafe({ answer: text })
     if (opts.files?.length) await this.assertTakesFiles([peer])
-    const files = this.stage(opts.files, opts.reviewed)
+    const files = this.stage(opts.files, opts.reviewed, !!peer.outside)
     const human = opts.human ? { human: true } : {}
+    const before = thread.status
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'answer', text, ...human, ...wireFiles(files), at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text, ...human, ...(files.length ? { files } : {}), at: msg.at })
     // 상대가 자기 사람에게 묻는 중에 이쪽이 재촉해도, 상대는 여전히 사람의 결정을 기다린다.
     if (thread.status !== 'agreed' && !(thread.status === 'peer_checking_with_their_human' && thread.humanSince)) thread.status = 'waiting_for_peer'
     this.changed()
-    const delivery = await this.sendMessage(peer, msg, thread.id)
+    const delivery = await this.sendMessage(peer, msg, thread.id).catch(e => {
+      throw this.unsaid(thread, msg, before, e)
+    })
     return { thread: thread.id, to: peer.name, delivery, status: thread.status, ...sentFiles(files) }
   }
 
@@ -980,11 +1233,15 @@ export class Bridge {
     assertNoSecrets({ note })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
+    if (peer.outside) this.assertOutsideSafe({ note })
+    const before = thread.status
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'note', text: note, at: now() }
     thread.messages.push({ id: msg.id, from: 'me', kind: 'note', text: note, at: msg.at })
     if (thread.status !== 'agreed') thread.status = 'checking_with_your_human'
     this.changed()
-    const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id)
+    const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id).catch(e => {
+      throw this.unsaid(thread, msg, before, e)
+    })
     return { thread: thread.id, to: peer.name, delivery, status: thread.status }
   }
 
@@ -996,17 +1253,21 @@ export class Bridge {
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     if (thread.status === 'closed') this.assertOpen(thread)
     const facts = input.facts ?? []
-    assertNoSecrets({
+    const fields = {
       conclusion: input.conclusion,
       facts: facts.map(f => `${f.fact}\n${f.evidence}`).join('\n'),
       guesses: input.guesses?.join('\n'),
       disagreements: input.disagreements?.join('\n'),
       for_humans: input.forHumans?.join('\n'),
-    })
+    }
+    assertNoSecrets(fields)
+    const peer = this.peers.get(thread.peer)
+    if (peer?.outside) this.assertOutsideSafe(fields)
+    const me = this.nameFor(peer)
     const agreement: Agreement = {
-      by: this.name,
+      by: me,
       conclusion: input.conclusion,
-      facts: facts.map(f => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy === 'me' ? this.name : thread.peerName })),
+      facts: facts.map(f => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy === 'me' ? me : thread.peerName })),
       guesses: input.guesses ?? [],
       disagreements: input.disagreements ?? [],
       forHumans: input.forHumans ?? [],
@@ -1017,9 +1278,31 @@ export class Bridge {
     thread.status = 'agreed'
     this.changed()
     const file = this.saveAgreement(thread)
-    const peer = this.peers.get(thread.peer)
     const delivery = peer ? await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`
     return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file }
+  }
+
+  // 상대가 받지 않은 글은 이쪽 대화에서도 뺀다. 보낸 것으로 남아 있으면 사람이 상대도 받았다고 여긴다.
+  private unsaid(thread: Thread, msg: WireMessage, before: ThreadStatus, e: unknown) {
+    if (!(e instanceof RefusedError)) return e
+    thread.messages = thread.messages.filter(m => m.id !== msg.id)
+    thread.status = before
+    this.outbox = this.outbox.filter(o => !(o.thread === thread.id && o.payload.type === 'file' && msg.files?.some(f => f.id === (o.payload as { id: string }).id)))
+    this.unspool({ type: 'msg', msg })
+    this.changed()
+    return e
+  }
+
+  // 사람이 한 세션과의 연결만 끝낸다. 그 세션에 끝났다고 알리고(가져갈 수 있으면), 이쪽에서 지운다. 다시 이으려면 새 코드가 있어야 한다.
+  async endPeer(to: string) {
+    const peer = await this.resolvePeer(to)
+    try {
+      await this.deliver(peer, { type: 'bye' })
+    } catch {
+      if (this.isPulling(peer)) await this.handOver(peer, { type: 'bye' }, 2000)
+    }
+    this.dropPeer(peer, 'this side\'s human (close_bridge for this session only)')
+    return { name: peer.name, id: peerId(peer.key) }
   }
 
   // 아직 아무도 가져가지 않은 소식을 들여다본다. 가져가지는 않는다.
@@ -1089,6 +1372,9 @@ export class Bridge {
           about: peer.about,
           id: peerId(peer.key),
           group: !peer.private,
+          // 외부용 코드로 이어진 세션이다. refused: 한도를 넘어 받지 않은 횟수.
+          outside: peer.outside || undefined,
+          refused: this.refusedFrom(peer) || undefined,
           reachable,
           // 연결은 사람이 닫을 때만 끝난다. 닿지 않는 동안은 끊긴 것이 아니라 다시 붙는 중이다.
           state: reachable ? 'connected' : 'reconnecting',
@@ -1129,7 +1415,9 @@ export class Bridge {
 
   describe() {
     const relay = this.opts.relay ? { url: this.opts.relay, status: this.relayState } : undefined
-    return { name: this.name, about: this.about, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay }
+    // codes: 화면의 버튼이 만들 수 있는 코드의 종류. 외부용으로만 연 브릿지는 외부용 코드만, 중계 서버가 없으면 동료용 코드만 만든다.
+    const codes = this.outsideOnly ? ['outside'] : this.opts.relay ? ['group', 'outside'] : ['group']
+    return { name: this.name, about: this.about, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay, outside_only: this.outsideOnly || undefined, codes }
   }
 
   // 중계 서버에 우편함이 열릴 때까지 잠깐 기다린다. 연결 코드를 넘기기 전에 상대가 닿을 수 있게 한다.
@@ -1193,21 +1481,24 @@ export class Bridge {
     this.ended = []
     this.retryWakers.clear()
     this.invites.clear()
-    this.refusedThreads.clear()
+    this.kept.clear()
+    this.counts.clear()
+    this.toldLimit.clear()
+    this.partialSizes.clear()
     this.outbox = []
     this.changed()
   }
 
-  private listen(port: number): boolean {
+  private listen(port: number, hostname: '0.0.0.0' | '127.0.0.1' = '0.0.0.0'): boolean {
     try {
       this.server = Bun.serve({
         port,
-        hostname: '0.0.0.0',
+        hostname,
         maxRequestBodySize: 1 << 20,
         idleTimeout: 60,
         fetch: (req, server) => this.handle(req, server),
       })
-      this.port = port
+      this.port = this.server.port ?? port
       return true
     } catch {
       return false
@@ -1224,6 +1515,14 @@ export class Bridge {
 
   // 바로 온 요청이든 중계 서버의 우편함에서 꺼낸 요청이든 같게 처리한다. seenAt 은 바로 왔을 때 상대의 IP다.
   private async respond(sealed: unknown, seenAt: string | undefined, relayed = false): Promise<{ status: number; body: string }> {
+    try {
+      return await this.respondInner(sealed, seenAt, relayed)
+    } catch {
+      return { status: 500, body: 'error' }
+    }
+  }
+
+  private async respondInner(sealed: unknown, seenAt: string | undefined, relayed: boolean): Promise<{ status: number; body: string }> {
     const payload = open(sealed, this.keys) as Payload | null
     if (!payload) return { status: 403, body: 'forbidden' }
     // 다시 온 봉투는 거절하되 403 은 쓰지 않는다. 보낸 쪽이 같은 봉투를 다른 주소로 다시 보낸 것일 수도 있어서, 연결을 끊지 않고 다시 보내게 한다.
@@ -1251,26 +1550,52 @@ export class Bridge {
       if (payload.type !== 'hello' || !isHelloFields(payload)) return forbidden
       const invite = this.invites.get(from)
       const invited = !!invite
+      // 외부용 코드는 중계 서버로만 받는다. 직접 들어온 요청이 토큰을 먼저 써 버리지 않게 꺼내기 전에 거절한다.
+      const outsideToken = typeof payload.token === 'string' && !!(this.tokens.get(payload.token)?.outside || this.used.get(payload.token)?.outside)
+      if (!invited && !relayed && outsideToken) return forbidden
       const why = invited ? undefined : this.whyRefused(payload.token, from)
+      // 외부 세션은 정한 수까지만 이어 둔다. 꽉 찼으면 코드를 쓰지 않고 까닭을 알려 준다. 자리가 나면 같은 코드로 들어온다.
+      if (!invited && outsideToken && !why && this.joinedOutside().length >= this.limits.sessions) {
+        this.logEvery('full', 'refused_stranger', { reason: `${this.limits.sessions} outside sessions are connected, the most this bridge takes` })
+        return answer({
+          type: 'refused',
+          reason: `that session already has ${this.limits.sessions} outside sessions connected, the most it takes. This code was not used up: it works as soon as one of them has left, until the code expires`,
+        })
+      }
       const token = invited ? undefined : this.takeToken(payload.token, from)
       if (!invited && !token) {
-        this.log.write('refused_stranger', { id: peerId(from), peer: payload.name.slice(0, MAX_NAME), from: seenAt ?? (relayed ? 'relay' : undefined), reason: why })
+        // 모르는 쪽이 계속 두드려도 기록이 그 줄로 가득 차지 않게 한다.
+        this.logEvery('stranger', 'refused_stranger', { id: peerId(from), peer: payload.name.slice(0, MAX_NAME), from: seenAt ?? (relayed ? 'relay' : undefined), reason: why })
         return forbidden
       }
-      // 다른 PC에서 왔으면 상대가 적어 보낸 127.0.0.1 은 이 PC를 가리키므로 뺀다. 중계 서버로 온 것도 다른 PC로 본다.
+      const outside = !!token?.outside
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? payload.addrs.filter(a => !isLoopback(a)) : payload.addrs
-      const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])]
-      const added: Peer = { key: from, name: payload.name.slice(0, MAX_NAME), about: cleanAbout(payload.about), can: cleanCan(payload.can), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined }
-      // 그룹 코드로 들어왔으면, 이쪽 그룹의 다른 세션과 서로 소개한다. 소개받아 온 세션은 더 퍼뜨리지 않는다.
-      const members = token && !token.private ? this.groupPeers().filter(p => p.key !== from) : []
+      // 외부용 코드로 들어온 세션이 적어 보낸 주소는 쓰지도 남기지도 않는다. 그 세션이 스스로 와서 가져간다.
+      const addrs = outside ? [] : [...new Set([...(seenAt ? [seenAt] : []), ...given])]
+      const isPrivate = !!token?.private || outside
+      const added: Peer = {
+        key: from,
+        name: payload.name.slice(0, MAX_NAME),
+        about: cleanAbout(payload.about),
+        can: cleanCan(payload.can),
+        addrs,
+        port: outside ? this.portFor(true) : payload.port,
+        directFailed: outside ? true : undefined,
+        private: isPrivate || undefined,
+        outside: outside || undefined,
+        token: isToken(payload.rejoin) ? payload.rejoin : undefined,
+      }
+      // 그룹 코드로 들어왔으면, 이쪽 그룹의 다른 세션과 서로 소개한다. 소개받아 온 세션과 개인·외부 코드 세션은 퍼뜨리지 않는다.
+      const members = token && !isPrivate ? this.groupPeers().filter(p => p.key !== from) : []
       for (const m of members) void this.sendOrQueue(m, { type: 'introduce', member: memberOf(added) }).catch(() => {})
       const rejoin = this.rejoinFor(added)
       const again = !!token && 'again' in token
       this.addPeer(added, { emit: true, via: invited ? invite!.by : undefined, again, how: invited ? 'introduced' : again ? 'came back with its token' : 'code' })
-      return answer({ type: 'hello_ack', name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about, can: CAN })
+      return answer({ type: 'hello_ack', name: this.nameFor(added), members: members.map(memberOf), private: isPrivate || undefined, rejoin, about: this.aboutFor(added), can: this.canFor(added) })
     }
 
+    if (peer.outside && !relayed) return forbidden
     // 상대에게서 무엇이든 왔으면 상대는 깨어 있다. 다시 붙기를 기다리던 중이면 바로 다시 붙어 본다.
     peer.lastSeen = Date.now()
     this.wakeRetry(peer.key)
@@ -1318,7 +1643,9 @@ export class Bridge {
           return
         }
         if (!res.ok) throw new Error(`the relay answered ${res.status}`)
-        const { items } = (await res.json()) as { items: { id: string; body: string }[] }
+        const data = (await res.json().catch(() => null)) as { items?: unknown } | null
+        if (!Array.isArray(data?.items)) throw new Error('the server did not answer like a coworker relay')
+        const items = data.items as { id: string; body: string }[]
         setState('ok')
         wait = 25_000
         backoff = this.opts.retryMs
@@ -1350,56 +1677,85 @@ export class Bridge {
   // 이미 이어진 상대가 다시 인사했다. 다시 켜졌거나 잠에서 깨어 주소나 포트가 바뀌었을 수 있으니 새로 받는다.
   // 상대가 다시 켜져 돌아온 것이면(back) 사람에게 알릴 수 있게 소식을 남긴다. 밀려 있던 것은 바로 다시 보낸다.
   private welcomeBack(peer: Peer, hello: Extract<Payload, { type: 'hello' }>, seenAt: string | undefined, relayed: boolean): Payload {
-    if (isHelloFields(hello)) {
+    // 외부용 코드로 이어진 상대의 주소는 인사로 바꾸지 않는다. 들어온 세션에는 주소를 두지 않고, 코드를 만든 쪽은 코드의 우편함을 그대로 쓴다.
+    if (peer.outside) this.logEvery(`h:${peer.key}`, 'hello_in', { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: 'relay' })
+    else if (isHelloFields(hello)) {
       const remote = relayed || (!!seenAt && !isLoopback(seenAt))
       const given = remote ? hello.addrs.filter(a => !isLoopback(a)) : hello.addrs
       const addrs = [...new Set([...(seenAt ? [seenAt] : []), ...given])].slice(0, MAX_ADDRS)
-      const moved = addrs.join() !== peer.addrs.join() || hello.port !== peer.port
-      this.log.write('hello_in', { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? 'relay' : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? hello.port : undefined })
+      const port = hello.port
+      const moved = addrs.join() !== peer.addrs.join() || port !== peer.port
+      this.log.write('hello_in', { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? 'relay' : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? port : undefined })
       peer.addrs = addrs
-      peer.port = hello.port
+      peer.port = port
       peer.lastAddr = undefined
       peer.directFailed = false
     }
     // 상대가 건넨 토큰은 늘 새것으로 바꿔 둔다. 이쪽을 잊은 상대에게 다시 들어갈 때 그것을 든다.
     if (isToken(hello.rejoin)) peer.token = hello.rejoin
-    if (hello.back) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
+    // 「돌아왔다」는 소식은 AI가 아직 읽지 않은 것이 있으면 또 쌓지 않는다.
+    if (hello.back && !this.events.some(e => e.type === 'connected' && e.again && e.peer === peer.name)) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
     else this.changed()
     void this.flush()
     this.learn(peer, hello.about, hello.can)
-    return { type: 'hello_ack', name: this.name, rejoin: this.rejoinFor(peer), about: this.about, can: CAN }
+    return { type: 'hello_ack', name: this.nameFor(peer), rejoin: this.rejoinFor(peer), about: this.aboutFor(peer), can: this.canFor(peer) }
   }
 
   // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
   private process(peer: Peer, payload: Payload): Payload | null {
     switch (payload.type) {
       case 'ping':
-        return { type: 'pong', waiting: this.waitingFor(peer), can: CAN }
-      case 'msg':
-        this.receive(peer, payload.msg)
-        return { type: 'ok' }
+        return { type: 'pong', waiting: this.waitingFor(peer), can: this.canFor(peer) }
+      case 'msg': {
+        const refused = this.receive(peer, payload.msg)
+        return refused ? { type: 'refused', reason: refused } : { type: 'ok' }
+      }
       case 'bye':
         this.dropPeer(peer)
         return { type: 'ok' }
       case 'hello':
         if (!isHelloFields(payload)) return null
-        peer.addrs = payload.addrs
-        peer.port = payload.port
+        if (!peer.outside) {
+          peer.addrs = payload.addrs
+          peer.port = payload.port
+        }
+        if (isToken(payload.rejoin)) peer.token = payload.rejoin
         this.learn(peer, payload.about, payload.can)
-        return { type: 'hello_ack', name: this.name, about: this.about, can: CAN }
+        return { type: 'hello_ack', name: this.nameFor(peer), about: this.aboutFor(peer), can: this.canFor(peer) }
       case 'introduce':
-        // 개인용 코드로 이어진 상대가 소개하는 세션은 받지 않는다.
+        // 개인용·외부용 코드로 이어진 상대가 소개하는 세션은 받지 않는다.
         if (!peer.private) this.invite(payload.member, peer.name)
         return { type: 'ok' }
-      case 'file':
-        this.takeChunk(peer, payload)
-        return { type: 'ok' }
+      case 'file': {
+        const refused = this.takeChunk(peer, payload)
+        return refused ? { type: 'refused', reason: refused } : { type: 'ok' }
+      }
       case 'receipt':
         this.takeReceipt(peer, payload)
         return { type: 'ok' }
-      case 'log_request':
+      case 'log_request': {
+        const lines = typeof payload.lines === 'number' ? payload.lines : 100
+        const id = peerId(peer.key)
+        if (peer.outside) {
+          // 외부 상대에게는 이 PC 전체에 관한 줄(열린 포트, 사내 주소, 다른 세션 수)과 시스템 경로·주소를 주지 않는다.
+          const entries = this.log
+            .read({ id, lines })
+            .filter(e => e.id === id)
+            .map(e => ({
+              at: e.at,
+              event: e.event,
+              id,
+              ...(typeof e.how === 'string' ? { how: e.how } : {}),
+              ...(typeof e.kind === 'string' ? { kind: e.kind } : {}),
+              ...(typeof e.tries === 'number' ? { tries: e.tries } : {}),
+              ...(typeof e.down_for_s === 'number' ? { down_for_s: e.down_for_s } : {}),
+              ...(typeof e.last_seen === 'string' ? { last_seen: e.last_seen } : {}),
+            }))
+          return { type: 'log', entries }
+        }
         // 이 상대에 관한 줄과 이 PC 전체에 관한 줄만 준다. 다른 상대에 관한 줄은 주지 않는다.
-        return { type: 'log', entries: this.log.read({ id: peerId(peer.key), lines: typeof payload.lines === 'number' ? payload.lines : 100 }) }
+        return { type: 'log', entries: this.log.read({ id, lines }) }
+      }
       default:
         return null
     }
@@ -1470,15 +1826,19 @@ export class Bridge {
   }
 
   // 한 명만 답하면 되는 질문에 첫 답이 오면, 나머지 사람에게 답하지 않아도 된다고 알린다.
-  private closeSiblings(ask: AskInfo, answeredBy: string, except: string) {
+  private closeSiblings(ask: AskInfo, answerer: Peer, except: string) {
+    const answeredBy = answerer.name
     this.closedAsks.set(ask.id, answeredBy)
     for (const t of this.threads.values()) {
       if (t.ask?.id !== ask.id || t.id === except || t.status === 'closed') continue
-      const text = `${answeredBy} answered first, so this question is closed. No answer is needed.`
+      const peer = this.peers.get(t.peer)
+      // 외부 세션에게는 누가 답했는지 알리지 않고, 외부 세션이 답했으면 그 이름을 다른 세션에 알리지 않는다.
+      const text = peer?.outside || answerer.outside
+        ? 'Another session answered first, so this question is closed. No answer is needed.'
+        : `${answeredBy} answered first, so this question is closed. No answer is needed.`
       const msg: WireMessage = { id: randomUUID(), thread: t.id, kind: 'closed', text, at: now() }
       t.messages.push({ id: msg.id, from: 'me', kind: 'closed', text, at: msg.at })
       t.status = 'closed'
-      const peer = this.peers.get(t.peer)
       if (peer) void this.sendOrQueue(peer, { type: 'msg', msg }, t.id).catch(() => {})
     }
   }
@@ -1490,14 +1850,17 @@ export class Bridge {
   }
 
   // 상대 쪽 사람이 브릿지를 닫아 「끝」을 알려 왔다. 연결이 끝나는 것은 이때뿐이다.
-  private dropPeer(peer: Peer) {
+  private dropPeer(peer: Peer, by?: string) {
     if (!this.peers.delete(peer.key)) return
-    this.log.write('ended', { id: peerId(peer.key), peer: peer.name, by: 'the other side\'s human (close_bridge)' })
+    this.log.write('ended', { id: peerId(peer.key), peer: peer.name, by: by ?? 'the other side\'s human (close_bridge)' })
     // 사람이 끝낸 연결이다. 그 상대가 들고 있는 토큰으로는 다시 들어오지 못한다. 다시 이으려면 새 코드가 있어야 한다.
     for (const [token, u] of this.used) if (u.key === peer.key) this.used.delete(token)
     for (const o of this.outbox) if (o.peer === peer.key) this.unspool(o.payload)
     this.outbox = this.outbox.filter(o => o.peer !== peer.key)
     this.wakeRetry(peer.key)
+    this.kept.delete(peer.key)
+    // 이쪽 사람이 끝낸 것이면 「상대가 끝냈다」는 소식은 내지 않는다.
+    if (by) return this.changed()
     const id = peerId(peer.key)
     this.ended = [...this.ended.filter(e => e.id !== id), { name: peer.name, id, at: now() }].slice(-MAX_ENDED)
     this.emit({ type: 'peer_closed', peer: peer.name, at: now() })
@@ -1561,8 +1924,13 @@ export class Bridge {
     }
     const ready = take()
     if (ready.length || waitMs === 0 || !this.server) return ready
+    // 한 상대가 붙잡아 두는 가져가기는 하나뿐이다. 새로 오면 앞의 것은 빈손으로 바로 끝낸다.
+    // 그러지 않으면 한 세션이 가져가기를 수백 개 걸어 두어, 중계 서버의 이 우편함 자리를 다 차지하고 다른 세션의 인사를 막는다.
+    for (const end of [...(this.pollWaiters.get(key) ?? [])]) end(true)
+    let replaced = false
     await new Promise<void>(resolve => {
-      const done = () => {
+      const done = (by?: boolean) => {
+        replaced = by === true
         clearTimeout(timer)
         this.pollWaiters.get(key)?.delete(done)
         resolve()
@@ -1571,7 +1939,7 @@ export class Bridge {
       if (!this.pollWaiters.has(key)) this.pollWaiters.set(key, new Set())
       this.pollWaiters.get(key)!.add(done)
     })
-    return take()
+    return replaced ? [] : take()
   }
 
   // 이쪽이 상대에게 가서 이쪽 앞으로 온 메시지를 가져온다.
@@ -1589,6 +1957,11 @@ export class Bridge {
       while (this.server && !this.abort.signal.aborted) {
         const peer = this.peers.get(key)
         if (!peer) break
+        if (peer.outside && !peer.host) {
+          // 이쪽이 만든 외부용 코드로 들어온 세션에게는 가지 않는다. 그 세션이 이쪽 우편함에 와서 가져간다.
+          await this.pause(peer, backoff)
+          continue
+        }
         try {
           if (!peer.lastAddr) await this.deliver(peer, { type: 'ping' })
           const body = JSON.stringify(seal({ type: 'poll', wait: this.opts.pollWaitMs, ack }, fromB64(peer.key), this.keys))
@@ -1599,7 +1972,7 @@ export class Bridge {
           ack = []
           if (lost) {
             lost = false
-            void this.sayHello(peer).catch(() => {})
+            this.greet(peer)
             void this.flush()
             this.changed()
           }
@@ -1625,38 +1998,21 @@ export class Bridge {
     }
   }
 
-  private receive(peer: Peer, msg: WireMessage) {
+  // 받지 않았으면 그 까닭을 돌려준다(외부 세션의 한도). 받았거나, 까닭을 알릴 것 없이 버렸으면 undefined 다.
+  private receive(peer: Peer, msg: WireMessage): string | undefined {
     if (!msg || typeof msg !== 'object') return
+    // 이쪽이 만든 외부용 코드로 들어온 세션. 모르는 사람의 세션이라 받아 두는 양에 한도가 있다.
+    const guest = !!peer.outside && !peer.host
     if (!isThreadId(msg.thread)) {
-      const count = (this.refusedThreads.get(peer.key) ?? 0) + 1
-      this.refusedThreads.set(peer.key, count)
-      this.log.write('refused_thread_id', { id: peerId(peer.key), count })
+      this.logEvery(`r:${peer.key}:thread`, 'refused_thread_id', { id: peerId(peer.key) })
       this.dropStagedChunks(peer, msg.files)
-      return
+      return guest ? 'the conversation id is not valid' : undefined
     }
-    if (typeof msg.id !== 'string' || typeof msg.text !== 'string') return
+    if (typeof msg.id !== 'string' || !msg.id || msg.id.length > MAX_ID || typeof msg.text !== 'string') return
     if (!KINDS.includes(msg.kind)) return
     if (this.seen.has(msg.id)) return
-    this.seen.add(msg.id)
-    let thread = this.threads.get(msg.thread)
-    if (!thread) {
-      thread = {
-        id: msg.thread,
-        peer: peer.key,
-        peerName: peer.name,
-        peerAddr: whereIs(peer),
-        subject: msg.subject ?? firstLine(msg.text),
-        startedBy: 'peer',
-        status: 'your_turn',
-        ask: isAskInfo(msg.ask) ? { id: msg.ask.id, to: msg.ask.to, answers: msg.ask.answers } : undefined,
-        category: cleanCategory(msg.category),
-        messages: [],
-      }
-      this.threads.set(thread.id, thread)
-    } else if (thread.peer !== peer.key) {
-      return
-    }
-    const context = typeof msg.context === 'string' ? msg.context : undefined
+    const known = this.threads.get(msg.thread)
+    if (known && known.peer !== peer.key) return
     // 합의문은 상대가 적어 보낸 글 대신 받은 내용으로 이쪽에서 다시 쓴다. 쓴 사람 이름은 상대 이름으로 둔다.
     const got = msg.kind === 'agreement' && isAgreement(msg.agreement) ? msg.agreement : undefined
     const agreement: Agreement | undefined = got && {
@@ -1668,6 +2024,38 @@ export class Bridge {
       forHumans: got.forHumans,
     }
     if (msg.kind === 'agreement' && !agreement) return
+    // 합의문은 다시 쓴 글과 내용을 함께 두므로 두 번 센다. 대화와 글마다 이름표가 붙는 만큼을 더한다.
+    const cost = Buffer.byteLength(JSON.stringify(msg)) * (agreement ? 2 : 1) + (agreement ? 4096 : 512)
+    if (guest) {
+      const over = this.overLimit(peer, cost, !known)
+      if (over) {
+        this.dropStagedChunks(peer, msg.files)
+        return this.refuse(peer, over[0], over[1], msg.thread)
+      }
+      const kept = this.keptFor(peer.key)
+      kept.messages++
+      kept.bytes += cost
+      if (!known) kept.conversations++
+    }
+    this.seen.add(msg.id)
+    let thread = known
+    if (!thread) {
+      thread = {
+        id: msg.thread,
+        peer: peer.key,
+        peerName: peer.name,
+        peerAddr: whereIs(peer),
+        subject: (typeof msg.subject === 'string' && msg.subject.trim() ? msg.subject : firstLine(msg.text)).slice(0, 200),
+        startedBy: 'peer',
+        status: 'your_turn',
+        // 외부 세션이 함께 물었다고 적어 보낸 이름 목록은 받지 않는다.
+        ask: !guest && isAskInfo(msg.ask) ? { id: msg.ask.id, to: msg.ask.to, answers: msg.ask.answers } : undefined,
+        category: cleanCategory(msg.category),
+        messages: [],
+      }
+      this.threads.set(thread.id, thread)
+    }
+    const context = typeof msg.context === 'string' ? msg.context : undefined
     const text = agreement ? renderAgreement(agreement) : msg.text
     const human = msg.human === true ? { human: true } : {}
     // 표시 없이 글로만 답이 필요 없다고 적어 보낸 알림도 알아본다(옛 판, 또는 표시를 잊은 AI).
@@ -1692,10 +2080,70 @@ export class Bridge {
     const file = agreement ? this.saveAgreement(thread) : undefined
     let ask: AskInfo | AskProgress | undefined = thread.ask
     if (thread.ask && thread.startedBy === 'me') {
-      if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer.name, thread.id)
+      if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer, thread.id)
       ask = this.askProgress(thread.ask)
     }
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...(files ? { files: files.map(seenFile) } : {}), ...human, ...(notice ? { no_answer_needed: true } : {}), ...(thread.category ? { category: thread.category } : {}), at: now() })
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...(agreement && !file ? { not_saved: AGREEMENT_NOT_SAVED } : {}), ...(files ? { files: files.map(seenFile) } : {}), ...human, ...(notice ? { no_answer_needed: true } : {}), ...(thread.category ? { category: thread.category } : {}), at: now() })
+    return undefined
+  }
+
+  // 외부 세션 하나에게서 지금까지 받아 둔 양. 저장한 대화에서 한 번 세고, 그 뒤로는 받을 때마다 더한다.
+  private keptFor(key: string) {
+    let kept = this.kept.get(key)
+    if (!kept) {
+      kept = { conversations: 0, messages: 0, bytes: 0 }
+      for (const t of this.threads.values()) {
+        if (t.peer !== key) continue
+        if (t.startedBy === 'peer') kept.conversations++
+        for (const m of t.messages) {
+          if (m.from !== 'peer') continue
+          kept.messages++
+          kept.bytes += Buffer.byteLength(JSON.stringify(m)) + 512
+        }
+      }
+      this.kept.set(key, kept)
+    }
+    return kept
+  }
+
+  // 외부 세션이 보낸 글이 한도를 넘는지. 넘으면 어느 한도인지와, 그 세션에 알려 줄 까닭.
+  private overLimit(peer: Peer, cost: number, starts: boolean): [string, string] | undefined {
+    const kept = this.keptFor(peer.key), limit = this.limits
+    const kib = (n: number) => Math.round(n / 1024)
+    const mib = (n: number) => Math.round((n / 1024 / 1024) * 10) / 10
+    if (cost > limit.messageBytes) return ['message_size', `that message is larger than ${kib(limit.messageBytes)} KiB, the most this session takes in one message from an outside session`]
+    if (starts && kept.conversations >= limit.conversations)
+      return ['conversations', `this session takes at most ${limit.conversations} conversations from one outside session, and that many were started. Go on in one of them`]
+    if (kept.messages >= limit.messages) return ['messages', `this session takes at most ${limit.messages} messages from one outside session, and that many have arrived`]
+    if (kept.bytes + cost > limit.totalBytes) return ['total', `this session keeps at most ${mib(limit.totalBytes)} MiB in total from one outside session, and that much has arrived`]
+    return undefined
+  }
+
+  // 외부 세션이 보낸 것을 받지 않았다. 기록에 남기고(되풀이되면 1번째·10번째·100번째… 에만), 그 세션에 알려 줄 까닭을 돌려준다.
+  private refuse(peer: Peer, limit: string, reason: string, thread?: string): string {
+    this.logEvery(`r:${peer.key}:${limit}`, 'refused_outside', { id: peerId(peer.key), peer: peer.name, limit })
+    // 옛 판은 「받지 않았다」는 답을 모르고 받은 것으로 안다. 그래서 한도마다 한 번, 그 대화에 마감 알림으로 까닭을 보낸다.
+    const told = `${peer.key}:${limit}`
+    if (!peer.can?.includes('refusals') && isThreadId(thread) && !this.toldLimit.has(told)) {
+      this.toldLimit.add(told)
+      const msg: WireMessage = { id: randomUUID(), thread, kind: 'closed', text: `Not received: ${reason}.`, at: now() }
+      void this.sendOrQueue(peer, { type: 'msg', msg }, undefined, false).catch(() => {})
+    }
+    return reason
+  }
+
+  // 같은 일이 되풀이될 때 기록이 그 줄로 가득 차 앞의 줄을 밀어내지 않게, 1번째·10번째·100번째… 에만 적고 횟수를 함께 적는다.
+  private logEvery(key: string, event: string, fields: Record<string, unknown>) {
+    const count = (this.counts.get(key) ?? 0) + 1
+    this.counts.set(key, count)
+    if (/^10*$/.test(String(count))) this.log.write(event, { ...fields, count })
+  }
+
+  // 이 세션이 보낸 것 가운데 받지 않은 횟수.
+  private refusedFrom(peer: Peer) {
+    let n = 0
+    for (const [key, count] of this.counts) if (key.startsWith(`r:${peer.key}:`)) n += count
+    return n
   }
 
   private peerAsksHuman(thread: Thread, inText: boolean) {
@@ -1893,12 +2341,12 @@ export class Bridge {
   private takeToken(token: unknown, from: string) {
     if (typeof token !== 'string') return undefined
     const used = this.used.get(token)
-    if (used) return used.key === from ? { expires: Infinity, private: used.private, again: true } : undefined
+    if (used) return used.key === from ? { expires: Infinity, private: used.private, outside: used.outside, again: true } : undefined
     const entry = this.tokens.get(token)
     this.tokens.delete(token)
     this.dirty()
     if (!entry || entry.expires <= Date.now()) return undefined
-    this.used.set(token, { key: from, private: entry.private })
+    this.used.set(token, { key: from, private: entry.private, outside: entry.outside })
     this.trimUsed()
     return entry
   }
@@ -1925,7 +2373,7 @@ export class Bridge {
   private rejoinFor(peer: Peer) {
     if (peer.given && this.used.get(peer.given)?.key === peer.key) return peer.given
     const token = randomToken()
-    this.used.set(token, { key: peer.key, private: !!peer.private })
+    this.used.set(token, { key: peer.key, private: !!peer.private, outside: peer.outside || undefined })
     peer.given = token
     this.trimUsed()
     this.dirty()
@@ -1993,13 +2441,39 @@ export class Bridge {
 
   // 인사한다. 상대가 이쪽을 잊으면 들고 올 토큰을 함께 건네고, 상대가 건넨 토큰은 받아 둔다.
   private async sayHello(peer: Peer, extra: { token?: string; back?: boolean } = {}) {
-    const reply = await this.deliver(peer, { type: 'hello', name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, can: CAN, ...extra })
+    const reply = await this.deliver(peer, this.helloFor(peer, extra))
     if (reply.type === 'hello_ack') this.learn(peer, reply.about, reply.can)
     if (reply.type === 'hello_ack' && isToken(reply.rejoin)) {
       peer.token = reply.rejoin
       if (this.peers.has(peer.key)) this.dirty()
     }
     return reply
+  }
+
+  // 인사에 적는 것. 외부용 코드로 들어간 쪽은 자기 주소도 이 PC의 포트도 적지 않는다:
+  // 주소는 비우고, 포트 자리에는 코드에 있던 번호(중계 서버의 포트)를 그대로 적는다. 이름은 도구 이름이거나 사람이 정한 이름이다.
+  private helloFor(peer: Peer, extra: { token?: string; back?: boolean } = {}): Extract<Payload, { type: 'hello' }> {
+    const joined = !!peer.outside && !!peer.host
+    return {
+      type: 'hello',
+      name: this.nameFor(peer),
+      addrs: joined ? [] : this.addrsFor(peer),
+      port: joined ? peer.port : this.portFor(peer),
+      rejoin: this.rejoinFor(peer),
+      about: this.aboutFor(peer),
+      can: this.canFor(peer),
+      ...extra,
+    }
+  }
+
+  // 이어진 상대에게 다시 인사한다(다시 켜짐, 소개가 바뀜). 이쪽이 만든 외부용 코드로 들어온 세션에는 보낼 주소가 없으므로,
+  // 그 세션이 가져갈 줄에 세운다. 줄에는 가장 새 인사 하나만 둔다.
+  private greet(peer: Peer, extra: { back?: boolean } = {}) {
+    if (!(peer.outside && !peer.host)) return void this.sayHello(peer, extra).catch(() => {})
+    this.outbox = this.outbox.filter(o => !(o.peer === peer.key && o.payload.type === 'hello'))
+    this.outbox.push({ id: randomUUID(), peer: peer.key, payload: this.helloFor(peer, extra), since: Date.now() })
+    this.dirty()
+    this.wakePoll(peer.key)
   }
 
   // 상대가 인사에 적어 보낸 자기 소개를 기억한다. 달라졌으면 화면에도 알린다.
@@ -2015,9 +2489,11 @@ export class Bridge {
   setAbout(about: About) {
     const next = cleanAbout({ ...this.about, ...about })
     if (JSON.stringify(next) === JSON.stringify(this.about)) return
+    // 소개도 인사에 실려 외부 세션에게 간다. 이름과 같이, 이 컴퓨터에 관한 것이 들어 있으면 받지 않는다.
+    if (this.facesOutside()) this.assertOutsideSafe({ ...next })
     this.about = next
     this.changed()
-    for (const peer of this.peers.values()) void this.sayHello(peer).catch(() => {})
+    for (const peer of this.peers.values()) this.greet(peer)
   }
 
   // 사람이 화면에서 대화를 맨 위에 고정하거나 푼다. 이 PC에만 남기고 상대에게는 알리지 않는다.
@@ -2057,7 +2533,7 @@ export class Bridge {
   }
 
   // 보낼 파일을 확인하고 이 세션의 보낼 자리에 사본을 둔다. 사본이 있어서, 상대가 꺼져 있다가 돌아와도 처음 확인한 그 내용이 간다.
-  private stage(paths: string[] | undefined, reviewed = false): FileNote[] {
+  private stage(paths: string[] | undefined, reviewed = false, outside = false): FileNote[] {
     if (!paths?.length) return []
     const dir = this.filesDir('out')
     if (!dir) throw new Error('nothing was sent: this session has no folder to keep files in')
@@ -2080,6 +2556,21 @@ export class Bridge {
       return { path, name: safeFileName(name), bytes }
     })
     if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES) throw new Error(`nothing was sent: the files are larger than ${MAX_FILES_BYTES >> 20} MiB together, the most one message can carry`)
+    if (outside) {
+      // 외부 세션에게는 UTF-8 글로 된 파일만 보낸다. 그래야 내용을 글과 같은 눈으로 확인할 수 있다.
+      // 다른 인코딩의 글(UTF-16 등)이나 글이 아닌 파일은 내용을 볼 수 없으므로 보내지 않는다.
+      const outsideTexts: Record<string, string> = {}
+      for (const f of read) {
+        const body = utf8Text(f.bytes)
+        if (body === undefined)
+          throw new Error(
+            `nothing was sent: ${f.name} is not UTF-8 text. To a session connected through an outside code, a file goes only when it is UTF-8 text, because only then can it be checked for information about this computer. Save it as UTF-8 text, or let your human share it another way`,
+          )
+        outsideTexts[`the file name "${f.name}"`] = f.name
+        outsideTexts[`the file ${f.name}`] = body
+      }
+      this.assertOutsideSafe(outsideTexts)
+    }
     // 글로 된 파일은 글과 같은 눈으로 본다. 0 바이트가 섞였거나 2 MiB 를 넘으면 글로 보지 않는다.
     const texts: Record<string, string> = {}
     for (const f of read) if (f.bytes.length <= 2 * 1024 * 1024 && !f.bytes.subarray(0, 8192).includes(0)) texts[`the file ${f.name}`] = f.bytes.toString('utf8')
@@ -2153,12 +2644,16 @@ export class Bridge {
       if (!f || typeof f.id !== 'string' || !FILE_ID.test(f.id)) continue
       const file = pathInside(partial, `${peerId(peer.key)}-${f.id}`)
       if (file) rmSync(file, { force: true })
+      if (file) this.partialSizes.delete(file)
     }
   }
 
   // 파일 조각을 받아 이어 붙인다. 조각마다 자리가 정해져 있어서, 같은 조각이 다시 와도 한 번만 붙는다.
   // 받다 만 것이 얼마나 있는지는 파일 크기로 안다. 그래서 이 세션이 다시 켜져도 이어서 받는다.
-  private takeChunk(peer: Peer, p: Extract<Payload, { type: 'file' }>) {
+  // 받지 않았으면 그 까닭을 돌려준다(외부 세션의 파일).
+  private takeChunk(peer: Peer, p: Extract<Payload, { type: 'file' }>): string | undefined {
+    const guest = !!peer.outside && !peer.host
+    if (guest && !this.outsideFiles) return this.refuse(peer, 'files', 'this session takes no files from an outside session')
     const dir = this.filesDir('partial')
     if (!dir || typeof p.id !== 'string' || !FILE_ID.test(p.id) || typeof p.data !== 'string') return
     if (!Number.isInteger(p.size) || p.size < 0 || p.size > MAX_FILE_BYTES) return
@@ -2169,6 +2664,13 @@ export class Bridge {
     if (bytes.length !== (p.seq < of - 1 ? FILE_CHUNK : p.size - FILE_CHUNK * (of - 1))) return
     const prefix = `${peerId(peer.key)}-`, path = pathInside(dir, prefix + p.id)
     if (!path) return
+    if (guest) {
+      // 외부 세션의 파일은 받은 것과 받는 중인 것을 합쳐 정한 양까지만 둔다. 파일의 크기는 처음 적어 보낸 값에서 바꾸지 못한다.
+      const said = this.partialSizes.get(path)
+      if (said !== undefined && said !== p.size) return
+      if (said === undefined && (p.seq > 0 || this.outsideFileBytes(peer, dir, prefix) + p.size > this.limits.fileBytes))
+        return this.refuse(peer, 'file_quota', `this session keeps at most ${Math.round(this.limits.fileBytes / 1024 / 1024 * 10) / 10} MiB of files from one outside session, and this file would go over that`)
+    }
     try {
       if (p.seq === 0) {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -2180,8 +2682,24 @@ export class Bridge {
         }
         if (!existsSync(path) && readdirSync(dir).filter(n => n.startsWith(prefix)).length >= MAX_FILES * 2) return
         writeFileSync(path, bytes, { mode: 0o600 })
+        if (guest) this.partialSizes.set(path, p.size)
       } else if (existsSync(path) && statSync(path).size === p.seq * FILE_CHUNK) appendFileSync(path, bytes)
     } catch {}
+    return undefined
+  }
+
+  // 외부 세션 하나의 파일이 차지하는 양: 이미 받은 파일과, 받는 중인 파일(처음 적어 보낸 크기로 센다).
+  private outsideFileBytes(peer: Peer, partial: string, prefix: string) {
+    let n = 0
+    for (const t of this.threads.values()) if (t.peer === peer.key) for (const m of t.messages) if (m.from === 'peer') for (const f of m.files ?? []) if (f.ok) n += f.size
+    try {
+      for (const name of readdirSync(partial)) {
+        if (!name.startsWith(prefix)) continue
+        const path = pathInside(partial, name)
+        if (path) n += this.partialSizes.get(path) ?? statSync(path).size
+      }
+    } catch {}
+    return n
   }
 
   // 글에 붙어 온 파일을 확인하고 받은 자리로 옮긴다. 크기와 sha256 이 보낸 쪽이 적은 것과 같아야 받은 것으로 친다.
@@ -2196,8 +2714,11 @@ export class Bridge {
       const from = partial ? pathInside(partial, `${peerId(peer.key)}-${f.id}`) : undefined
       const fail = (problem: FileProblem): FileNote[] => {
         if (from) rmSync(from, { force: true })
+        if (from) this.partialSizes.delete(from)
         return [{ ...note, ok: false, problem }]
       }
+      // 외부 세션의 파일은 받기로 한 브릿지에서만, 조각을 받을 때 양을 확인한 것만 받는다.
+      if (peer.outside && !peer.host && (!this.outsideFiles || !from || !this.partialSizes.has(from))) return fail('refused')
       if (!from || !received || !isThreadId(thread.id)) return fail('no_folder')
       total += note.size
       if (note.size > MAX_FILE_BYTES || total > MAX_FILES_BYTES) return fail('limit')
@@ -2215,6 +2736,7 @@ export class Bridge {
         const to = freePath(folder, note.name)
         if (!to) return fail('no_folder')
         renameSync(from, to)
+        this.partialSizes.delete(from)
         chmodSync(to, 0o600)
         return [{ ...note, name: basename(to), path: to, ok: true }]
       } catch {
@@ -2247,15 +2769,15 @@ export class Bridge {
   private watchThisPc() {
     clearInterval(this.ticker)
     let last = Date.now()
-    let addrs = this.opts.addrs().join()
+    let addrs = this.outsideOnly ? '' : this.opts.addrs().join()
     let n = 0
     this.ticker = setInterval(() => {
       this.checkWaits()
       const t = Date.now()
       if (t - last > PAUSE_MS) this.log.write('this_pc_paused', { for_s: Math.round((t - last) / 1000), what: 'this computer was asleep or stopped; nothing could get through meanwhile' })
       last = t
-      // 주소 찾기는 명령을 부르므로 30초에 한 번만 본다.
-      if (++n % 6 === 0) {
+      // 주소 찾기는 명령을 부르므로 30초에 한 번만 본다. 외부 전용 브릿지는 이 PC 주소를 쓰지 않는다.
+      if (!this.outsideOnly && ++n % 6 === 0) {
         const now = this.opts.addrs().join()
         if (now !== addrs) this.log.write('this_pc_moved', { from: addrs.split(','), to: now.split(',') })
         addrs = now
@@ -2273,6 +2795,8 @@ export class Bridge {
     const targets = peer ? [peer] : [...this.peers.values()]
     const theirs = await Promise.all(
       targets.map(async p => {
+        // 이쪽이 만든 외부용 코드로 들어온 세션에는 먼저 묻지 않는다. 이쪽은 그 세션의 요청에 답하기만 한다.
+        if (p.outside && !p.host) return { peer: labelOf(p), error: 'not asked: this session never sends a request to a session that joined with an outside code. Its human can open its own log file' }
         try {
           const reply = await this.deliver(p, { type: 'log_request', lines })
           if (reply.type === 'log' && Array.isArray(reply.entries)) return { peer: labelOf(p), entries: reply.entries.slice(-lines) }
@@ -2289,7 +2813,11 @@ export class Bridge {
     const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map(n => n.trim()).filter(Boolean)
     if (names.some(n => EVERYONE.includes(n.toLowerCase()))) {
       if (this.peers.size === 0) throw new Error(NO_PEERS)
-      return this.withoutLeftBehind([...this.peers.values()])
+      // 「모두」는 이쪽 그룹과 동료다. 외부용 코드로 이어진 세션은 이름으로 물을 때만 묻는다.
+      const own = [...this.peers.values()].filter(p => !p.outside)
+      if (own.length === 0)
+        throw new Error(`"everyone" means the sessions of your own side, and none is connected. A session connected through an outside code is asked only by name: ${[...this.peers.values()].map(labelOf).join(', ')}`)
+      return this.withoutLeftBehind(own)
     }
     if (names.length === 0) return [await this.resolvePeer(undefined)]
     return [...new Set(await Promise.all(names.map(n => this.resolvePeer(n))))]
@@ -2347,6 +2875,8 @@ export class Bridge {
 
   // 주소를 앞에서부터 하나씩 시도한다. 상대 키로 봉인된 답이 와야 닿은 것으로 본다.
   private async deliver(peer: Peer, payload: Payload): Promise<Payload> {
+    // 이쪽이 만든 외부용 코드로 들어온 세션에게는 어떤 주소로도 먼저 보내지 않는다. 그 세션이 스스로 와서 가져간다.
+    if (peer.outside && !peer.host) throw new DeliveryError('unreachable', `${peer.name} picks up its messages itself`)
     const body = JSON.stringify(seal(this.withData(payload), fromB64(peer.key), this.keys))
     const addrs = [...new Set([...(peer.lastAddr ? [peer.lastAddr] : []), ...peer.addrs])]
     let refused = false
@@ -2420,11 +2950,14 @@ export class Bridge {
     const skipDirect = peer.directFailed && this.isPulling(peer)
     if (!skipDirect && !this.outbox.some(o => o.peer === peer.key)) {
       try {
-        await this.deliver(peer, payload)
+        const reply = await this.deliver(peer, payload)
         peer.directFailed = false
         this.unspool(payload)
+        // 상대가 받지 않았다(외부 세션에 두는 한도). 다시 보내도 같으므로 줄에 세우지 않고 까닭을 알린다.
+        if (reply.type === 'refused') throw new RefusedError(`nothing was kept on the other side: ${peer.name} did not take it: ${cleanReason(reply.reason)}`)
         return 'delivered'
       } catch (e) {
+        if (e instanceof RefusedError) throw e
         // 닿지 않거나 상대가 이쪽을 모른다고 해도 버리지 않는다. 줄에 세워 두고, 다시 붙으면 순서대로 보낸다.
         peer.directFailed = true
         if (e instanceof DeliveryError && e.reason === 'rejected') void this.rejoin(peer)
@@ -2461,7 +2994,11 @@ export class Bridge {
           continue
         }
         try {
-          await this.deliver(peer, item.payload)
+          const reply = await this.deliver(peer, item.payload)
+          if (reply.type === 'refused') {
+            drop(`${peer.name} did not take it: ${cleanReason(reply.reason)}`)
+            continue
+          }
           this.unspool(item.payload)
           this.outbox = this.outbox.filter(o => o !== item)
           this.dirty()

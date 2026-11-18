@@ -50,10 +50,15 @@ const THREAD_ID = /^[0-9a-f]{8}$/
 const DAY = /^\d{4}-\d{2}-\d{2}$/
 const BASE64_KEY = /^[A-Za-z0-9+/]+={0,2}$/
 
+// 키는 보통 32바이트를 base64 로 적은 글자다. 그 꼴이 아닌 키 글자(다른 base64 꼴, 군더더기가 낀 것)로도 봉투는 열릴 수 있다.
+// 그런 세션의 합의문도 남들처럼 저장되게, 그때는 키 글자 자체를 재료로 쓴다. 어느 쪽이든 파일 이름에는 해시만 들어간다.
 function keyBytesOf(key: unknown): Buffer | undefined {
-  if (typeof key !== 'string' || !BASE64_KEY.test(key)) return undefined
-  const bytes = Buffer.from(key, 'base64')
-  return bytes.length === 32 ? bytes : undefined
+  if (typeof key !== 'string' || !key) return undefined
+  if (BASE64_KEY.test(key)) {
+    const bytes = Buffer.from(key, 'base64')
+    if (bytes.length === 32) return bytes
+  }
+  return Buffer.from(`key text:${key}`, 'utf8')
 }
 
 // 합의문 파일 이름: 날짜, 대화 번호, 이 세션과 상대 공개키(각 32바이트)의 SHA-256 앞 24글자(소문자 16진수).
