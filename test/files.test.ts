@@ -208,22 +208,29 @@ describe('files', () => {
   test('the name and the conversation id that come from the other side cannot place a file outside the received folder', async () => {
     const { a, b } = await pair()
     expect(['../../evil.sh', '..\\..\\evil.sh', '/etc/passwd', '.bashrc', 'a\x00b', '', '   ', 'x'.repeat(400)].map(safeFileName)).toEqual(['evil.sh', 'evil.sh', 'passwd', 'bashrc', 'a_b', 'file', 'file', 'x'.repeat(150)])
-    // 상대가 이름과 대화 번호를 고쳐 보냈다.
+    // 잘못된 대화 번호로 온 글은 거절하고 파일을 저장하지 않는다. 파일 이름만 이상한 글은 이름만 다듬어 받은 폴더 안에 둔다.
     const raw = b as unknown as { sendOrQueue(peer: unknown, payload: { type: string; msg?: { thread: string; files?: { name: string }[] } }, thread?: string, patient?: boolean): Promise<unknown> }
     const real = raw.sendOrQueue.bind(b)
+    let badThread = true
     raw.sendOrQueue = (peer, payload, thread, patient) => {
       if (payload.type === 'msg' && payload.msg?.files) {
-        payload.msg.thread = '../../../outside'
+        if (badThread) payload.msg.thread = '../../../outside'
         payload.msg.files[0]!.name = '../../evil.sh'
       }
       return real(peer, payload, thread, patient)
     }
-    await b.ask(undefined, 'A file with a strange name.', undefined, [file('plain.sh', 'echo hi\n')])
-    const got = (await next(a, 'message')) as Message
     const base = join((a as unknown as { opts: { home: string } }).opts.home, 'files')
+    await b.ask(undefined, 'A file with a bad thread id.', undefined, [file('plain.sh', 'echo hi\n')])
+    expect(await a.wait(200)).toEqual([])
+    expect(existsSync(join(base, '..', 'outside'))).toBe(false)
+    expect(inside(a, 'received')).toEqual([])
+
+    badThread = false
+    const sent = await b.ask(undefined, 'A file with a strange name.', undefined, [file('plain.sh', 'echo hi\n')])
+    const got = (await next(a, 'message')) as Message
     expect(got.files).toMatchObject([{ name: 'evil.sh', verified: true }])
     expect(got.files![0]!.saved_to).toStartWith(base)
-    expect(got.files![0]!.saved_to).toEndWith(join('received', 'outside', 'evil.sh'))
+    expect(got.files![0]!.saved_to).toEndWith(join('received', sent.thread!, 'evil.sh'))
     expect(existsSync(join(base, '..', 'outside'))).toBe(false)
   })
 
