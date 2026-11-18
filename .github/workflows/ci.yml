@@ -41,7 +41,7 @@ jobs:
         with:
           bun-version: 1.4.4
       - name: Use a temporary coworker home
-        run: echo "COWORKER_HOME=$(mktemp -d)" >> "$GITHUB_ENV"
+        run: echo "COWORKER_HOME=${RUNNER_TEMP}/coworker-home" >> "$GITHUB_ENV"
       - name: Install packages
         run: bun install --frozen-lockfile
       - name: Typecheck

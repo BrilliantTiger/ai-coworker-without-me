@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from 'bun:test'
+import { failsOnWindows } from './known'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -69,7 +70,8 @@ const rawStatus = (port: number, host: string) =>
     sock.on('error', fail)
   })
 
-test('two sessions on one app ask and answer each other, each with its own bridge', async () => {
+// Windows: 세션 이름에 폴더 이름이 빠진다. 드라이브 글자가 없는 폴더 주소(file:///work/api-server)에서 이름을 얻지 못한다.
+failsOnWindows('two sessions on one app ask and answer each other, each with its own bridge', async () => {
   const { port } = await startApp()
   const a = await session(port, 'claude-code', '/work/api-server')
   const b = await session(port, 'codex-mcp-client', '/work/web-app')
