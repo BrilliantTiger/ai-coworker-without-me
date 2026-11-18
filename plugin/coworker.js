@@ -17376,7 +17376,7 @@ class Bridge {
     return { ask: ask.id, answers, to: ask.to, sent };
   }
   async sendQuestion(peer, question, context, ask, noAnswer = false, category, files = []) {
-    assertNoSecrets({ question, context, category });
+    this.checkText({ question, context, category });
     const label = cleanCategory(category);
     const thread = {
       id: randomUUID().slice(0, 8),
@@ -17411,7 +17411,7 @@ class Bridge {
       throw new Error(`no conversation with id ${threadId}`);
     if (!(opts.human && thread.status === "agreed"))
       this.assertOpen(thread);
-    assertNoSecrets({ answer: text });
+    this.checkText({ answer: text });
     const peer = this.peers.get(thread.peer);
     if (!peer)
       throw new Error(`${thread.peerName} is no longer connected`);
@@ -17433,7 +17433,7 @@ class Bridge {
       throw new Error(`no conversation with id ${threadId}`);
     if (thread.status !== "agreed")
       this.assertOpen(thread);
-    assertNoSecrets({ note });
+    this.checkText({ note });
     const peer = this.peers.get(thread.peer);
     if (!peer)
       throw new Error(`${thread.peerName} is no longer connected`);
@@ -17452,7 +17452,7 @@ class Bridge {
     if (thread.status === "closed")
       this.assertOpen(thread);
     const facts = input.facts ?? [];
-    assertNoSecrets({
+    this.checkText({
       conclusion: input.conclusion,
       facts: facts.map((f) => `${f.fact}
 ${f.evidence}`).join(`
@@ -18415,7 +18415,20 @@ ${f.evidence}`).join(`
     if (this.peers.has(peer.key))
       this.changed();
   }
+  checkText(fields) {
+    assertNoSecrets(fields);
+    this.assertNoViewLink(fields);
+  }
+  assertNoViewLink(fields) {
+    const token = this.viewerAt?.token;
+    if (!token || token.length < 8)
+      return;
+    for (const [field, value] of Object.entries(fields))
+      if (value?.includes(token))
+        throw new Error(`nothing was sent: the ${field} holds this session's conversation view link. Whoever has that link can read the conversation, so it is for your human only and is never sent to another session. Take the link out and send again`);
+  }
   setAbout(about) {
+    this.assertNoViewLink({ "introduction text": Object.values(about).join(" ") });
     const next = cleanAbout({ ...this.about, ...about });
     if (JSON.stringify(next) === JSON.stringify(this.about))
       return;
@@ -18488,6 +18501,7 @@ ${f.evidence}`).join(`
       }
       if (bytes.length > MAX_FILE_BYTES)
         throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`);
+      this.assertNoViewLink({ "name of a file": name, [`file ${safeFileName(name)}`]: bytes });
       return { path, name: safeFileName(name), bytes };
     });
     if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES)
@@ -27646,6 +27660,66 @@ function lock(home) {
   }
 }
 
+// src/viewaddr.ts
+import { isIP } from "net";
+import { networkInterfaces as networkInterfaces2 } from "os";
+var FORM = "the setting must be one address of this computer written out (like 100.64.0.10) or the word tailscale, without http://, a port or a path";
+var NOT_ONE = "that address cannot be the address of one computer (it means every interface, or a group of computers)";
+function plain(text) {
+  if (/^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(text))
+    return { ip: text, v4: true };
+  const bare = text.replace(/^\[(.*)\]$/, "$1");
+  if (!/^[0-9a-fA-F:.]+$/.test(bare) || isIP(bare) !== 6)
+    return;
+  try {
+    return { ip: new URL(`http://[${bare}]`).hostname.replace(/^\[|\]$/g, ""), v4: false };
+  } catch {
+    return;
+  }
+}
+function notOne(ip, v4) {
+  if (v4) {
+    const first = Number(ip.split(".")[0]);
+    return ip === "0.0.0.0" || ip === "255.255.255.255" || first >= 224 && first <= 239;
+  }
+  return /^[0:]+$/.test(ip) || /^ff/i.test(ip) || /^::ffff:/i.test(ip);
+}
+function tailscaleAddresses(interfaces = networkInterfaces2) {
+  const found = new Set;
+  for (const list of Object.values(interfaces()))
+    for (const nic of list ?? []) {
+      if (nic.family !== "IPv4" || nic.internal)
+        continue;
+      const [a, b] = nic.address.split(".").map(Number);
+      if (a === 100 && b >= 64 && b <= 127)
+        found.add(nic.address);
+    }
+  return [...found];
+}
+function viewAddress(setting, deps = {}) {
+  const interfaces = deps.interfaces ?? networkInterfaces2;
+  const text = setting.trim();
+  if (text.toLowerCase() === "tailscale")
+    return {
+      set: "tailscale",
+      now: () => {
+        const found = tailscaleAddresses(interfaces);
+        if (found.length === 1)
+          return { host: found[0] };
+        if (!found.length)
+          return { problem: "this computer has no address in 100.64.0.0/10 now (is Tailscale running?)" };
+        return { problem: `this computer has more than one address in 100.64.0.0/10 (${found.join(", ")}), so coworker does not choose: write the address itself in the setting instead of the word tailscale` };
+      }
+    };
+  const address = plain(text);
+  const fixed = address ? notOne(address.ip, address.v4) ? { problem: address.ip === "0.0.0.0" || /^[0:]+$/.test(address.ip) ? `${NOT_ONE}; coworker never opens the view on every network interface` : NOT_ONE } : { host: address.ip } : /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(text) && !/^[0-9.]+$/.test(text) && !/^0x/i.test(text) ? { problem: `a name is not accepted, because whoever decides where the name points would get the link: write the address of this computer itself instead of ${text}` } : { problem: FORM };
+  return { set: text, now: () => fixed };
+}
+
+// src/viewer.ts
+import { createHash as createHash5, timingSafeEqual } from "crypto";
+import { connect } from "net";
+
 // src/page.ts
 var QUIET_AFTER_MS = 5 * 60000;
 var PAGE = `<!doctype html>
@@ -28479,17 +28553,31 @@ function activate(id, byHand) {
     if (top < 60) scrollBy({ top: top - 76, behavior: moving() ? 'smooth' : 'auto' })
   }
 }
+// \uC138\uC158\uC774 \uC694\uCCAD\uC744 \uBC1B\uC9C0 \uC54A\uC740 \uAE4C\uB2ED\uC744 \uC0AC\uB78C\uC774 \uC77D\uC744 \uB9D0\uB85C \uBC14\uAFBC\uB2E4. \uC138\uC158\uC774 \uB2F5\uD588\uC73C\uBA74 \uC138\uC158\uC774 \uAEBC\uC84C\uB2E4\uACE0 \uD558\uC9C0 \uC54A\uB294\uB2E4.
+// \uD654\uBA74\uC744 \uC5F0 \uC8FC\uC18C \uB54C\uBB38\uC5D0 \uAC70\uC808\uB410\uC73C\uBA74(403), \uC138\uC158\uC774 \uC54C\uB824 \uC900 \uC8FC\uC18C\uB85C \uB2E4\uC2DC \uC5F4\uB77C\uACE0 \uD55C\uB2E4.
+const UNREACHED = '\uC138\uC158\uC5D0 \uB2FF\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.'
+async function whyNot(res, cannot) {
+  if (res.status === 409) return '\uBE0C\uB9BF\uC9C0\uAC00 \uB2EB\uD600 \uC788\uC5B4\uC11C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. AI\uC5D0\uAC8C \u300C\uBE0C\uB9BF\uC9C0 \uC5F4\uC5B4\uC918\u300D\uB77C\uACE0 \uD558\uC138\uC694.'
+  if (res.status === 429) return '\uC7A0\uC2DC \uB4A4\uC5D0 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.'
+  if (res.status === 403) {
+    const told = await res.json().catch(() => null)
+    const open = told && Array.isArray(told.open) ? told.open.filter(o => typeof o === 'string') : []
+    if (open.length) return '\uC774 \uD654\uBA74\uC744 \uC5F0 \uC8FC\uC18C(' + location.origin + ')\uB85C\uB294 ' + cannot + '. \uC774 \uC8FC\uC18C\uB85C \uB2E4\uC2DC \uC5EC\uC138\uC694: ' + open.map(o => o + location.pathname).join(' \uB610\uB294 ')
+  }
+  return '\uC138\uC158\uC774 \uC774 \uC694\uCCAD\uC744 \uBC1B\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4(\uC751\uB2F5 ' + res.status + ').'
+}
 // \uB300\uD654\uB97C \uB9E8 \uC704\uC5D0 \uACE0\uC815\uD558\uAC70\uB098 \uD47C\uB2E4. \uC138\uC158\uC774 \uAE30\uC5B5\uD558\uACE0, \uBC14\uB010 \uCC28\uB840\uB294 \uC138\uC158\uC774 \uBC00\uC5B4 \uC8FC\uB294 \uC0C8 \uB0B4\uC6A9\uC73C\uB85C \uADF8\uB824\uC9C4\uB2E4.
 // \uC77D\uC5B4 \uC8FC\uB294 \uD504\uB85C\uADF8\uB7A8\uC5D0\uB294 \uACB0\uACFC\uB97C \uD55C \uBC88\uB9CC \uC54C\uB9B0\uB2E4.
 const said = byId('said')
 async function togglePin(v) {
   const want = !v.pinned
-  let ok = false
+  let ok = false, why = UNREACHED
   try {
     const res = await fetch(location.pathname + '/pin', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ threads: v.threads, pinned: want }) })
     ok = res.ok
+    if (!ok) why = await whyNot(res, '\uACE0\uC815\uC744 \uBC14\uAFC0 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4')
   } catch (e) {}
-  said.textContent = !ok ? '\uACE0\uC815\uC744 \uBC14\uAFB8\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.' : '\u300C' + v.subject.textContent + '\u300D \uB300\uD654' + (want ? '\uB97C \uB9E8 \uC704\uC5D0 \uACE0\uC815\uD588\uC2B5\uB2C8\uB2E4.' : '\uC758 \uACE0\uC815\uC744 \uD480\uC5C8\uC2B5\uB2C8\uB2E4.')
+  said.textContent = !ok ? why : '\u300C' + v.subject.textContent + '\u300D \uB300\uD654' + (want ? '\uB97C \uB9E8 \uC704\uC5D0 \uACE0\uC815\uD588\uC2B5\uB2C8\uB2E4.' : '\uC758 \uACE0\uC815\uC744 \uD480\uC5C8\uC2B5\uB2C8\uB2E4.')
 }
 const PIN_PATH = 'M5.5 2h5v1.2l-1 .8v3.2l2 1.8v1H8.6V14L8 15.2 7.4 14v-4H4.5V9l2-1.8V4l-1-.8z'
 
@@ -28876,7 +28964,7 @@ async function issueKey(name) {
   if (!keybox.open) keybox.showModal()
   try {
     const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1' } })
-    if (!res.ok) throw new Error(String(res.status))
+    if (!res.ok) throw new Error(await whyNot(res, '\uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4'))
     const made = await res.json()
     hasKey = true
     put(keycode, made.code)
@@ -28884,7 +28972,7 @@ async function issueKey(name) {
     fx(keycode, [{ opacity: .2 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' })
   } catch (e) {
     put(keycode, '')
-    put(byId('keyinfo'), e.message === '409' ? '\uBE0C\uB9BF\uC9C0\uAC00 \uB2EB\uD600 \uC788\uC5B4\uC11C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. AI\uC5D0\uAC8C \u300C\uBE0C\uB9BF\uC9C0 \uC5F4\uC5B4\uC918\u300D\uB77C\uACE0 \uD558\uC138\uC694.' : e.message === '429' ? '\uC7A0\uC2DC \uB4A4\uC5D0 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.' : '\uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.')
+    put(byId('keyinfo'), e instanceof TypeError ? UNREACHED : e.message)
   }
 }
 issueButton.addEventListener('click', () => issueKey(''))
@@ -29123,20 +29211,104 @@ class Viewer {
   listener;
   wakers = new Set;
   issuedAt = 0;
+  address;
+  outsideServers = new Map;
+  outsideFailed;
+  avoidPort;
+  clear = new Set;
+  movedFrom;
   constructor(bridge, options = {}) {
     this.bridge = bridge;
     this.options = options;
     this.token = bridge.viewerAt?.token ?? randomToken();
+    this.address = options.at ?? (options.address?.trim() ? viewAddress(options.address, options) : undefined);
+  }
+  async ready() {
+    const want = this.wanted();
+    if (!this.server) {
+      const remembered = this.bridge.viewerAt?.port;
+      if (remembered !== undefined && (await Promise.all(["127.0.0.1", ...want].map((a) => answers(a, remembered)))).some(Boolean))
+        this.avoidPort = remembered;
+      this.startLocal();
+    }
+    const port = this.server.port;
+    for (const addr of want) {
+      if (this.outsideServers.has(addr))
+        continue;
+      if (await answers(addr, port))
+        this.clear.delete(`${addr} ${port}`);
+      else
+        this.clear.add(`${addr} ${port}`);
+    }
+    this.openOutside();
+  }
+  wanted() {
+    const host = this.address?.now().host;
+    return host && host !== "127.0.0.1" ? [host] : [];
   }
   get url() {
+    const host = this.outsideHost();
+    return this.server && (host ? `http://${hostForUrl(host)}:${this.server.port}/${this.token}` : this.localUrl);
+  }
+  get localUrl() {
     return this.server && `http://127.0.0.1:${this.server.port}/${this.token}`;
   }
-  start() {
-    if (!this.server) {
-      this.server = this.serve(this.bridge.viewerAt?.port) ?? this.serve(0);
-      this.bridge.viewerAt = { port: this.server.port, token: this.token };
+  outsideHost() {
+    const host = this.address?.now().host;
+    return this.server && host && (host === "127.0.0.1" || this.outsideServers.has(host)) ? host : undefined;
+  }
+  moved() {
+    if (this.movedFrom === undefined || !this.server)
+      return;
+    return `the conversation view moved to a new port, because another program already answers on port ${this.movedFrom}. The link changed: the old one no longer opens this view, and the new one is ${this.url}`;
+  }
+  outside() {
+    if (!this.address)
+      return;
+    const at = this.address.now();
+    if (this.outsideHost())
+      return { set: this.address.set, available: true, link: this.url };
+    const why = at.problem ?? this.outsideFailed ?? "the view is not open yet";
+    return { set: this.address.set, available: false, problem: `the conversation view cannot be opened at ${at.host ?? this.address.set} now: ${why}.${this.localUrl ? ` It still opens on this computer at ${this.localUrl}` : ""}` };
+  }
+  openOutside() {
+    if (!this.address || !this.server)
+      return;
+    const want = this.wanted();
+    const port = this.server.port;
+    for (const [addr, server] of this.outsideServers)
+      if (!want.includes(addr)) {
+        server.stop(true);
+        this.outsideServers.delete(addr);
+      }
+    this.outsideFailed = undefined;
+    for (const addr of want) {
+      if (this.outsideServers.has(addr))
+        continue;
+      if (!this.clear.has(`${addr} ${port}`)) {
+        this.outsideFailed = `another program already answers at ${addr} port ${port}, and coworker does not take its place`;
+        continue;
+      }
+      try {
+        this.outsideServers.set(addr, Bun.serve({ hostname: addr, port, idleTimeout: 0, fetch: (req) => this.handle(req, true) }));
+      } catch {
+        this.outsideFailed = `coworker could not listen on ${addr} port ${port}; that address is not on this computer right now, or another program uses the port there`;
+      }
     }
+  }
+  start() {
+    this.startLocal();
+    this.openOutside();
     return this.url;
+  }
+  startLocal() {
+    if (this.server)
+      return;
+    const remembered = this.bridge.viewerAt?.port;
+    this.server = (remembered === this.avoidPort ? undefined : this.serve(remembered)) ?? this.serve(0);
+    if (remembered !== undefined && remembered !== this.server.port)
+      this.movedFrom = remembered;
+    this.bridge.viewerAt = { port: this.server.port, token: this.token };
   }
   serve(port) {
     if (port === undefined)
@@ -29153,6 +29325,9 @@ class Viewer {
     for (const done of [...this.wakers])
       done("");
     this.listener = undefined;
+    for (const server of this.outsideServers.values())
+      server.stop(true);
+    this.outsideServers.clear();
     this.server?.stop(true);
     this.server = undefined;
   }
@@ -29183,24 +29358,35 @@ class Viewer {
     const threads = [...this.bridge.threads.values()];
     const counts = { conversations: new Set(threads.map((t) => t.ask && t.startedBy === "me" ? `ask:${t.ask.id}` : t.id)).size, messages: threads.reduce((n, t) => n + t.messages.length, 0) };
     const recent = threads.flatMap((t) => t.messages.map((m) => ({ id: m.id, thread: t.id, at: m.at, from: m.from, peer: t.peerName, kind: m.kind, text: m.text.slice(0, RECENT_TEXT), category: t.category, noAnswer: m.noAnswer || undefined, human: m.human || undefined }))).sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : 0).slice(-RECENT);
-    return { name: me.name, about: me.about, open: me.open, links: this.bridge.links().map((l) => ({ name: l.name, state: l.state, about: l.about })), connecting: this.bridge.connecting().length, waiting, counts, recent };
+    const link = this.outsideHost() ? { link: this.url } : {};
+    return { name: me.name, about: me.about, open: me.open, ...link, links: this.bridge.links().map((l) => ({ name: l.name, state: l.state, about: l.about })), connecting: this.bridge.connecting().length, waiting, counts, recent };
   }
-  mine(req) {
+  origins() {
+    const host = this.outsideHost();
+    return [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`, ...host ? [`http://${hostForUrl(host)}:${this.server?.port}`] : []];
+  }
+  refuse(req, headers) {
     const origin = req.headers.get("origin");
     const site = req.headers.get("sec-fetch-site");
-    const here = origin === null || [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`].includes(origin);
-    return req.headers.get("x-coworker-viewer") === "1" && here && (site === null || site === "same-origin");
+    const marked = req.headers.get("x-coworker-viewer") === "1" && (site === null || site === "same-origin");
+    if (marked && (origin === null || this.origins().includes(origin)))
+      return;
+    if (marked && origin)
+      return Response.json({ error: "opened at an address this view does not accept", opened: origin, open: this.origins() }, { status: 403, headers });
+    return new Response("forbidden", { status: 403 });
   }
   async introduce(req, headers) {
-    if (!this.mine(req))
-      return new Response("forbidden", { status: 403 });
+    const refused = this.refuse(req, headers);
+    if (refused)
+      return refused;
     const body = await req.json().catch(() => null);
     this.bridge.setAbout({ ...typeof body?.model === "string" ? { model: body.model } : {}, ...typeof body?.effort === "string" ? { effort: body.effort } : {} });
     return Response.json({ about: this.bridge.describe().about ?? {} }, { headers });
   }
   issue(req, headers) {
-    if (!this.mine(req))
-      return new Response("forbidden", { status: 403 });
+    const refused = this.refuse(req, headers);
+    if (refused)
+      return refused;
     if (!this.bridge.isOpen)
       return Response.json({ error: "the bridge is closed" }, { status: 409, headers });
     const now = Date.now();
@@ -29210,8 +29396,9 @@ class Viewer {
     return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers });
   }
   async pin(req, headers) {
-    if (!this.mine(req))
-      return new Response("forbidden", { status: 403 });
+    const refused = this.refuse(req, headers);
+    if (refused)
+      return refused;
     const body = await req.json().catch(() => null);
     const threads = body?.threads;
     const ok = Array.isArray(threads) && threads.length > 0 && threads.length <= 64 && threads.every((id) => typeof id === "string" && id.length <= 200);
@@ -29223,12 +29410,18 @@ class Viewer {
     return this.listener !== undefined;
   }
   listenCommand(platform = process.platform) {
-    return `${platform === "win32" ? "curl.exe" : "curl"} -s ${this.start()}/next`;
+    this.start();
+    return `${platform === "win32" ? "curl.exe" : "curl"} -s ${this.localUrl}/next`;
   }
-  handle(req) {
-    const path = new URL(req.url).pathname;
+  handle(req, outside = false) {
+    const none = () => new Response("not found", { status: 404 });
+    const raw = req.url.replace(/^[a-z]+:\/\/[^/]*/i, "");
+    const parts = /^\/([A-Za-z0-9_-]{1,128})(?:\/([a-z]{1,12}))?$/.exec(raw);
+    if (!parts || !sameText(parts[1], this.token))
+      return none();
+    const what = `${req.method} ${parts[2] ?? ""}`;
     const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer" };
-    if (req.method === "GET" && path === `/${this.token}`)
+    if (what === "GET ")
       return new Response(PAGE, {
         headers: {
           ...headers,
@@ -29236,21 +29429,23 @@ class Viewer {
           "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
         }
       });
-    if (req.method === "GET" && path === `/${this.token}/data`)
+    if (what === "GET data")
       return Response.json(this.data(), { headers });
-    if (req.method === "GET" && path === `/${this.token}/status`)
-      return Response.json(this.status(), { headers });
-    if (req.method === "POST" && path === `/${this.token}/code`)
+    if (what === "POST code")
       return this.issue(req, headers);
-    if (req.method === "POST" && path === `/${this.token}/about`)
-      return this.introduce(req, headers);
-    if (req.method === "POST" && path === `/${this.token}/pin`)
+    if (what === "POST pin")
       return this.pin(req, headers);
-    if (req.method === "GET" && path === `/${this.token}/events`)
+    if (what === "GET events")
       return this.events(req, headers);
-    if (req.method === "GET" && path === `/${this.token}/next`)
+    if (outside)
+      return none();
+    if (what === "GET status")
+      return Response.json(this.status(), { headers });
+    if (what === "POST about")
+      return this.introduce(req, headers);
+    if (what === "GET next")
       return this.next(req, headers);
-    if (req.method === "GET" && path === `/${this.token}/wake`)
+    if (what === "GET wake")
       return this.wake(req, headers);
     return new Response("not found", { status: 404 });
   }
@@ -29376,6 +29571,22 @@ var WHAT = {
   clock: "clocks differ",
   peer_human_slow: "their human is slow to decide"
 };
+function sameText(a, b) {
+  const hash = (t) => createHash5("sha256").update(t).digest();
+  return timingSafeEqual(hash(a), hash(b));
+}
+function answers(host, port) {
+  return new Promise((done) => {
+    const sock = connect({ host, port });
+    const end = (yes) => {
+      sock.destroy();
+      done(yes);
+    };
+    sock.setTimeout(300, () => end(false));
+    sock.once("connect", () => end(true));
+    sock.once("error", () => end(false));
+  });
+}
 
 // src/session.ts
 var DEFAULT_CODE_MINUTES = 60;
@@ -29795,9 +30006,18 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     }
   }
   let viewer;
-  const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel });
-  const viewerUrl = () => viewerOf().start();
-  const viewerNote = (url) => `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url}`;
+  const viewerAt = opts.viewerAddress?.trim() ? viewAddress(opts.viewerAddress) : undefined;
+  const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel, at: viewerAt });
+  const viewerUrl = async () => {
+    await viewerOf().ready();
+    return viewerOf().start();
+  };
+  const viewerNote = (url) => {
+    const outside = viewer?.outside();
+    const moved = viewer?.moved();
+    const where = outside?.available ? "in a browser on this PC or on another device of your human that reaches this address (whoever has this link and can reach that address can read the conversation, make an access key and pin a conversation, and nothing else)" : "in a browser on this PC";
+    return `Always give your human this link, even if you go on to do something else in the same turn. It opens, ${where}, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url} The link is for your human only: never send it to another session, in a question, an answer, an agreement or a file. coworker refuses to send text that holds it.${moved ? ` Tell your human too: ${moved}.` : ""}${outside?.problem ? ` Tell your human too: ${outside.problem}` : ""}`;
+  };
   async function relayStatus(b) {
     if (!relay)
       return {};
@@ -29810,6 +30030,8 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   function tool(run) {
     return async (args, extra) => {
       try {
+        if (bridge)
+          await viewerOf().ready();
         const value = await run(args, extra);
         const note = updateNote();
         if (note && value && typeof value === "object" && !Array.isArray(value)) {
@@ -29852,9 +30074,9 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
         connected,
         conversations,
         relay: relayInfo,
-        viewer: viewerUrl(),
+        viewer: await viewerUrl(),
         listen_command: listenCommand(),
-        next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(", ")}` : ""}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map((c) => c.id).join(", ")}), so you know where each one stands.` : ""}${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`
+        next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(", ")}` : ""}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map((c) => c.id).join(", ")}), so you know where each one stands.` : ""}${warn} ${viewerNote(viewerOf().start())}${tellFirst()} ${listen()}`
       };
     }
     await resolveFolder();
@@ -29876,9 +30098,9 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       addresses: b.addrs(),
       relay: relayInfo,
       group: [...b.peers.values()].filter((p) => !p.private).map((p) => p.name),
-      viewer: viewerUrl(),
+      viewer: await viewerUrl(),
       listen_command: listenCommand(),
-      next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
+      next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerOf().start())}${channelHint()}${tellFirst()} ${listen()}`
     };
   }));
   server.registerTool("connect", {
@@ -29913,9 +30135,9 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       myName: b.name,
       myPort: b.port,
       relay: relayInfo,
-      viewer: viewerUrl(),
+      viewer: await viewerUrl(),
       listen_command: listenCommand(),
-      next: `${again ? `Tell your human this session was already connected to ${peer.name}; it keeps reconnecting by itself until a human closes it, so no new code is needed, and list_connections shows whether it can be reached now.` : `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(", ")})` : ""}.`}${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
+      next: `${again ? `Tell your human this session was already connected to ${peer.name}; it keeps reconnecting by itself until a human closes it, so no new code is needed, and list_connections shows whether it can be reached now.` : `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(", ")})` : ""}.`}${warn} ${viewerNote(viewerOf().start())}${channelHint()}${tellFirst()} ${listen()}`
     };
   }));
   server.registerTool("list_connections", {
@@ -29930,6 +30152,8 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       session_id: identity,
       moved: moved || undefined,
       viewer: viewer?.url,
+      ...viewerAt ? { viewer_address: viewerOf().outside() } : {},
+      ...viewer?.moved() ? { viewer_moved: viewer.moved() } : {},
       listen_command: getBridge().isOpen ? listenCommand() : undefined,
       earlier_bridges: earlier.length ? earlier : undefined
     };
@@ -30141,14 +30365,16 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       reopenWindows(bridge);
     startAutoUpdate();
   };
+  let restored = Promise.resolve();
   if (opts.restore) {
     try {
       adopt(Bridge.restore(opts.restore, bridgeOptions()));
-      viewerOf().start();
+      restored = viewerOf().ready().catch(() => {});
     } catch {}
   }
   return {
     server,
+    ready: restored,
     shutdown() {
       if (bridge && live.get(identity)?.bridge === bridge)
         live.delete(identity);
@@ -30228,6 +30454,7 @@ async function serve({ home }) {
       portsText: process.env.COWORKER_PORTS,
       relay: process.env.COWORKER_RELAY || undefined,
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+      viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
       folder: rootsFolder,
       app: updating ? { downloaded: () => downloaded, restartCommand } : undefined
     });
@@ -30377,6 +30604,7 @@ async function stdio() {
     portsText: process.env.COWORKER_PORTS,
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+    viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
     folder: projectFolder,
     sessionId,
     restore,
@@ -30394,6 +30622,7 @@ async function stdio() {
   process.stdin.on("close", exit);
   process.on("SIGINT", exit);
   process.on("SIGTERM", exit);
+  await session.ready;
   await session.server.connect(new StdioServerTransport);
 }
 function installedAsPlugin() {

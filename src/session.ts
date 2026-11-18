@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { listSaved, readSaved, savedPath, stillRunning, waitUntilStopped } from './resume'
 import { firstCheckMs, newer, selfUpdate, UPDATE_EVERY_MS } from './update'
+import { viewAddress } from './viewaddr'
 import { Viewer } from './viewer'
 
 // 연결 코드를 쓸 수 있는 시간(분). 0 을 주면 시간 제한 없이 브릿지를 닫을 때까지 쓴다. 어느 쪽이든 한 번만 쓴다.
@@ -52,6 +53,8 @@ export type SessionOptions = {
   // VPN 없이 다른 네트워크의 동료와 이으려면 중계 서버 주소를 정한다. 키는 그 서버를 띄운 사람이 정한 것이다.
   relay?: string
   relayKey?: string
+  // 이 PC의 주인이 자기 다른 기기에서 이 PC에 닿는 주소(COWORKER_VIEWER_ADDRESS). 정하면 대화 보기 화면이 그 주소에서도 열린다.
+  viewerAddress?: string
   // 세션 이름에 붙일 프로젝트 폴더를 알아내는 방법. stdio 는 실행 환경에서, 앱은 클라이언트가 알려 주는 폴더(roots)에서 찾는다.
   folder: (server: McpServer) => string | undefined | Promise<string | undefined>
   // 이 세션을 다시 켰을 때 알아볼 이름표. Claude Code 는 세션 ID(CLAUDE_CODE_SESSION_ID)를 MCP 서버에 넘기고, 이어서 켜도 같은 값을 준다.
@@ -524,11 +527,22 @@ export function createSession(opts: SessionOptions) {
 
   // 브라우저로 대화를 보는 화면. 브릿지가 닫혀도 세션이 살아 있는 동안은 지난 대화를 보여 준다.
   let viewer: Viewer | undefined
-  const viewerOf = () => (viewer ??= new Viewer(getBridge(), { pushes: channel }))
-  const viewerUrl = () => viewerOf().start()
+  // 주인이 정한 대화 보기 주소.
+  const viewerAt = opts.viewerAddress?.trim() ? viewAddress(opts.viewerAddress) : undefined
+  const viewerOf = () => (viewer ??= new Viewer(getBridge(), { pushes: channel, at: viewerAt }))
+  const viewerUrl = async () => {
+    await viewerOf().ready()
+    return viewerOf().start()
+  }
   // 연 쪽과 연결한 쪽 모두 자기 PC의 링크를 받는다. 링크를 안내 문장에 넣어야 AI가 다른 일을 이어 할 때도 빠뜨리지 않는다.
-  const viewerNote = (url: string) =>
-    `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url}`
+  const viewerNote = (url: string) => {
+    const outside = viewer?.outside()
+    const moved = viewer?.moved()
+    const where = outside?.available
+      ? 'in a browser on this PC or on another device of your human that reaches this address (whoever has this link and can reach that address can read the conversation, make an access key and pin a conversation, and nothing else)'
+      : 'in a browser on this PC'
+    return `Always give your human this link, even if you go on to do something else in the same turn. It opens, ${where}, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url} The link is for your human only: never send it to another session, in a question, an answer, an agreement or a file. coworker refuses to send text that holds it.${moved ? ` Tell your human too: ${moved}.` : ''}${outside?.problem ? ` Tell your human too: ${outside.problem}` : ''}`
+  }
 
   // 중계 서버를 쓰면 우편함이 열릴 때까지 잠깐 기다리고, 안 열렸으면 사람에게 알리게 한다.
   async function relayStatus(b: Bridge) {
@@ -556,6 +570,8 @@ export function createSession(opts: SessionOptions) {
   function tool<T>(run: (args: T, extra: Extra) => Promise<unknown> | unknown) {
     return async (args: T, extra: Extra) => {
       try {
+        // 대화 보기를 열기 전에, 쓰려는 포트에서 다른 프로그램이 답하는지 본다. 정한 주소에서 못 열었으면 다시 해 본다.
+        if (bridge) await viewerOf().ready()
         const value = await run(args, extra)
         const note = updateNote()
         if (note && value && typeof value === 'object' && !Array.isArray(value)) {
@@ -622,9 +638,9 @@ export function createSession(opts: SessionOptions) {
           connected,
           conversations,
           relay: relayInfo,
-          viewer: viewerUrl(),
+          viewer: await viewerUrl(),
           listen_command: listenCommand(),
-          next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(', ')}` : ''}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map(c => c.id).join(', ')}), so you know where each one stands.` : ''}${warn} ${viewerNote(viewerUrl())}${tellFirst()} ${listen()}`,
+          next: `Tell your human the bridge is back with the same identity${connected.length ? ` and is connected again to ${connected.join(', ')}` : ''}, with all ${conversations.length} conversations; nobody needs a new code.${open.length ? ` Before you go on, read the ${open.length} conversation(s) still open with read_conversation (${open.map(c => c.id).join(', ')}), so you know where each one stands.` : ''}${warn} ${viewerNote(viewerOf().start())}${tellFirst()} ${listen()}`,
         }
       }
       await resolveFolder()
@@ -645,9 +661,9 @@ export function createSession(opts: SessionOptions) {
         addresses: b.addrs(),
         relay: relayInfo,
         group: [...b.peers.values()].filter(p => !p.private).map(p => p.name),
-        viewer: viewerUrl(),
+        viewer: await viewerUrl(),
         listen_command: listenCommand(),
-        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
+        next: `Show the code to your human so they can send it to the coworker. The code works once, ${expires ? `until ${expires}` : 'with no time limit until this bridge closes'}: after one session joins with it, it is used up, so make a new code for each further session. A session that already joined never needs a new code; if the connection drops, both sides reconnect by themselves until a human closes it. To wait a long time, keep this computer awake (on a Mac, run caffeinate -i in a terminal), or nothing gets through while it sleeps.${warn} ${viewerNote(viewerOf().start())}${channelHint()}${tellFirst()} ${listen()}`,
       }
     }),
   )
@@ -685,9 +701,9 @@ export function createSession(opts: SessionOptions) {
         myName: b.name,
         myPort: b.port,
         relay: relayInfo,
-        viewer: viewerUrl(),
+        viewer: await viewerUrl(),
         listen_command: listenCommand(),
-        next: `${again ? `Tell your human this session was already connected to ${peer.name}; it keeps reconnecting by itself until a human closes it, so no new code is needed, and list_connections shows whether it can be reached now.` : `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.`}${warn} ${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`,
+        next: `${again ? `Tell your human this session was already connected to ${peer.name}; it keeps reconnecting by itself until a human closes it, so no new code is needed, and list_connections shows whether it can be reached now.` : `Tell your human you are connected to ${peer.name}${joining.length ? ` and are being connected with the rest of its group (${joining.join(', ')})` : ''}.`}${warn} ${viewerNote(viewerOf().start())}${channelHint()}${tellFirst()} ${listen()}`,
       }
     }),
   )
@@ -708,6 +724,8 @@ export function createSession(opts: SessionOptions) {
         session_id: identity,
         moved: moved || undefined,
         viewer: viewer?.url,
+        ...(viewerAt ? { viewer_address: viewerOf().outside() } : {}),
+        ...(viewer?.moved() ? { viewer_moved: viewer.moved() } : {}),
         listen_command: getBridge().isOpen ? listenCommand() : undefined,
         earlier_bridges: earlier.length ? earlier : undefined,
       }
@@ -1042,17 +1060,23 @@ export function createSession(opts: SessionOptions) {
     startAutoUpdate()
   }
 
+  let restored: Promise<void> = Promise.resolve()
   // 다시 켠 세션이면, 저장해 둔 브릿지를 바로 되살린다. 상대들은 새 코드 없이 다시 이어진다.
   // 대화 보기 화면도 전과 같은 주소로 바로 연다. 사람이 열어 둔 화면이 AI가 도구를 부르기 전에도 다시 붙는다.
   if (opts.restore) {
     try {
       adopt(Bridge.restore(opts.restore, bridgeOptions()))
-      viewerOf().start()
+      // 여는 데는 잠깐이 걸린다(쓰던 포트에서 다른 프로그램이 답하는지 먼저 본다). 세션은 그 뒤에 말을 받기 시작한다.
+      restored = viewerOf()
+        .ready()
+        .catch(() => {})
     } catch {}
   }
 
   return {
     server,
+    // 되살린 세션의 대화 보기가 열릴 때까지.
+    ready: restored,
     shutdown() {
       if (bridge && live.get(identity)?.bridge === bridge) live.delete(identity)
       closeWindows(false)

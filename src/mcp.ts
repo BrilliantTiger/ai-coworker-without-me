@@ -42,6 +42,7 @@ async function stdio() {
     portsText: process.env.COWORKER_PORTS,
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+    viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
     folder: projectFolder,
     sessionId,
     restore,
@@ -58,6 +59,7 @@ async function stdio() {
   process.stdin.on('close', exit)
   process.on('SIGINT', exit)
   process.on('SIGTERM', exit)
+  await session.ready
   await session.server.connect(new StdioServerTransport())
 }
 
