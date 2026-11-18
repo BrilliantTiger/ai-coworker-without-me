@@ -42,6 +42,7 @@ async function stdio() {
     portsText: process.env.COWORKER_PORTS,
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+    viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
     folder: projectFolder,
     sessionId,
     restore,

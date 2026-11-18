@@ -153,11 +153,12 @@ function fromPage(d: Record<string, unknown>, now: number): Pick<Bridge, 'waitin
 // 브릿지 하나의 지금 모습. 닫혔거나 닿지 않으면 없다고 돌려준다.
 // 읽을 때는 서버가 듣는 127.0.0.1 로 읽고, 사람이 누를 링크는 localhost 로 적는다.
 // Claude 데스크톱 앱은 https 가 아닌 링크 가운데 http://localhost 만 눌리게 한다(127.0.0.1 은 글자로만 그린다).
+// 주인이 대화 보기 주소를 정했으면 서버가 요약에 그 주소의 링크(link)를 넣어 준다. 그때는 그 링크를 보인다.
 async function look($: EngineInterface, api: string, now: number): Promise<Bridge | undefined> {
-  const url = api.replace('//127.0.0.1:', '//localhost:')
   const status = await $.http.fetch(`${api}/status`)
   if (!status.ok && status.status !== 404) return undefined
   const s = status.ok ? JSON.parse(status.text) : undefined
+  const url = typeof s?.link === 'string' && /^http:\/\/[\w.:\[\]-]+\/[\w-]+$/.test(s.link) ? s.link : api.replace('//127.0.0.1:', '//localhost:')
   if (s && !s.open) return undefined
   const links: Link[] = (Array.isArray(s?.links) ? s.links : []).map((l: Record<string, unknown>) => ({ name: word(l?.name, 80), state: l?.state === 'connected' ? 'connected' : 'reconnecting', about: aboutOf(l?.about) }))
 

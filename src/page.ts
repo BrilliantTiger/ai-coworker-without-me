@@ -851,17 +851,31 @@ function activate(id, byHand) {
     if (top < 60) scrollBy({ top: top - 76, behavior: moving() ? 'smooth' : 'auto' })
   }
 }
+// 세션이 요청을 받지 않은 까닭을 사람이 읽을 말로 바꾼다. 세션이 답했으면 세션이 꺼졌다고 하지 않는다.
+// 화면을 연 주소 때문에 거절됐으면(403), 세션이 알려 준 주소로 다시 열라고 한다.
+const UNREACHED = '세션에 닿지 않습니다. 세션이 켜져 있는지 확인하세요.'
+async function whyNot(res, cannot) {
+  if (res.status === 409) return '브릿지가 닫혀 있어서 만들 수 없습니다. AI에게 「브릿지 열어줘」라고 하세요.'
+  if (res.status === 429) return '잠시 뒤에 다시 눌러 주세요.'
+  if (res.status === 403) {
+    const told = await res.json().catch(() => null)
+    const open = told && Array.isArray(told.open) ? told.open.filter(o => typeof o === 'string') : []
+    if (open.length) return '이 화면을 연 주소(' + location.origin + ')로는 ' + cannot + '. 이 주소로 다시 여세요: ' + open.map(o => o + location.pathname).join(' 또는 ')
+  }
+  return '세션이 이 요청을 받지 않았습니다(응답 ' + res.status + ').'
+}
 // 대화를 맨 위에 고정하거나 푼다. 세션이 기억하고, 바뀐 차례는 세션이 밀어 주는 새 내용으로 그려진다.
 // 읽어 주는 프로그램에는 결과를 한 번만 알린다.
 const said = byId('said')
 async function togglePin(v) {
   const want = !v.pinned
-  let ok = false
+  let ok = false, why = UNREACHED
   try {
     const res = await fetch(location.pathname + '/pin', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ threads: v.threads, pinned: want }) })
     ok = res.ok
+    if (!ok) why = await whyNot(res, '고정을 바꿀 수 없습니다')
   } catch (e) {}
-  said.textContent = !ok ? '고정을 바꾸지 못했습니다. 세션이 켜져 있는지 확인하세요.' : '「' + v.subject.textContent + '」 대화' + (want ? '를 맨 위에 고정했습니다.' : '의 고정을 풀었습니다.')
+  said.textContent = !ok ? why : '「' + v.subject.textContent + '」 대화' + (want ? '를 맨 위에 고정했습니다.' : '의 고정을 풀었습니다.')
 }
 const PIN_PATH = 'M5.5 2h5v1.2l-1 .8v3.2l2 1.8v1H8.6V14L8 15.2 7.4 14v-4H4.5V9l2-1.8V4l-1-.8z'
 
@@ -1248,7 +1262,7 @@ async function issueKey(name) {
   if (!keybox.open) keybox.showModal()
   try {
     const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1' } })
-    if (!res.ok) throw new Error(String(res.status))
+    if (!res.ok) throw new Error(await whyNot(res, '접근키를 만들 수 없습니다'))
     const made = await res.json()
     hasKey = true
     put(keycode, made.code)
@@ -1256,7 +1270,7 @@ async function issueKey(name) {
     fx(keycode, [{ opacity: .2 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' })
   } catch (e) {
     put(keycode, '')
-    put(byId('keyinfo'), e.message === '409' ? '브릿지가 닫혀 있어서 만들 수 없습니다. AI에게 「브릿지 열어줘」라고 하세요.' : e.message === '429' ? '잠시 뒤에 다시 눌러 주세요.' : '접근키를 만들지 못했습니다. 세션이 켜져 있는지 확인하세요.')
+    put(byId('keyinfo'), e instanceof TypeError ? UNREACHED : e.message)
   }
 }
 issueButton.addEventListener('click', () => issueKey(''))

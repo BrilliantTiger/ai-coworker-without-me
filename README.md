@@ -89,6 +89,18 @@ AI 둘이 서로 맞장구치다 틀린 결론에 합의하지 않도록, 합의
 
 브릿지를 연 쪽도, 코드로 연결한 쪽도 AI가 `http://127.0.0.1:…`로 시작하는 자기 링크를 함께 준다. 각자 자기 PC의 브라우저로 열면 그 세션이 주고받은 대화가 보인다. 새 질문이나 답이 오면 새로 고치지 않아도 그때그때 바뀐다.
 
+- 대화 보기 화면은 세션이 도는 그 PC에서만 열린다. `127.0.0.1`에서만 듣기 때문에 다른 기기에서는 링크를 눌러도 열리지 않는다.
+- 내 다른 기기(예: VPN으로 이 PC에 닿는 노트북이나 휴대폰)에서도 열려면 **대화 보기 주소**를 정한다. Claude Code 플러그인은 `/plugin configure coworker@ai-coworker-without-me`의 Viewer address 칸에, 그 밖에는 환경변수 `COWORKER_VIEWER_ADDRESS`에 적고 세션을 다시 켠다. 값은 셋 가운데 하나다.
+  - 주소: 내 다른 기기에서 이 PC에 닿는 주소(예: 이 PC의 VPN 주소).
+  - 이름: 이 PC를 가리키는 이름. 이 PC의 주소를 가리키지 않는 이름은 쓰지 않는다.
+  - `tailscale`: 이 PC의 Tailscale 주소(`100.64.0.0/10` 범위)를 스스로 찾아 쓴다. 예: `COWORKER_VIEWER_ADDRESS=tailscale`
+- 정하면 달라지는 것은 셋이다.
+  - 화면이 `127.0.0.1`과 그 주소에서 같은 포트로 함께 열린다. 모든 네트워크(`0.0.0.0`)에서 여는 일은 없고, 그런 값은 받지 않는다.
+  - AI가 주는 링크, 채팅창 위 카드의 링크가 그 주소로 나온다. AI가 이 PC 안에서 돌리는 기다리는 명령(`curl … /next`)은 그대로 `127.0.0.1`을 쓴다.
+  - 화면의 「접근키 발급」과 「고정」이 `127.0.0.1`, `localhost`, 그 주소로 연 화면에서 된다. 다른 주소로 연 화면에서 누르면 화면이 어느 주소로 다시 열어야 하는지 알려 준다.
+- 그 주소에서 열지 못하면(VPN이 꺼졌거나 그 주소의 포트를 다른 프로그램이 쓴다) `127.0.0.1`로만 계속 열리고, 「연결 상태 보여줘」(`list_connections`의 `viewer_address`)가 그 주소를 쓸 수 없다고 알려 준다. 링크를 다시 줄 때마다 다시 열어 본다.
+- **링크를 알고 그 주소에 닿을 수 있는 사람은 누구든 그 대화를 읽고 접근키를 만들 수 있다.** 링크에 든 토큰 말고는 막는 것이 없고, 화면은 암호화되지 않은 `http`로 열린다. 그래서 나만 닿는 주소(내 기기만 들어오는 VPN)를 적고, 링크를 남에게 주지 않는다. 여러 사람이 함께 쓰는 사내망 주소는 적지 않는다.
+
 - 받은 질문과 보낸 질문을 나눠 보여 준다. 대화마다 상대 세션 이름과 주소(어디와), 시작 시각이 붙는다.
 - 메시지마다 언제, 누가 누구에게 보냈는지와 질문·답·알림·합의문 구분이 붙는다. 질문에 함께 보낸 배경도 펼쳐 볼 수 있다.
 - 이 PC 안에서만 열리고, 링크에 든 토큰을 알아야 볼 수 있다. 링크는 남에게 보내지 않는다.
@@ -118,7 +130,7 @@ GitHub판 플러그인으로 설치한 Claude Code에서는 브릿지가 열려 
 - 끝의 「대화 보기」를 누르면 [대화 보기](#대화-보기) 화면이 브라우저로 열린다.
 - 이 세션의 모델과 effort는 카드가 Claude Code에서 읽어 알려 준다. 그래서 상대 화면에 이 세션이 무엇으로 도는지가 맞게 나온다.
 - 브릿지를 열지 않은 세션에는 아무것도 생기지 않는다. 카드를 접으려면 Claude Code의 띠 접기(`ctrl+x ctrl+a`)를 쓴다.
-- 이 PC 안의 대화 보기 서버(`127.0.0.1`)에서만 읽는다. 최근 글 몇 개의 앞부분을 읽어 보여 줄 뿐, 밖으로 아무것도 보내지 않는다.
+- 이 PC 안의 대화 보기 서버(`127.0.0.1`)에서만 읽는다. 최근 글 몇 개의 앞부분을 읽어 보여 줄 뿐, 밖으로 아무것도 보내지 않는다. [대화 보기 주소](#대화-보기)를 정했으면 「대화 보기」 링크만 그 주소로 나온다.
 - Codex와 디렉터리판에는 이 카드가 없다.
 
 세션을 여러 개 띄우면 세션마다 7700~7799 사이의 다른 포트로 열린다. 포트를 직접 정하려면 "7710번 포트로 브릿지 열어줘"라고 하면 된다.
@@ -151,7 +163,7 @@ claude plugin install coworker --marketplace BrilliantTiger/ai-coworker-without-
 
 Claude Code 세션 안에서는 `/plugin marketplace add BrilliantTiger/ai-coworker-without-me@release`를 하고 `/plugin install coworker@ai-coworker-without-me`를 해도 된다.
 
-- 설정이 세 개 있다. 포트 범위(기본 7700-7799), 중계 서버 주소, 중계 서버 키다. 처음에는 기본값으로 켜진다. 사내망과 VPN에서만 쓰면 중계 서버 두 칸은 비워 둔다. 바꾸려면 Claude Code 세션에서 `/plugin configure coworker@ai-coworker-without-me`나 `/config`를 쓴다.
+- 설정이 네 개 있다. 포트 범위(기본 7700-7799), 중계 서버 주소, 중계 서버 키, [대화 보기 주소](#대화-보기)다. 처음에는 기본값으로 켜진다. 사내망과 VPN에서만 쓰면 중계 서버 두 칸은 비워 둔다. 대화 보기 화면을 이 PC에서만 열면 대화 보기 주소도 비워 둔다. 바꾸려면 Claude Code 세션에서 `/plugin configure coworker@ai-coworker-without-me`나 `/config`를 쓴다.
 - 이 플러그인을 쓸 세션은 이렇게 켠다. 자세한 것은 [채널로 켠다](#claude-code는-채널로-켠다)에 있다.
 
   ```
@@ -180,7 +192,7 @@ codex plugin add coworker@ai-coworker-without-me
 
 - 설치할 패키지가 없어서 바로 켜진다.
 - 기다리기처럼 읽기만 하는 도구는 승인 없이 쓴다. 질문 보내기, 답하기, 합의문 쓰기처럼 보내는 도구는 쓸 때마다 승인을 묻는다.
-- 포트 범위나 중계 서버를 바꾸려면 Codex를 켜는 셸의 환경변수 `COWORKER_PORTS`, `COWORKER_RELAY`, `COWORKER_RELAY_KEY`로 정한다. Codex가 그 값을 coworker에 넘겨 준다.
+- 포트 범위나 중계 서버, [대화 보기 주소](#대화-보기)를 바꾸려면 Codex를 켜는 셸의 환경변수 `COWORKER_PORTS`, `COWORKER_RELAY`, `COWORKER_RELAY_KEY`, `COWORKER_VIEWER_ADDRESS`로 정한다. Codex가 그 값을 coworker에 넘겨 준다.
   - Mac·Linux: `~/.zshrc`나 `~/.bashrc`에 `export COWORKER_RELAY=https://relay.example.com`처럼 넣는다.
   - Windows(PowerShell): `[Environment]::SetEnvironmentVariable('COWORKER_RELAY', 'https://relay.example.com', 'User')` 뒤에 터미널을 새로 연다.
 - 예전에 `~/.codex/config.toml`에 `[mcp_servers.coworker]`를 넣었으면 지운다.

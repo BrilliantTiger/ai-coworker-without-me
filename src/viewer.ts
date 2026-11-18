@@ -2,9 +2,12 @@ import type { Server } from 'bun'
 import { openQuestion } from './bridge'
 import type { Bridge, BridgeEvent, ViewerAddress } from './bridge'
 import { randomToken } from './crypto'
+import { hostForUrl } from './net'
 import { PAGE, QUIET_AFTER_MS } from './page'
+import { viewAddress, type ViewAddressDeps, type ViewAddressSetting } from './viewaddr'
 
 // 사람이 브라우저로 대화를 지켜보는 화면. 이 PC 안(127.0.0.1)에서만 열리고, 주소에 든 토큰을 알아야 볼 수 있다.
+// 주인이 대화 보기 주소를 정했으면(viewaddr.ts) 그 주소에서도 같은 포트로 연다. 그때도 토큰 없이는 아무것도 답하지 않는다.
 // 상대가 보낸 글은 화면에 글자로만 넣는다. HTML 로 해석하지 않는다.
 // 사람이 화면에서 할 수 있는 일은 하나다: 접근키(연결 코드)를 새로 만드는 것(/code). 나머지는 모두 보기만 한다.
 // 채널 없이 켠 Claude Code 가 백그라운드 명령으로 기다리는 주소(/next)도 여기에 둔다.
@@ -18,17 +21,69 @@ export class Viewer {
   private wakers = new Set<(text: string) => void>()
   // 화면에서 접근키를 마지막으로 만든 때. 너무 잦은 요청을 막는다.
   private issuedAt = 0
+  // 주인이 정한 대화 보기 주소와, 그 주소에서 연 서버들. 정하지 않았으면 없다.
+  private readonly address?: ViewAddressSetting
+  private outsideServers = new Map<string, Server<undefined>>()
+  private outsideFailed?: string
 
   // pushes: 채널로 켠 세션이라 소식이 세션에 바로 들어간다. 그때는 기다릴 것이 없다.
   constructor(
     private readonly bridge: Bridge,
-    private readonly options: { pushes?: boolean; quietAfterMs?: number } = {},
+    private readonly options: { pushes?: boolean; quietAfterMs?: number; address?: string; at?: ViewAddressSetting } & ViewAddressDeps = {},
   ) {
     this.token = bridge.viewerAt?.token ?? randomToken()
+    this.address = options.at ?? (options.address?.trim() ? viewAddress(options.address, options) : undefined)
   }
 
+  // 정한 주소가 이름이면 그 이름을 다 풀 때까지 기다린다.
+  async ready() {
+    await this.address?.ready
+  }
+
+  // 사람에게 주는 링크. 정한 주소에서 열려 있으면 그 주소로, 아니면 이 PC 안의 주소로 준다.
   get url() {
+    const host = this.outsideHost()
+    return this.server && (host ? `http://${hostForUrl(host)}:${this.server.port}/${this.token}` : this.localUrl)
+  }
+
+  // 이 PC 안에서 부르는 주소. 기다리는 명령과 채팅창 위 띠는 언제나 이 주소를 쓴다.
+  private get localUrl() {
     return this.server && `http://127.0.0.1:${this.server.port}/${this.token}`
+  }
+
+  // 정한 주소에서 실제로 열려 있을 때만 그 주소(또는 이름)를 돌려준다.
+  private outsideHost() {
+    const at = this.address?.now()
+    return this.server && at?.host && at.listen.every(a => this.outsideServers.has(a)) ? at.host : undefined
+  }
+
+  // 정한 주소의 지금 상태. list_connections 가 사람에게 그대로 알린다. 정하지 않았으면 없다.
+  outside(): { set: string; available: boolean; link?: string; problem?: string } | undefined {
+    if (!this.address) return undefined
+    const at = this.address.now()
+    if (this.outsideHost()) return { set: this.address.set, available: true, link: this.url }
+    const why = at.problem ?? this.outsideFailed ?? 'the view is not open yet'
+    return { set: this.address.set, available: false, problem: `the conversation view cannot be opened at ${at.host ?? this.address.set} now: ${why}.${this.localUrl ? ` It still opens on this computer at ${this.localUrl}` : ''}` }
+  }
+
+  // 정한 주소에서도 같은 포트로 연다. 못 열면 127.0.0.1 로만 계속 일하고, 링크를 줄 때마다 다시 해 본다.
+  private openOutside() {
+    if (!this.address || !this.server) return
+    const want = this.address.now().listen
+    for (const [addr, server] of this.outsideServers)
+      if (!want.includes(addr)) {
+        server.stop(true)
+        this.outsideServers.delete(addr)
+      }
+    this.outsideFailed = undefined
+    for (const addr of want) {
+      if (this.outsideServers.has(addr)) continue
+      try {
+        this.outsideServers.set(addr, Bun.serve({ hostname: addr, port: this.server.port!, idleTimeout: 0, fetch: req => this.handle(req) }))
+      } catch {
+        this.outsideFailed = `coworker could not listen on ${addr} port ${this.server.port}; that address is not on this computer right now, or another program uses the port there`
+      }
+    }
   }
 
   start(): string {
@@ -37,6 +92,7 @@ export class Viewer {
       this.server = this.serve(this.bridge.viewerAt?.port) ?? this.serve(0)!
       this.bridge.viewerAt = { port: this.server.port!, token: this.token }
     }
+    this.openOutside()
     return this.url!
   }
 
@@ -54,6 +110,8 @@ export class Viewer {
   stop() {
     for (const done of [...this.wakers]) done('')
     this.listener = undefined
+    for (const server of this.outsideServers.values()) server.stop(true)
+    this.outsideServers.clear()
     this.server?.stop(true)
     this.server = undefined
   }
@@ -95,21 +153,34 @@ export class Viewer {
       .flatMap(t => t.messages.map(m => ({ id: m.id, thread: t.id, at: m.at, from: m.from, peer: t.peerName, kind: m.kind, text: m.text.slice(0, RECENT_TEXT), category: t.category, noAnswer: m.noAnswer || undefined, human: m.human || undefined })))
       .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
       .slice(-RECENT)
-    return { name: me.name, about: me.about, open: me.open, links: this.bridge.links().map(l => ({ name: l.name, state: l.state, about: l.about })), connecting: this.bridge.connecting().length, waiting, counts, recent }
+    // 정한 주소에서 열려 있으면 띠가 사람에게 보일 링크도 함께 준다.
+    const link = this.outsideHost() ? { link: this.url } : {}
+    return { name: me.name, about: me.about, open: me.open, ...link, links: this.bridge.links().map(l => ({ name: l.name, state: l.state, about: l.about })), connecting: this.bridge.connecting().length, waiting, counts, recent }
   }
 
   // 이 화면(또는 이 PC의 채팅창 위 띠)에서 온 요청인지. 표시 헤더가 있어야 하고, 브라우저가 알려 주는 출처가 이 화면이어야 한다.
-  private mine(req: Request) {
+  // 이 화면의 출처는 127.0.0.1, localhost, 그리고 주인이 정한 대화 보기 주소뿐이다. 모두 이 서버의 포트여야 한다.
+  private origins() {
+    const host = this.address?.now().host
+    return [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`, ...(host ? [`http://${hostForUrl(host)}:${this.server?.port}`] : [])]
+  }
+
+  // 받지 않을 요청이면 거절하는 답을 돌려준다. 화면에서 왔지만 화면을 연 주소가 다르면, 어디로 열어야 하는지 알려 준다.
+  // 그 답은 같은 출처의 화면만 읽을 수 있다. 다른 사이트의 페이지는 이 서버가 허락하지 않아 읽지 못한다.
+  private refuse(req: Request, headers: Record<string, string>): Response | undefined {
     const origin = req.headers.get('origin')
     const site = req.headers.get('sec-fetch-site')
-    const here = origin === null || [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`].includes(origin)
-    return req.headers.get('x-coworker-viewer') === '1' && here && (site === null || site === 'same-origin')
+    const marked = req.headers.get('x-coworker-viewer') === '1' && (site === null || site === 'same-origin')
+    if (marked && (origin === null || this.origins().includes(origin))) return undefined
+    if (marked && origin) return Response.json({ error: 'opened at an address this view does not accept', opened: origin, open: this.origins() }, { status: 403, headers })
+    return new Response('forbidden', { status: 403 })
   }
 
   // Claude Code 의 채팅창 위 띠가 이 세션의 모델과 강도(effort)를 알려 준다. AI가 스스로 모를 때가 있어서 Claude Code 에서 읽은 것을 받는다.
   // 브릿지가 그것을 기억하고, 상대에게 인사할 때 함께 전한다. 글자만, 한 줄, 60자까지 받는다.
   private async introduce(req: Request, headers: Record<string, string>): Promise<Response> {
-    if (!this.mine(req)) return new Response('forbidden', { status: 403 })
+    const refused = this.refuse(req, headers)
+    if (refused) return refused
     const body = (await req.json().catch(() => null)) as { model?: unknown; effort?: unknown } | null
     this.bridge.setAbout({ ...(typeof body?.model === 'string' ? { model: body.model } : {}), ...(typeof body?.effort === 'string' ? { effort: body.effort } : {}) })
     return Response.json({ about: this.bridge.describe().about ?? {} }, { headers })
@@ -122,7 +193,8 @@ export class Viewer {
   // 화면이 붙이는 표시 헤더가 있어야 하고(다른 사이트가 붙이면 브라우저가 먼저 허락을 묻는데, 이 서버는 허락하지 않는다),
   // 브라우저가 알려 주는 출처가 이 화면이어야 한다.
   private issue(req: Request, headers: Record<string, string>): Response {
-    if (!this.mine(req)) return new Response('forbidden', { status: 403 })
+    const refused = this.refuse(req, headers)
+    if (refused) return refused
     // 브릿지가 닫혀 있으면 만들지 않는다. 화면에서 누른 것으로 닫힌 브릿지를 다시 열지 않는다.
     if (!this.bridge.isOpen) return Response.json({ error: 'the bridge is closed' }, { status: 409, headers })
     const now = Date.now()
@@ -134,7 +206,8 @@ export class Viewer {
   // 사람이 화면에서 대화를 맨 위에 고정하거나 푼다(2026-11-17, 사람이 정함: 「질답 정렬을 고정, 최신 질답, 순으로」).
   // 접근키 발급과 같이 이 화면에서 온 요청만 받는다. 고정은 이 PC에만 남는다.
   private async pin(req: Request, headers: Record<string, string>): Promise<Response> {
-    if (!this.mine(req)) return new Response('forbidden', { status: 403 })
+    const refused = this.refuse(req, headers)
+    if (refused) return refused
     const body = (await req.json().catch(() => null)) as { threads?: unknown; pinned?: unknown } | null
     const threads = body?.threads
     const ok = Array.isArray(threads) && threads.length > 0 && threads.length <= 64 && threads.every(id => typeof id === 'string' && id.length <= 200)
@@ -150,7 +223,8 @@ export class Viewer {
   // 백그라운드로 돌려 둘 명령. 새 소식이 오면 한 줄을 찍고 끝난다.
   // Windows PowerShell 에서 curl 은 다른 명령의 별명이라 curl.exe 로 부른다. Git Bash 에서도 curl.exe 가 된다.
   listenCommand(platform: string = process.platform) {
-    return `${platform === 'win32' ? 'curl.exe' : 'curl'} -s ${this.start()}/next`
+    this.start()
+    return `${platform === 'win32' ? 'curl.exe' : 'curl'} -s ${this.localUrl}/next`
   }
 
   private handle(req: Request): Response | Promise<Response> {

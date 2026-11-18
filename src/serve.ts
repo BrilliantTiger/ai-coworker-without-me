@@ -85,6 +85,7 @@ export async function serve({ home }: { home: string }) {
       portsText: process.env.COWORKER_PORTS,
       relay: process.env.COWORKER_RELAY || undefined,
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+      viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
       folder: rootsFolder,
       app: updating ? { downloaded: () => downloaded, restartCommand } : undefined,
     })

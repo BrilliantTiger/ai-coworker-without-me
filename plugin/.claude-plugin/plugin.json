@@ -20,6 +20,7 @@
         "COWORKER_PORTS": "${user_config.ports}",
         "COWORKER_RELAY": "${user_config.relay}",
         "COWORKER_RELAY_KEY": "${user_config.relay_key}",
+        "COWORKER_VIEWER_ADDRESS": "${user_config.viewer_address}",
         "COWORKER_AUTO_UPDATE": "${user_config.auto_update}"
       }
     }
@@ -63,6 +64,12 @@
       "title": "Relay key",
       "description": "The key set by whoever runs the relay. Leave empty if there is no relay.",
       "sensitive": true,
+      "default": ""
+    },
+    "viewer_address": {
+      "type": "string",
+      "title": "Viewer address",
+      "description": "Only if you open the conversation view from your other devices: the address under which they reach this computer (for example its VPN address), a name that points at it, or the word tailscale. Whoever has the view's link and can reach that address can read the conversation. Leave empty to open the view on this computer only.",
       "default": ""
     },
     "auto_update": {

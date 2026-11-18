@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { listSaved, readSaved, savedPath, stillRunning, waitUntilStopped } from './resume'
 import { firstCheckMs, newer, selfUpdate, UPDATE_EVERY_MS } from './update'
+import { viewAddress } from './viewaddr'
 import { Viewer } from './viewer'
 
 // 연결 코드를 쓸 수 있는 시간(분). 0 을 주면 시간 제한 없이 브릿지를 닫을 때까지 쓴다. 어느 쪽이든 한 번만 쓴다.
@@ -52,6 +53,8 @@ export type SessionOptions = {
   // VPN 없이 다른 네트워크의 동료와 이으려면 중계 서버 주소를 정한다. 키는 그 서버를 띄운 사람이 정한 것이다.
   relay?: string
   relayKey?: string
+  // 이 PC의 주인이 자기 다른 기기에서 이 PC에 닿는 주소(COWORKER_VIEWER_ADDRESS). 정하면 대화 보기 화면이 그 주소에서도 열린다.
+  viewerAddress?: string
   // 세션 이름에 붙일 프로젝트 폴더를 알아내는 방법. stdio 는 실행 환경에서, 앱은 클라이언트가 알려 주는 폴더(roots)에서 찾는다.
   folder: (server: McpServer) => string | undefined | Promise<string | undefined>
   // 이 세션을 다시 켰을 때 알아볼 이름표. Claude Code 는 세션 ID(CLAUDE_CODE_SESSION_ID)를 MCP 서버에 넘기고, 이어서 켜도 같은 값을 준다.
@@ -524,11 +527,18 @@ export function createSession(opts: SessionOptions) {
 
   // 브라우저로 대화를 보는 화면. 브릿지가 닫혀도 세션이 살아 있는 동안은 지난 대화를 보여 준다.
   let viewer: Viewer | undefined
-  const viewerOf = () => (viewer ??= new Viewer(getBridge(), { pushes: channel }))
+  // 주인이 대화 보기 주소를 정했으면 켤 때 한 번 알아 둔다(이름이면 푼다). 도구는 그것이 끝난 뒤에 답한다.
+  const viewerAt = opts.viewerAddress?.trim() ? viewAddress(opts.viewerAddress) : undefined
+  const viewerOf = () => (viewer ??= new Viewer(getBridge(), { pushes: channel, at: viewerAt }))
   const viewerUrl = () => viewerOf().start()
   // 연 쪽과 연결한 쪽 모두 자기 PC의 링크를 받는다. 링크를 안내 문장에 넣어야 AI가 다른 일을 이어 할 때도 빠뜨리지 않는다.
-  const viewerNote = (url: string) =>
-    `Always give your human this link, even if you go on to do something else in the same turn. It opens, in a browser on this PC, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url}`
+  const viewerNote = (url: string) => {
+    const outside = viewer?.outside()
+    const where = outside?.available
+      ? 'in a browser on this PC or on another device of your human that reaches this address (whoever has this link and can reach that address can read the conversation and make an access key, so it is for your human only)'
+      : 'in a browser on this PC'
+    return `Always give your human this link, even if you go on to do something else in the same turn. It opens, ${where}, every question and answer of this session, with whom and when, and updates by itself; the link stays the same when this session restarts: ${url}${outside?.problem ? ` Tell your human too: ${outside.problem}` : ''}`
+  }
 
   // 중계 서버를 쓰면 우편함이 열릴 때까지 잠깐 기다리고, 안 열렸으면 사람에게 알리게 한다.
   async function relayStatus(b: Bridge) {
@@ -556,6 +566,7 @@ export function createSession(opts: SessionOptions) {
   function tool<T>(run: (args: T, extra: Extra) => Promise<unknown> | unknown) {
     return async (args: T, extra: Extra) => {
       try {
+        await viewerAt?.ready
         const value = await run(args, extra)
         const note = updateNote()
         if (note && value && typeof value === 'object' && !Array.isArray(value)) {
@@ -708,6 +719,7 @@ export function createSession(opts: SessionOptions) {
         session_id: identity,
         moved: moved || undefined,
         viewer: viewer?.url,
+        ...(viewerAt ? { viewer_address: viewerOf().outside() } : {}),
         listen_command: getBridge().isOpen ? listenCommand() : undefined,
         earlier_bridges: earlier.length ? earlier : undefined,
       }
