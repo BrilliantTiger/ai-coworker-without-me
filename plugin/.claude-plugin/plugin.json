@@ -69,7 +69,7 @@
     "viewer_address": {
       "type": "string",
       "title": "Viewer address",
-      "description": "Only if you open the conversation view from your other devices: the address under which they reach this computer (for example its VPN address), a name that points at it, or the word tailscale. Whoever has the view's link and can reach that address can read the conversation. Leave empty to open the view on this computer only.",
+      "description": "Only if you open the conversation view from your other devices: the address of this computer under which they reach it, written out (for example its VPN address), or the word tailscale. A name is not accepted. Whoever has the view's link and can reach that address can read the conversation, make an access key and pin a conversation. Leave empty to open the view on this computer only.",
       "default": ""
     },
     "auto_update": {

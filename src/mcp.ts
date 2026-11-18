@@ -59,6 +59,7 @@ async function stdio() {
   process.stdin.on('close', exit)
   process.on('SIGINT', exit)
   process.on('SIGTERM', exit)
+  await session.ready
   await session.server.connect(new StdioServerTransport())
 }
 

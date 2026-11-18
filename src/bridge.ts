@@ -920,7 +920,7 @@ export class Bridge {
   }
 
   private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false, category?: string, files: FileNote[] = []) {
-    assertNoSecrets({ question, context, category })
+    this.checkText({ question, context, category })
     const label = cleanCategory(category)
     const thread: Thread = {
       id: randomUUID().slice(0, 8),
@@ -957,7 +957,7 @@ export class Bridge {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     if (!(opts.human && thread.status === 'agreed')) this.assertOpen(thread)
-    assertNoSecrets({ answer: text })
+    this.checkText({ answer: text })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     if (opts.files?.length) await this.assertTakesFiles([peer])
@@ -977,7 +977,7 @@ export class Bridge {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     if (thread.status !== 'agreed') this.assertOpen(thread)
-    assertNoSecrets({ note })
+    this.checkText({ note })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     const msg: WireMessage = { id: randomUUID(), thread: thread.id, kind: 'note', text: note, at: now() }
@@ -996,7 +996,7 @@ export class Bridge {
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     if (thread.status === 'closed') this.assertOpen(thread)
     const facts = input.facts ?? []
-    assertNoSecrets({
+    this.checkText({
       conclusion: input.conclusion,
       facts: facts.map(f => `${f.fact}\n${f.evidence}`).join('\n'),
       guesses: input.guesses?.join('\n'),
@@ -2011,8 +2011,24 @@ export class Bridge {
     if (this.peers.has(peer.key)) this.changed()
   }
 
+  // 밖으로 나가는 글을 본다: 비밀값으로 보이는 것, 그리고 이 세션의 대화 보기 링크.
+  private checkText(fields: Record<string, string | undefined>) {
+    assertNoSecrets(fields)
+    this.assertNoViewLink(fields)
+  }
+
+  // 대화 보기 링크를 아는 사람은 대화를 읽고 접근키를 만들 수 있다. 그래서 링크에 든 토큰이 들어 있는 글은 보내지 않는다.
+  private assertNoViewLink(fields: Record<string, string | Buffer | undefined>) {
+    const token = this.viewerAt?.token
+    if (!token || token.length < 8) return
+    for (const [field, value] of Object.entries(fields))
+      if (value?.includes(token))
+        throw new Error(`nothing was sent: the ${field} holds this session's conversation view link. Whoever has that link can read the conversation, so it is for your human only and is never sent to another session. Take the link out and send again`)
+  }
+
   // 이 세션의 소개를 정한다. 준 것만 바꾸고, 달라졌으면 이어진 세션에 다시 인사해서 알린다.
   setAbout(about: About) {
+    this.assertNoViewLink({ 'introduction text': Object.values(about).join(' ') })
     const next = cleanAbout({ ...this.about, ...about })
     if (JSON.stringify(next) === JSON.stringify(this.about)) return
     this.about = next
@@ -2077,6 +2093,7 @@ export class Bridge {
         throw new Error(`nothing was sent: cannot read the file ${path}. Give the full path of a file on this PC`)
       }
       if (bytes.length > MAX_FILE_BYTES) throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`)
+      this.assertNoViewLink({ 'name of a file': name, [`file ${safeFileName(name)}`]: bytes })
       return { path, name: safeFileName(name), bytes }
     })
     if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES) throw new Error(`nothing was sent: the files are larger than ${MAX_FILES_BYTES >> 20} MiB together, the most one message can carry`)

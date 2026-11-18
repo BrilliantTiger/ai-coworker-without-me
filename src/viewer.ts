@@ -1,4 +1,6 @@
 import type { Server } from 'bun'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { connect } from 'node:net'
 import { openQuestion } from './bridge'
 import type { Bridge, BridgeEvent, ViewerAddress } from './bridge'
 import { randomToken } from './crypto'
@@ -9,6 +11,7 @@ import { viewAddress, type ViewAddressDeps, type ViewAddressSetting } from './vi
 // 사람이 브라우저로 대화를 지켜보는 화면. 이 PC 안(127.0.0.1)에서만 열리고, 주소에 든 토큰을 알아야 볼 수 있다.
 // 주인이 대화 보기 주소를 정했으면(viewaddr.ts) 그 주소에서도 같은 포트로 연다. 그때도 토큰 없이는 아무것도 답하지 않는다.
 // 상대가 보낸 글은 화면에 글자로만 넣는다. HTML 로 해석하지 않는다.
+// 정한 주소에서는 브라우저가 쓰는 것(화면, 읽기, 접근키, 고정)만 준다. 이 PC 안의 도우미가 부르는 주소(/status, /next, /wake, /about)는 127.0.0.1 에서만 답한다.
 // 사람이 화면에서 할 수 있는 일은 하나다: 접근키(연결 코드)를 새로 만드는 것(/code). 나머지는 모두 보기만 한다.
 // 채널 없이 켠 Claude Code 가 백그라운드 명령으로 기다리는 주소(/next)도 여기에 둔다.
 // 주소는 브릿지가 기억한다. 같은 세션을 다시 켜면 같은 포트와 토큰으로 열어, 사람이 열어 둔 화면이 끊기지 않고 이어서 보여 준다.
@@ -21,10 +24,15 @@ export class Viewer {
   private wakers = new Set<(text: string) => void>()
   // 화면에서 접근키를 마지막으로 만든 때. 너무 잦은 요청을 막는다.
   private issuedAt = 0
-  // 주인이 정한 대화 보기 주소와, 그 주소에서 연 서버들. 정하지 않았으면 없다.
+  // 주인이 정한 대화 보기 주소와, 그 주소에서 연 서버. 정하지 않았으면 없다.
   private readonly address?: ViewAddressSetting
   private outsideServers = new Map<string, Server<undefined>>()
   private outsideFailed?: string
+  // 다른 프로그램이 이미 답하고 있어서 쓰지 않을 포트, 그리고 아무도 답하지 않는 것을 확인한 「주소 포트」.
+  private avoidPort?: number
+  private clear = new Set<string>()
+  // 전에 쓰던 포트를 쓰지 못해 옮겼으면 그 포트. 링크가 바뀌었다고 사람에게 알린다.
+  private movedFrom?: number
 
   // pushes: 채널로 켠 세션이라 소식이 세션에 바로 들어간다. 그때는 기다릴 것이 없다.
   constructor(
@@ -35,9 +43,30 @@ export class Viewer {
     this.address = options.at ?? (options.address?.trim() ? viewAddress(options.address, options) : undefined)
   }
 
-  // 정한 주소가 이름이면 그 이름을 다 풀 때까지 기다린다.
+  // 열기 전에 본다: 쓰려는 포트에서 다른 프로그램이 이미 답하고 있는지. 127.0.0.1 과 정한 주소 둘 다 본다.
+  // 어떤 운영체제는 다른 프로그램이 모든 주소에서 듣는 포트를 주소 하나로 다시 열게 두고, 그러면 그 주소로 오는 손님을 이쪽이 가로챈다.
+  // 그래서 여는 일은 여기서 한다. 답하는 프로그램이 있으면 전에 쓰던 포트를 버리고 새 포트로 옮기고, 정한 주소에서는 열지 않는다.
+  // 도구가 답하기 전마다 부른다. 정한 주소에서 아직 못 열었으면 그때마다 다시 해 본다.
   async ready() {
-    await this.address?.ready
+    const want = this.wanted()
+    if (!this.server) {
+      const remembered = this.bridge.viewerAt?.port
+      if (remembered !== undefined && (await Promise.all(['127.0.0.1', ...want].map(a => answers(a, remembered)))).some(Boolean)) this.avoidPort = remembered
+      this.startLocal()
+    }
+    const port = this.server!.port!
+    for (const addr of want) {
+      if (this.outsideServers.has(addr)) continue
+      if (await answers(addr, port)) this.clear.delete(`${addr} ${port}`)
+      else this.clear.add(`${addr} ${port}`)
+    }
+    this.openOutside()
+  }
+
+  // 127.0.0.1 말고 더 열 주소.
+  private wanted() {
+    const host = this.address?.now().host
+    return host && host !== '127.0.0.1' ? [host] : []
   }
 
   // 사람에게 주는 링크. 정한 주소에서 열려 있으면 그 주소로, 아니면 이 PC 안의 주소로 준다.
@@ -51,10 +80,16 @@ export class Viewer {
     return this.server && `http://127.0.0.1:${this.server.port}/${this.token}`
   }
 
-  // 정한 주소에서 실제로 열려 있을 때만 그 주소(또는 이름)를 돌려준다.
+  // 정한 주소에서 실제로 열려 있을 때만 그 주소를 돌려준다.
   private outsideHost() {
-    const at = this.address?.now()
-    return this.server && at?.host && at.listen.every(a => this.outsideServers.has(a)) ? at.host : undefined
+    const host = this.address?.now().host
+    return this.server && host && (host === '127.0.0.1' || this.outsideServers.has(host)) ? host : undefined
+  }
+
+  // 전에 쓰던 포트를 다른 프로그램이 쓰고 있어서 옮겼으면, 사람에게 전할 말.
+  moved(): string | undefined {
+    if (this.movedFrom === undefined || !this.server) return undefined
+    return `the conversation view moved to a new port, because another program already answers on port ${this.movedFrom}. The link changed: the old one no longer opens this view, and the new one is ${this.url}`
   }
 
   // 정한 주소의 지금 상태. list_connections 가 사람에게 그대로 알린다. 정하지 않았으면 없다.
@@ -66,10 +101,12 @@ export class Viewer {
     return { set: this.address.set, available: false, problem: `the conversation view cannot be opened at ${at.host ?? this.address.set} now: ${why}.${this.localUrl ? ` It still opens on this computer at ${this.localUrl}` : ''}` }
   }
 
-  // 정한 주소에서도 같은 포트로 연다. 못 열면 127.0.0.1 로만 계속 일하고, 링크를 줄 때마다 다시 해 본다.
+  // 정한 주소에서도 같은 포트로 연다. 그 주소의 그 포트에서 아무도 답하지 않는 것을 확인했을 때만 연다(ready).
+  // 못 열면 127.0.0.1 로만 계속 일한다.
   private openOutside() {
     if (!this.address || !this.server) return
-    const want = this.address.now().listen
+    const want = this.wanted()
+    const port = this.server.port!
     for (const [addr, server] of this.outsideServers)
       if (!want.includes(addr)) {
         server.stop(true)
@@ -78,22 +115,32 @@ export class Viewer {
     this.outsideFailed = undefined
     for (const addr of want) {
       if (this.outsideServers.has(addr)) continue
+      if (!this.clear.has(`${addr} ${port}`)) {
+        this.outsideFailed = `another program already answers at ${addr} port ${port}, and coworker does not take its place`
+        continue
+      }
       try {
-        this.outsideServers.set(addr, Bun.serve({ hostname: addr, port: this.server.port!, idleTimeout: 0, fetch: req => this.handle(req) }))
+        this.outsideServers.set(addr, Bun.serve({ hostname: addr, port, idleTimeout: 0, fetch: req => this.handle(req, true) }))
       } catch {
-        this.outsideFailed = `coworker could not listen on ${addr} port ${this.server.port}; that address is not on this computer right now, or another program uses the port there`
+        this.outsideFailed = `coworker could not listen on ${addr} port ${port}; that address is not on this computer right now, or another program uses the port there`
       }
     }
   }
 
+  // 이 PC 안에서 연다. 정한 주소에서는 ready 가 확인한 뒤에만 열린다.
   start(): string {
-    if (!this.server) {
-      // 전에 쓰던 포트가 비어 있으면 그 포트로, 아니면 빈 포트로 연다. 어느 쪽이든 토큰은 그대로 둔다.
-      this.server = this.serve(this.bridge.viewerAt?.port) ?? this.serve(0)!
-      this.bridge.viewerAt = { port: this.server.port!, token: this.token }
-    }
+    this.startLocal()
     this.openOutside()
     return this.url!
+  }
+
+  private startLocal() {
+    if (this.server) return
+    // 전에 쓰던 포트가 비어 있으면 그 포트로, 아니면 빈 포트로 연다. 어느 쪽이든 토큰은 그대로 둔다.
+    const remembered = this.bridge.viewerAt?.port
+    this.server = (remembered === this.avoidPort ? undefined : this.serve(remembered)) ?? this.serve(0)!
+    if (remembered !== undefined && remembered !== this.server.port) this.movedFrom = remembered
+    this.bridge.viewerAt = { port: this.server.port!, token: this.token }
   }
 
   private serve(port: number | undefined) {
@@ -160,8 +207,9 @@ export class Viewer {
 
   // 이 화면(또는 이 PC의 채팅창 위 띠)에서 온 요청인지. 표시 헤더가 있어야 하고, 브라우저가 알려 주는 출처가 이 화면이어야 한다.
   // 이 화면의 출처는 127.0.0.1, localhost, 그리고 주인이 정한 대화 보기 주소뿐이다. 모두 이 서버의 포트여야 한다.
+  // 정한 주소는 거기서 실제로 열려 있을 때만 받는다.
   private origins() {
-    const host = this.address?.now().host
+    const host = this.outsideHost()
     return [`http://127.0.0.1:${this.server?.port}`, `http://localhost:${this.server?.port}`, ...(host ? [`http://${hostForUrl(host)}:${this.server?.port}`] : [])]
   }
 
@@ -227,10 +275,16 @@ export class Viewer {
     return `${platform === 'win32' ? 'curl.exe' : 'curl'} -s ${this.localUrl}/next`
   }
 
-  private handle(req: Request): Response | Promise<Response> {
-    const path = new URL(req.url).pathname
+  // outside: 정한 주소에서 온 요청. 브라우저가 쓰는 것만 준다.
+  // 주소는 받은 그대로 본다. 정확히 /토큰 또는 /토큰/이름 꼴일 때만 답한다(겹친 빗금, 점, %로 바꿔 적은 글자, 물음표 뒤 값은 받지 않는다).
+  private handle(req: Request, outside = false): Response | Promise<Response> {
+    const none = () => new Response('not found', { status: 404 })
+    const raw = req.url.replace(/^[a-z]+:\/\/[^/]*/i, '')
+    const parts = /^\/([A-Za-z0-9_-]{1,128})(?:\/([a-z]{1,12}))?$/.exec(raw)
+    if (!parts || !sameText(parts[1]!, this.token)) return none()
+    const what = `${req.method} ${parts[2] ?? ''}`
     const headers = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }
-    if (req.method === 'GET' && path === `/${this.token}`)
+    if (what === 'GET ')
       return new Response(PAGE, {
         headers: {
           ...headers,
@@ -238,14 +292,15 @@ export class Viewer {
           'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
         },
       })
-    if (req.method === 'GET' && path === `/${this.token}/data`) return Response.json(this.data(), { headers })
-    if (req.method === 'GET' && path === `/${this.token}/status`) return Response.json(this.status(), { headers })
-    if (req.method === 'POST' && path === `/${this.token}/code`) return this.issue(req, headers)
-    if (req.method === 'POST' && path === `/${this.token}/about`) return this.introduce(req, headers)
-    if (req.method === 'POST' && path === `/${this.token}/pin`) return this.pin(req, headers)
-    if (req.method === 'GET' && path === `/${this.token}/events`) return this.events(req, headers)
-    if (req.method === 'GET' && path === `/${this.token}/next`) return this.next(req, headers)
-    if (req.method === 'GET' && path === `/${this.token}/wake`) return this.wake(req, headers)
+    if (what === 'GET data') return Response.json(this.data(), { headers })
+    if (what === 'POST code') return this.issue(req, headers)
+    if (what === 'POST pin') return this.pin(req, headers)
+    if (what === 'GET events') return this.events(req, headers)
+    if (outside) return none()
+    if (what === 'GET status') return Response.json(this.status(), { headers })
+    if (what === 'POST about') return this.introduce(req, headers)
+    if (what === 'GET next') return this.next(req, headers)
+    if (what === 'GET wake') return this.wake(req, headers)
     return new Response('not found', { status: 404 })
   }
 
@@ -382,4 +437,24 @@ const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
   moved: 'moved to another session',
   clock: 'clocks differ',
   peer_human_slow: 'their human is slow to decide',
+}
+
+// 두 글이 같은지, 걸린 시간으로 어디까지 맞았는지 드러나지 않게 견준다.
+function sameText(a: string, b: string) {
+  const hash = (t: string) => createHash('sha256').update(t).digest()
+  return timingSafeEqual(hash(a), hash(b))
+}
+
+// 그 주소의 그 포트에서 누가 답하는지(연결을 받아 주는지) 잠깐 본다.
+function answers(host: string, port: number): Promise<boolean> {
+  return new Promise(done => {
+    const sock = connect({ host, port })
+    const end = (yes: boolean) => {
+      sock.destroy()
+      done(yes)
+    }
+    sock.setTimeout(300, () => end(false))
+    sock.once('connect', () => end(true))
+    sock.once('error', () => end(false))
+  })
 }

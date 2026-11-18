@@ -304,12 +304,13 @@ describe('viewer address', () => {
       for (const path of ['/code', '/wrong-token/code', '/wrong-token/pin', '/wrong-token/about']) expect((await post(`${base}${path}`, { ...PAGE_HEADERS, origin: base })).status).toBe(404)
       expect(await reaches(`${base}/${token}/data`)).toBe(200)
     }
-    // 정확히 그 꼴의 주소에만 답한다: 겹친 빗금, 끝의 빗금, 점, 바꿔 적은 글자에는 답하지 않는다.
+    // 정확히 그 꼴의 주소에만 답한다: 겹친 빗금, 끝의 빗금, 바꿔 적은 글자, 물음표 뒤 값에는 답하지 않는다.
+    // 점으로 된 마디(/./, /../, %2e)는 Bun 이 서버에 넘기기 전에 풀어 버려서 서버가 보지 못한다. 풀린 주소에도 토큰이 있어야 답한다.
     for (const host of ['127.0.0.1', '::1']) {
       expect(await rawStatus(host, port, `/${token}`)).toBe(200)
       expect(await rawStatus(host, port, `/${token}/data`)).toBe(200)
       const coded = `%${token.charCodeAt(0).toString(16)}${token.slice(1)}`
-      for (const path of [`//${token}`, `/${token}/`, `/${token}//data`, `/${token}/./data`, `/x/../${token}`, `/${token}/%2e/data`, `/x/%2e%2e/${token}`, `/${coded}`, `/${token}/dat%61`, `/${token}?x`, `/${token}/data/`])
+      for (const path of [`//${token}`, `/${token}/`, `/${token}//data`, `/${coded}`, `/${token}/dat%61`, `/${token}?x`, `/${token}/data/`, `/${token}/../${token}x`])
         expect([path, await rawStatus(host, port, path)]).toEqual([path, 404])
     }
   }, 20_000)
@@ -379,7 +380,10 @@ describe('viewer address', () => {
 
 describe('the link is a secret', () => {
   test('outgoing text that holds this session\'s view token is refused, and the refusal says why', async () => {
-    const a = make()
+    const home = mkdtempSync(join(tmpdir(), 'coworker-viewer-link-home-'))
+    temps.push(home)
+    const a = new Bridge({ name: 'A · Claude Code', ports: [nextPort, (nextPort += 10) - 1], addrs: () => ['127.0.0.1'], retryMs: 50, connectTimeoutMs: 500, home } as never)
+    opened.push(a)
     const b = make('B · Codex')
     a.open()
     await b.connect(a.newCode())
