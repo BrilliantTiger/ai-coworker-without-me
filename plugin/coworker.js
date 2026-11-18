@@ -16618,17 +16618,22 @@ ${bullets(a.forHumans)}`
 }
 var THREAD_ID = /^[0-9a-f]{8}$/;
 var DAY = /^\d{4}-\d{2}-\d{2}$/;
-function agreementFileName(startedAt, threadId, peerKey) {
+var BASE64_KEY = /^[A-Za-z0-9+/]+={0,2}$/;
+function keyBytesOf(key) {
+  if (typeof key !== "string" || !BASE64_KEY.test(key))
+    return;
+  const bytes = Buffer.from(key, "base64");
+  return bytes.length === 32 ? bytes : undefined;
+}
+function agreementFileName(startedAt, threadId, ownKey, peerKey) {
   if (typeof threadId !== "string" || threadId.length !== 8 || !THREAD_ID.test(threadId))
     return;
-  if (typeof peerKey !== "string" || !peerKey)
-    return;
-  const keyBytes = Buffer.from(peerKey, "base64");
-  if (keyBytes.length !== 32)
+  const ownBytes = keyBytesOf(ownKey), peerBytes = keyBytesOf(peerKey);
+  if (!ownBytes || !peerBytes)
     return;
   const day = typeof startedAt === "string" && DAY.test(startedAt.slice(0, 10)) ? startedAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
-  const peerHash = createHash("sha256").update(keyBytes).digest("hex").slice(0, 24);
-  return `${day}-${threadId}-${peerHash}.md`;
+  const pairHash = createHash("sha256").update(ownBytes).update(peerBytes).digest("hex").slice(0, 24);
+  return `${day}-${threadId}-${pairHash}.md`;
 }
 
 // src/code.ts
@@ -18903,7 +18908,7 @@ ${f.evidence}`).join(`
     if (!dir)
       return;
     const started = thread.messages[0]?.at ?? now();
-    const name = agreementFileName(started, thread.id, thread.peer);
+    const name = agreementFileName(started, thread.id, this.key, thread.peer);
     const path = name ? pathInside(dir, name) : undefined;
     if (!path)
       return;

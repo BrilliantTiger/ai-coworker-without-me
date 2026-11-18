@@ -48,14 +48,20 @@ export function renderAgreement(a: Agreement): string {
 
 const THREAD_ID = /^[0-9a-f]{8}$/
 const DAY = /^\d{4}-\d{2}-\d{2}$/
+const BASE64_KEY = /^[A-Za-z0-9+/]+={0,2}$/
 
-// 합의문 파일 이름: 날짜, 대화 번호, 상대 공개키 SHA-256 앞 24글자(소문자 16진수).
-export function agreementFileName(startedAt: string, threadId: string, peerKey: string): string | undefined {
+function keyBytesOf(key: unknown): Buffer | undefined {
+  if (typeof key !== 'string' || !BASE64_KEY.test(key)) return undefined
+  const bytes = Buffer.from(key, 'base64')
+  return bytes.length === 32 ? bytes : undefined
+}
+
+// 합의문 파일 이름: 날짜, 대화 번호, 이 세션과 상대 공개키(각 32바이트)의 SHA-256 앞 24글자(소문자 16진수).
+export function agreementFileName(startedAt: string, threadId: string, ownKey: string, peerKey: string): string | undefined {
   if (typeof threadId !== 'string' || threadId.length !== 8 || !THREAD_ID.test(threadId)) return undefined
-  if (typeof peerKey !== 'string' || !peerKey) return undefined
-  const keyBytes = Buffer.from(peerKey, 'base64')
-  if (keyBytes.length !== 32) return undefined
+  const ownBytes = keyBytesOf(ownKey), peerBytes = keyBytesOf(peerKey)
+  if (!ownBytes || !peerBytes) return undefined
   const day = typeof startedAt === 'string' && DAY.test(startedAt.slice(0, 10)) ? startedAt.slice(0, 10) : new Date().toISOString().slice(0, 10)
-  const peerHash = createHash('sha256').update(keyBytes).digest('hex').slice(0, 24)
-  return `${day}-${threadId}-${peerHash}.md`
+  const pairHash = createHash('sha256').update(ownBytes).update(peerBytes).digest('hex').slice(0, 24)
+  return `${day}-${threadId}-${pairHash}.md`
 }

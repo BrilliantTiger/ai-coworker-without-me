@@ -2482,7 +2482,7 @@ export class Bridge {
     const dir = pathInside(this.opts.home, 'agreements')
     if (!dir) return undefined
     const started = thread.messages[0]?.at ?? now()
-    const name = agreementFileName(started, thread.id, thread.peer)
+    const name = agreementFileName(started, thread.id, this.key, thread.peer)
     const path = name ? pathInside(dir, name) : undefined
     if (!path) return undefined
     const latest = new Map<string, ThreadMessage>()
