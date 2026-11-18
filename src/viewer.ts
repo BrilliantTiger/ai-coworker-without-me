@@ -475,6 +475,7 @@ export function newsLine(events: readonly BridgeEvent[], open: boolean, when: 'l
 const WHAT: Record<Exclude<BridgeEvent['type'], 'message'>, string> = {
   connected: 'connected',
   peer_closed: 'left',
+  peer_session_closed: 'their AI session closed',
   undelivered: 'undelivered',
   decision: 'decision by your human',
   moved: 'moved to another session',

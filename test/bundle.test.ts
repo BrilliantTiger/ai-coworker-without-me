@@ -11,7 +11,20 @@ const root = join(import.meta.dir, '..')
 const pluginDir = join(root, 'plugin')
 const json = (path: string) => JSON.parse(readFileSync(path, 'utf8'))
 const temps: string[] = []
-afterAll(() => temps.forEach(t => rmSync(t, { recursive: true, force: true })))
+// Windows 는 어떤 프로세스의 작업 폴더인 폴더를 지우지 못한다. 막 끝나는 중인 프로세스(서버, 지킴이)가 놓을 때까지 몇 번 다시 해 본다.
+afterAll(async () => {
+  for (const t of temps) {
+    for (let i = 0; ; i++) {
+      try {
+        rmSync(t, { recursive: true, force: true })
+        break
+      } catch (e) {
+        if (i >= 40) throw e
+        await Bun.sleep(250)
+      }
+    }
+  }
+})
 
 test('the plugin folder holds the bundled server and no package install', () => {
   const files = readdirSync(pluginDir)

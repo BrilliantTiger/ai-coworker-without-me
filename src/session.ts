@@ -61,6 +61,8 @@ export type SessionOptions = {
   sessionId?: string
   // 다시 켠 세션이면 되살릴 브릿지 상태. stdio 서버가 뜰 때 찾아서 넘긴다.
   restore?: SavedBridge
+  // 이 이름표의 다리를 지켜볼 지킴이를 세운다(keep.ts). 주지 않으면 세우지 않는다: 세션이 닫히면 다리도 멈춘다.
+  keep?: (id: string) => void
   // 플러그인으로 설치해서 도는 서버면, 새 판이 나왔을 때 스스로 올린다.
   autoUpdate?: boolean
   // 시험에서 실제 claude·codex 명령 대신 쓸 업데이트 함수.
@@ -107,6 +109,7 @@ export function createSession(opts: SessionOptions) {
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
   - When your human moves this work to a new session (for example because the context filled up), the new session takes over the same bridge, with its connections and all its conversations, and nobody needs a new code. In the new session, list_connections lists the bridges earlier sessions left on this PC; call open_bridge with resume set to the session_id (or the name) of the one your human means. If it is still running in the other session, it moves here and that session stops listening. Then read the conversations that are still open with read_conversation before you go on.
   - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.
+  - When an AI session closes while its bridge is open (the app quit or updated, the session was put to sleep or killed), its PC keeps the bridge: it still receives, and that session's AI reads what arrived when the session starts again. Nobody answers until then. The sender learns it: the send result carries their_ai_session, and a peer_session_closed event arrives. Tell your human who is closed and since when, so that they can reach the other human another way if it is urgent.
 
   A connection ends only when a human ends it
   - Only close_bridge (on either side, when a human says so) ends a connection. Anything else is temporary: a computer asleep or turned off, a move to another network or VPN, a restart, a timeout, an error. Both sides keep reconnecting by themselves, with no limit on tries or time, and send what waited, in order, once they are back. Nobody needs a new code.
@@ -264,7 +267,17 @@ export function createSession(opts: SessionOptions) {
     } catch {}
   }
 
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS })
+  // guard: 다리가 열릴 때마다 지킴이를 세운다. 이름표는 다리를 이어받으며 바뀔 수 있어서 부를 때의 것을 쓴다.
+  const bridgeOptions = () => ({
+    home,
+    ports: parsePorts(portsText),
+    relay,
+    relayKey,
+    saveTo: savedPath(home, identity),
+    nudgeMs: NUDGE_MS,
+    tickMs: TICK_MS,
+    guard: opts.keep ? () => opts.keep!(identity) : undefined,
+  })
   const notify = opts.notify ?? osNotify
 
   function getBridge() {
@@ -378,6 +391,14 @@ export function createSession(opts: SessionOptions) {
     return bridge!
   }
 
+  // 그 다리를 지금 누가 쥐고 있는지. 세션이 닫힌 동안에는 지킴이가 쥐고 글을 받아 둔다. 어느 쪽이든 resume 으로 이어받을 수 있다.
+  async function whereItRuns(saved: SavedBridge) {
+    const running = await stillRunning(saved)
+    return running && saved.keptBy
+      ? { running_in_another_session: false, kept_while_its_session_is_closed: true, kept_since: saved.keptSince }
+      : { running_in_another_session: running }
+  }
+
   // 이 PC에 앞 세션들이 남긴 브릿지. 새 세션이 이어받을 것을 고를 수 있게 보여 준다.
   async function earlierBridges() {
     const all = listSaved(home).filter(e => e.id !== identity && e.saved.publicKey !== (bridge?.isOpen ? bridge.key : undefined)).slice(0, 10)
@@ -388,7 +409,7 @@ export function createSession(opts: SessionOptions) {
         connected: e.saved.peers.map(p => p.name),
         conversations: e.saved.threads.length,
         saved_at: e.saved.savedAt,
-        running_in_another_session: await stillRunning(e.saved),
+        ...(await whereItRuns(e.saved)),
       })),
     )
   }
@@ -398,7 +419,7 @@ export function createSession(opts: SessionOptions) {
   const NOT_OPEN =
     'the bridge is not open; call open_bridge or connect first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result'
   const NEWS =
-    "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options (the window also opens again by itself with the next reminder). A peer_human_slow event means the other side has been waiting that many minutes for their human's decision: tell your human who, on what, for how long, and what is known about the other side's question window, and suggest they reach the other person another way (a call or a messenger); do not send the other side more messages about it."
+    "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options (the window also opens again by itself with the next reminder). A peer_session_closed event means the other side's AI session is closed while the connection stays: their PC keeps what you send, and their AI reads it when that session starts again. Tell your human who and since when, so that they can reach the other human another way if it is urgent; you can still send. A peer_human_slow event means the other side has been waiting that many minutes for their human's decision: tell your human who, on what, for how long, and what is known about the other side's question window, and suggest they reach the other person another way (a call or a messenger); do not send the other side more messages about it."
   const PUSHED = `${NEWS} Then end your turn; the next message comes in by itself.`
 
   async function pushEvents() {
@@ -419,6 +440,7 @@ export function createSession(opts: SessionOptions) {
         return { type: event.type, kind: event.kind, from: event.from, thread: event.thread, ...(event.no_answer_needed ? { no_answer_needed: 'true' } : {}), ...(event.files?.length ? { files: String(event.files.length) } : {}) }
       case 'connected':
       case 'peer_closed':
+      case 'peer_session_closed':
       case 'clock':
         return { type: event.type, peer: event.peer }
       case 'undelivered':
@@ -745,7 +767,7 @@ export function createSession(opts: SessionOptions) {
       title: 'List connections',
       annotations: { readOnlyHint: true, openWorldHint: true },
       description:
-        "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, the connection log file, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
+        "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try; their_ai_session is closed when the other side's AI session is closed and its PC keeps what arrives), the connections the other side's human ended, the viewer link for the human, the connection log file, and the bridges earlier sessions left on this PC (kept_while_its_session_is_closed: its session is closed and this PC keeps receiving for it), which a new session can take over with open_bridge resume.",
       inputSchema: {},
     },
     tool(async () => {
