@@ -1,7 +1,8 @@
 import { afterAll, afterEach, describe, expect, test } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { connect as tcp } from 'node:net'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Bridge } from '../src/bridge'
@@ -29,21 +30,31 @@ function make(name = 'A · Claude Code') {
 }
 
 type Outside = { set: string; available: boolean; link?: string; problem?: string }
-type Extra = { address?: string; interfaces?: () => ReturnType<typeof networkInterfaces>; lookup?: (name: string) => Promise<string[]> }
+type Extra = { address?: string; interfaces?: () => ReturnType<typeof networkInterfaces> }
 
-// 설정을 준 대화 보기. 주소를 찾는 일(이름 풀기)이 끝난 뒤에 연다.
+// 설정을 준 대화 보기. 쓰던 포트에 다른 프로그램이 답하는지 먼저 본 뒤에 연다.
 async function view(bridge: Bridge, extra: Extra = {}) {
   const viewer = new Viewer(bridge, extra as never)
   viewers.push(viewer)
   await (viewer as unknown as { ready?: () => Promise<void> }).ready?.()
   const url = viewer.start()
   const outside = () => (viewer as unknown as { outside?: () => Outside | undefined }).outside?.()
-  return { viewer, url, port: Number(new URL(viewer.listenCommand('darwin').split(' ').pop()!).port), token: url.split('/').pop()!, outside }
+  const moved = () => (viewer as unknown as { moved?: () => string | undefined }).moved?.()
+  return { viewer, url, moved, port: Number(new URL(viewer.listenCommand('darwin').split(' ').pop()!).port), token: url.split('/').pop()!, outside }
 }
 
 const PAGE_HEADERS = { 'x-coworker-viewer': '1' }
 const post = (url: string, headers: Record<string, string>, body?: unknown) =>
   fetch(url, { method: 'POST', headers: { ...headers, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) })
+// 주소를 다듬지 않고 그대로 보낸다(fetch 는 겹친 빗금이나 점을 보내기 전에 고친다).
+const rawStatus = (host: string, port: number, path: string) =>
+  new Promise<number>((done, fail) => {
+    const sock = tcp(port, host, () => sock.write(`GET ${path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`))
+    let data = ''
+    sock.on('data', d => (data += d))
+    sock.on('end', () => done(Number(data.split(' ')[1])))
+    sock.on('error', fail)
+  })
 const reaches = async (url: string) => {
   try {
     return (await fetch(url, { signal: AbortSignal.timeout(1500) })).status
@@ -97,7 +108,7 @@ describe('viewer address', () => {
       const lan = lanAddress()
       if (lan) expect(await reaches(`http://${lan}:${port}/${token}`)).toBe('no answer')
     }
-  })
+  }, 40_000)
 
   test('when it cannot listen at the set address, the view keeps working on 127.0.0.1 and says the outside address is not available', async () => {
     // 이 PC에 없는 주소(문서용 주소 192.0.2.1).
@@ -111,25 +122,51 @@ describe('viewer address', () => {
     expect(gone.outside()?.problem).toContain(`http://127.0.0.1:${gone.port}/`)
     expect(gone.outside()?.link).toBeUndefined()
 
-    // 그 주소의 같은 포트를 다른 프로그램이 쓰고 있다.
-    const b = make('B · Codex')
-    b.open()
+    // 열지 못한 까닭이 list_connections 의 문장에 그대로 들어 있다.
+    expect(gone.outside()?.problem).toContain(`coworker could not listen on 192.0.2.1 port ${gone.port}`)
+  })
+
+  test('the view does not take over a port on which another program already answers: it moves to a fresh port and says the link changed', async () => {
+    // 다른 프로그램이 모든 주소에서 듣는 포트를, 이 세션이 예전에 쓰던 포트로 기억하고 있다.
+    for (const [every, address] of [['0.0.0.0', undefined], ['::', SECOND], ['0.0.0.0', SECOND]] as const) {
+      const b = make('B · Codex')
+      b.open()
+      const blocker = Bun.serve({ hostname: every, port: 0, fetch: () => new Response('someone else') })
+      servers.push(blocker)
+      const busy = blocker.port!
+      b.viewerAt = { port: busy, token: 'kept-token' }
+      const got = await view(b, address ? { address } : {})
+      expect(got.port).not.toBe(busy)
+      expect(got.token).toBe('kept-token')
+      expect(got.url).toBe(address ? `http://[::1]:${got.port}/kept-token` : `http://127.0.0.1:${got.port}/kept-token`)
+      expect(got.moved()).toContain(`another program already answers on port ${busy}`)
+      expect(got.moved()).toContain(got.url)
+      // 그 프로그램은 제 손님을 그대로 받는다.
+      expect(await (await fetch(`http://127.0.0.1:${busy}/kept-token`)).text()).toBe('someone else')
+      expect(await reaches(got.url)).toBe(200)
+      blocker.stop(true)
+    }
+    // 정한 주소에서만 다른 프로그램이 그 포트를 쓰고 있어도 옮긴다.
+    const c = make('C · Codex')
+    c.open()
     const blocker = Bun.serve({ hostname: SECOND, port: 0, fetch: () => new Response('someone else') })
     servers.push(blocker)
-    const busy = blocker.port!
-    b.viewerAt = { port: busy, token: 'kept-token' }
-    const taken = await view(b, { address: SECOND })
-    expect(taken.port).toBe(busy)
-    expect(taken.url).toBe(`http://127.0.0.1:${busy}/kept-token`)
-    expect(await reaches(taken.url)).toBe(200)
-    expect(taken.outside()).toMatchObject({ available: false })
-
-    // 그 프로그램이 끝나면, 링크를 다시 줄 때 그 주소에서도 연다.
-    blocker.stop(true)
-    await Bun.sleep(50)
-    expect(taken.viewer.start()).toBe(`http://[::1]:${busy}/kept-token`)
-    expect(taken.outside()).toMatchObject({ available: true })
-  })
+    c.viewerAt = { port: blocker.port!, token: 'kept-token' }
+    const got = await view(c, { address: SECOND })
+    expect(got.port).not.toBe(blocker.port!)
+    expect(got.outside()).toMatchObject({ available: true, link: `http://[::1]:${got.port}/kept-token` })
+    expect(await (await fetch(`http://[::1]:${blocker.port}/kept-token`)).text()).toBe('someone else')
+    // 쓰던 포트가 비어 있으면 옮기지 않고, 링크가 바뀌었다는 말도 없다.
+    const d = make('D · Codex')
+    d.open()
+    const free = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
+    const was = free.port!
+    free.stop(true)
+    d.viewerAt = { port: was, token: 'kept-token' }
+    const same = await view(d, { address: SECOND })
+    expect(same.port).toBe(was)
+    expect(same.moved()).toBeUndefined()
+  }, 20_000)
 
   test('the word tailscale means this computer\'s own address in 100.64.0.0/10, and without one the view stays on 127.0.0.1', async () => {
     const nic = (address: string, internal = false) => ({ address, netmask: '255.255.255.0', family: 'IPv4' as const, mac: '00:00:00:00:00:00', internal, cidr: null })
@@ -147,36 +184,39 @@ describe('viewer address', () => {
     expect(found.outside()).toMatchObject({ set: 'tailscale', available: false })
     expect(found.outside()?.problem).toContain('100.127.255.254')
     expect(await reaches(found.url)).toBe(200)
-  })
 
-  test('a name is used in the links when it points at this computer, and refused when it does not', async () => {
-    const a = make()
-    a.open()
-    const named = await view(a, { address: 'My-Desk.Example', lookup: async () => ['::1'] })
-    expect(named.url).toBe(`http://my-desk.example:${named.port}/${named.token}`)
-    expect(named.outside()).toMatchObject({ set: 'my-desk.example', available: true })
-    expect(await reaches(`http://[::1]:${named.port}/${named.token}`)).toBe(200)
-    const ok = await post(`http://127.0.0.1:${named.port}/${named.token}/pin`, { ...PAGE_HEADERS, origin: `http://my-desk.example:${named.port}` }, { threads: ['abcdef12'], pinned: true })
-    expect(ok.status).toBe(200)
+    // 그 범위의 주소가 둘이면 고르지 않는다. 주소를 적으라고 한다.
+    const c = make('C · Codex')
+    c.open()
+    const two = await view(c, { address: 'tailscale', interfaces: () => ({ utun8: [nic('100.64.0.1')], utun9: [nic('100.127.255.254')] }) })
+    expect(two.url).toStartWith('http://127.0.0.1:')
+    expect(two.outside()).toMatchObject({ set: 'tailscale', available: false })
+    expect(two.outside()?.problem).toContain('more than one address in 100.64.0.0/10')
+    expect(two.outside()?.problem).toContain('write the address')
+  }, 20_000)
 
-    const b = make('B · Codex')
-    b.open()
-    const elsewhere = await view(b, { address: 'elsewhere.example', lookup: async () => ['192.0.2.9'] })
-    expect(elsewhere.url).toBe(`http://127.0.0.1:${elsewhere.port}/${elsewhere.token}`)
-    expect(elsewhere.outside()).toMatchObject({ available: false })
-    expect(elsewhere.outside()?.problem).toContain('elsewhere.example')
-    const refused = await post(`${elsewhere.url}/pin`, { ...PAGE_HEADERS, origin: `http://elsewhere.example:${elsewhere.port}` }, { threads: ['abcdef12'], pinned: true })
-    expect(refused.status).toBe(403)
-
-    // 주소도 이름도 아닌 값(주소 앞의 http://, 포트, 경로).
-    for (const bad of ['http://192.0.2.1', '192.0.2.1:8080', 'a b', 'desk.example/path']) {
+  test('only an address written plainly is taken: a name is refused with a message that says to write the address', async () => {
+    for (const name of ['my-desk.example', 'localhost', 'desk']) {
+      const a = make()
+      a.open()
+      const named = await view(a, { address: name })
+      expect(named.url).toBe(`http://127.0.0.1:${named.port}/${named.token}`)
+      expect(named.outside()).toMatchObject({ available: false })
+      expect(named.outside()?.problem).toContain('a name is not accepted')
+      expect(named.outside()?.problem).toContain('write the address')
+      expect((await post(`${named.url}/pin`, { ...PAGE_HEADERS, origin: `http://${name}:${named.port}` }, { threads: ['abcdef12'], pinned: true })).status).toBe(name === 'localhost' ? 200 : 403)
+    }
+    // 주소가 아닌 값, 줄여 쓰거나 다른 진법으로 쓴 주소, 컴퓨터 한 대의 주소일 수 없는 주소.
+    const refused = ['http://192.0.2.1', '192.0.2.1:8080', 'a b', 'desk.example/path', '2130706433', '0x7f000001', '0x7f.0.0.1', '127.1', '0177.0.0.1', '192.0.2.01', '255.255.255.255', '224.0.0.1', '239.1.2.3', 'ff02::1', '::ffff:0.0.0.0', 'fe80::1%lo0']
+    for (const bad of refused) {
       const c = make('C · Codex')
       c.open()
       const wrong = await view(c, { address: bad })
       expect(wrong.url).toStartWith('http://127.0.0.1:')
       expect(wrong.outside()).toMatchObject({ available: false })
+      expect(wrong.outside()?.link).toBeUndefined()
     }
-  })
+  }, 30_000)
 
   test('the page\'s requests are accepted from 127.0.0.1, localhost and the set address, and from nowhere else', async () => {
     const a = make()
@@ -190,11 +230,11 @@ describe('viewer address', () => {
     for (const base of [local, `http://[::1]:${port}/${token}`]) {
       for (const origin of allowed) {
         expect((await post(`${base}/pin`, { ...PAGE_HEADERS, origin, 'sec-fetch-site': 'same-origin' }, body)).status).toBe(200)
-        expect((await post(`${base}/about`, { ...PAGE_HEADERS, origin }, { effort: 'high' })).status).toBe(200)
+        expect((await post(`${local}/about`, { ...PAGE_HEADERS, origin }, { effort: 'high' })).status).toBe(200)
       }
       for (const origin of others) {
         expect((await post(`${base}/pin`, { ...PAGE_HEADERS, origin }, body)).status).toBe(403)
-        expect((await post(`${base}/about`, { ...PAGE_HEADERS, origin }, { effort: 'high' })).status).toBe(403)
+        expect((await post(`${local}/about`, { ...PAGE_HEADERS, origin }, { effort: 'high' })).status).toBe(403)
         expect((await post(`${base}/code`, { ...PAGE_HEADERS, origin })).status).toBe(403)
       }
       // 표시 헤더가 없거나, 브라우저가 다른 사이트에서 왔다고 알려 주면 주소가 맞아도 받지 않는다.
@@ -205,7 +245,42 @@ describe('viewer address', () => {
     const made = await post(`http://[::1]:${port}/${token}/code`, { ...PAGE_HEADERS, origin: allowed[2]!, 'sec-fetch-site': 'same-origin' })
     expect(made.status).toBe(200)
     expect(((await made.json()) as { code: string }).code).toStartWith('cw1.')
+  }, 20_000)
+
+  test('the accepted origins follow where the view actually listens, not the setting', async () => {
+    const a = make()
+    a.open()
+    const { url, port } = await view(a, { address: '192.0.2.1' })
+    const body = { threads: ['abcdef12'], pinned: true }
+    const refused = await post(`${url}/pin`, { ...PAGE_HEADERS, origin: `http://192.0.2.1:${port}` }, body)
+    expect(refused.status).toBe(403)
+    expect(((await refused.json()) as { open: string[] }).open).toEqual([`http://127.0.0.1:${port}`, `http://localhost:${port}`])
+    expect((await post(`${url}/pin`, { ...PAGE_HEADERS, origin: `http://localhost:${port}` }, body)).status).toBe(200)
   })
+
+  test('the listener at the set address serves only what a browser needs; what the session\'s helpers call answers on 127.0.0.1 only', async () => {
+    const a = make()
+    a.open()
+    const { port, token } = await view(a, { address: SECOND })
+    const outside = `http://[::1]:${port}/${token}`
+    const local = `http://127.0.0.1:${port}/${token}`
+    const origin = `http://[::1]:${port}`
+    // 브라우저가 쓰는 것: 화면, 읽기, 접근키, 고정.
+    expect(await reaches(outside)).toBe(200)
+    expect(await reaches(`${outside}/data`)).toBe(200)
+    const events = await fetch(`${outside}/events`)
+    expect(events.status).toBe(200)
+    await events.body?.cancel()
+    expect((await post(`${outside}/pin`, { ...PAGE_HEADERS, origin }, { threads: ['abcdef12'], pinned: true })).status).toBe(200)
+    expect((await post(`${outside}/code`, { ...PAGE_HEADERS, origin })).status).toBe(200)
+    // 이 PC 안의 도우미가 쓰는 것: 요약, 다음 소식 기다리기, 깨우기, 소개. 정한 주소에서는 없는 주소다.
+    expect(await reaches(`${outside}/status`)).toBe(404)
+    expect(await reaches(`${outside}/next`)).toBe(404)
+    expect(await reaches(`${outside}/wake`)).toBe(404)
+    expect((await post(`${outside}/about`, { ...PAGE_HEADERS, origin }, { effort: 'high' })).status).toBe(404)
+    expect(await reaches(`${local}/status`)).toBe(200)
+    expect((await post(`${local}/about`, { ...PAGE_HEADERS, origin }, { effort: 'high' })).status).toBe(200)
+  }, 20_000)
 
   test('without the setting nothing changes: 127.0.0.1 only, the same links, and the set-address origin is refused', async () => {
     const a = make()
@@ -227,9 +302,17 @@ describe('viewer address', () => {
       const base = `http://${host}:${port}`
       for (const path of ['', '/', '/data', '/status', '/events', '/next', '/wake', '/wrong-token', '/wrong-token/data', `/${token.slice(0, -1)}`, `/${token}x/data`, `/x/${token}`]) expect(await reaches(`${base}${path}`)).toBe(404)
       for (const path of ['/code', '/wrong-token/code', '/wrong-token/pin', '/wrong-token/about']) expect((await post(`${base}${path}`, { ...PAGE_HEADERS, origin: base })).status).toBe(404)
-      expect(await reaches(`${base}/${token}/status`)).toBe(200)
+      expect(await reaches(`${base}/${token}/data`)).toBe(200)
     }
-  })
+    // 정확히 그 꼴의 주소에만 답한다: 겹친 빗금, 끝의 빗금, 점, 바꿔 적은 글자에는 답하지 않는다.
+    for (const host of ['127.0.0.1', '::1']) {
+      expect(await rawStatus(host, port, `/${token}`)).toBe(200)
+      expect(await rawStatus(host, port, `/${token}/data`)).toBe(200)
+      const coded = `%${token.charCodeAt(0).toString(16)}${token.slice(1)}`
+      for (const path of [`//${token}`, `/${token}/`, `/${token}//data`, `/${token}/./data`, `/x/../${token}`, `/${token}/%2e/data`, `/x/%2e%2e/${token}`, `/${coded}`, `/${token}/dat%61`, `/${token}?x`, `/${token}/data/`])
+        expect([path, await rawStatus(host, port, path)]).toEqual([path, 404])
+    }
+  }, 20_000)
 
   test('the links for the human use the set address; what this computer calls itself stays on 127.0.0.1', async () => {
     const a = make()
@@ -238,6 +321,7 @@ describe('viewer address', () => {
     expect(viewer.url).toBe(url)
     expect((viewer.status() as { link?: string }).link).toBe(`http://[::1]:${port}/${token}`)
     expect(viewer.listenCommand('darwin')).toBe(`curl -s http://127.0.0.1:${port}/${token}/next`)
+    expect(viewer.listenCommand('win32')).toBe(`curl.exe -s http://127.0.0.1:${port}/${token}/next`)
     // 채팅창 위 띠는 요약이 알려 주는 링크를 쓴다.
     const band = readFileSync(join(root, 'plugin', 'claude', 'band.tsx'), 'utf8')
     expect(band).toContain('s?.link')
@@ -293,6 +377,44 @@ describe('viewer address', () => {
   })
 })
 
+describe('the link is a secret', () => {
+  test('outgoing text that holds this session\'s view token is refused, and the refusal says why', async () => {
+    const a = make()
+    const b = make('B · Codex')
+    a.open()
+    await b.connect(a.newCode())
+    const { url, token } = await view(a, { address: SECOND })
+    const local = `http://127.0.0.1:${a.viewerAt!.port}/${token}`
+    const why = 'conversation view link'
+    for (const text of [url, local, `see ${token} there`]) {
+      await expect(a.ask(undefined, `Look at ${text}`)).rejects.toThrow(why)
+      await expect(a.ask(undefined, 'Look.', `background: ${text}`)).rejects.toThrow(why)
+    }
+    expect(a.threads.size).toBe(0)
+    const asked = await a.ask(undefined, 'A plain question.')
+    await expect(a.reply(asked.thread, `it is at ${url}`)).rejects.toThrow(why)
+    await expect(a.hold(asked.thread, `my human reads ${url}`)).rejects.toThrow(why)
+    await expect(a.agree(asked.thread, { conclusion: `read ${url}`, facts: [] } as never)).rejects.toThrow(why)
+    await expect(a.agree(asked.thread, { conclusion: 'done', facts: [{ fact: 'the page', evidence: url }] } as never)).rejects.toThrow(why)
+    expect(() => a.setAbout({ model: token })).toThrow(why)
+    expect(a.describe().about?.model).not.toBe(token)
+
+    const dir = mkdtempSync(join(tmpdir(), 'coworker-viewer-link-'))
+    temps.push(dir)
+    const note = join(dir, 'note.md')
+    writeFileSync(note, `# where to look\n\n${url}\n`)
+    await expect(a.ask(undefined, 'See the file.', undefined, [note])).rejects.toThrow(why)
+    const named = join(dir, `${token}.md`)
+    writeFileSync(named, 'nothing inside')
+    await expect(a.ask(undefined, 'See the file.', undefined, [named])).rejects.toThrow(why)
+    // 토큰이 없는 글과 파일은 그대로 간다. 상대의 토큰은 이 세션의 비밀이 아니다.
+    writeFileSync(note, '# where to look\n\nhttp://127.0.0.1:1/some-other-token\n')
+    expect((await a.ask(undefined, 'See the file at http://127.0.0.1:1/some-other-token', undefined, [note])).thread).toBeString()
+    // 대화 보기를 연 적이 없는 세션에는 막을 토큰이 없다.
+    expect((await b.ask(undefined, `B has no view yet: ${token}`)).thread).toBeString()
+  }, 20_000)
+})
+
 describe('viewer address in a session', () => {
   async function session(env: Record<string, string>) {
     const home = mkdtempSync(join(tmpdir(), 'coworker-viewer-address-'))
@@ -321,8 +443,9 @@ describe('viewer address in a session', () => {
     expect(open.next).toContain(open.viewer)
     // 사람에게 줄 링크는 정한 주소다. 이 PC 안에서 AI가 돌리는 기다리는 명령만 127.0.0.1 을 쓴다.
     expect(open.next.replace(/curl(\.exe)? -s \S+/g, '')).not.toContain('http://127.0.0.1')
-    expect(open.next).toContain('whoever has this link and can reach that address can read the conversation and make an access key')
-    expect(open.listen_command).toStartWith('curl -s http://127.0.0.1:')
+    expect(open.listen_command).toMatch(/^curl(\.exe)? -s http:\/\/127\.0\.0\.1:/)
+    expect(open.next).toContain('make an access key and pin a conversation')
+    expect(open.next).toContain('never send it to another session')
     expect(await reaches(open.viewer)).toBe(200)
     const listed = await call('list_connections')
     expect(listed.viewer).toBe(open.viewer)
