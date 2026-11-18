@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:tes
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative, resolve, sep } from 'node:path'
+import { basename, join, relative, resolve, sep } from 'node:path'
 import { renderAgreement, type Agreement } from '../src/agreement'
 import { Bridge, routeId, safeFileName, type BridgeEvent } from '../src/bridge'
 import { fromB64, seal } from '../src/crypto'
@@ -80,7 +80,7 @@ async function sendRaw(from: Bridge, to: Bridge, payload: unknown) {
 }
 
 describe('paths built from peer data', () => {
-  test('agreements with invalid thread ids are refused, counted in the log without peer text, and never write or replace files outside agreements', async () => {
+  test('thread ids from the other side must be eight lowercase hex characters', async () => {
     const outsideFile = join(sandbox, 'EXISTING.md')
     const siblingFile = join(home, 'KEEP.md')
     writeFileSync(outsideFile, 'original outside content\n')
@@ -309,5 +309,181 @@ describe('paths built from peer data', () => {
     const outsideHome = walkFiles(sandbox).filter(f => f !== resolve(keepJson) && !isUnder(home, f) && !isUnder(senderHome, f))
     expect(outsideHome).toEqual([])
     expect(asked.thread).toMatch(/^[0-9a-f]{8}$/)
+  })
+
+  test('two bridges on one home with different peers and the same thread id on the same day write separate agreement files', async () => {
+    const peerOneHome = join(sandbox, 'peer-one')
+    const peerTwoHome = join(sandbox, 'peer-two')
+    mkdirSync(peerOneHome, { recursive: true })
+    mkdirSync(peerTwoHome, { recursive: true })
+
+    const desk = make('Desk · Claude Code', { home })
+    const other = make('Other · Claude Code', { home })
+    const peerOne = make('Peer One · Codex', { home: peerOneHome })
+    const peerTwo = make('Peer Two · Codex', { home: peerTwoHome })
+
+    desk.open()
+    other.open()
+    await peerOne.connect(desk.newCode())
+    await peerTwo.connect(other.newCode())
+    await desk.wait(200)
+    await other.wait(200)
+
+    const sharedThread = 'abcd0123'
+    const at = new Date().toISOString()
+    const firstAgreement: Agreement = {
+      by: 'Peer One · Codex',
+      conclusion: 'Desk settled on port 7701.',
+      facts: [{ fact: 'desk config line 4', evidence: 'config.toml:4', checkedBy: 'Peer One · Codex' }],
+      guesses: [],
+      disagreements: [],
+      forHumans: [],
+    }
+    const secondAgreement: Agreement = {
+      by: 'Peer Two · Codex',
+      conclusion: 'Other settled on port 9900.',
+      facts: [{ fact: 'other config line 9', evidence: 'other.toml:9', checkedBy: 'Peer Two · Codex' }],
+      guesses: [],
+      disagreements: [],
+      forHumans: [],
+    }
+
+    expect(
+      (
+        await sendRaw(peerOne, desk, {
+          type: 'msg',
+          msg: { id: randomUUID(), thread: sharedThread, subject: 'Desk port', kind: 'agreement', text: renderAgreement(firstAgreement), agreement: firstAgreement, at },
+        })
+      ).status,
+    ).toBe(200)
+    const firstGot = (await desk.wait(300)).find(e => e.type === 'message') as Extract<BridgeEvent, { type: 'message' }>
+    expect(firstGot.file).toBeDefined()
+    const firstBytes = Buffer.from(readFileSync(firstGot.file!))
+
+    expect(
+      (
+        await sendRaw(peerTwo, other, {
+          type: 'msg',
+          msg: { id: randomUUID(), thread: sharedThread, subject: 'Other port', kind: 'agreement', text: renderAgreement(secondAgreement), agreement: secondAgreement, at },
+        })
+      ).status,
+    ).toBe(200)
+    const secondGot = (await other.wait(300)).find(e => e.type === 'message') as Extract<BridgeEvent, { type: 'message' }>
+    expect(secondGot.file).toBeDefined()
+
+    expect(secondGot.file).not.toBe(firstGot.file)
+    expect(basename(firstGot.file!)).toMatch(/^\d{4}-\d{2}-\d{2}-abcd0123-[0-9a-f]{24}\.md$/)
+    expect(basename(secondGot.file!)).toMatch(/^\d{4}-\d{2}-\d{2}-abcd0123-[0-9a-f]{24}\.md$/)
+    expect(basename(firstGot.file!).toLowerCase()).not.toBe(basename(secondGot.file!).toLowerCase())
+
+    const files = walkFiles(join(home, 'agreements'))
+    expect(files).toHaveLength(2)
+    expect(Buffer.compare(readFileSync(firstGot.file!), firstBytes)).toBe(0)
+    expect(readFileSync(secondGot.file!, 'utf8')).toContain('Other settled on port 9900.')
+  })
+
+  test('saving again on the same conversation updates its own file, and pre-update agreement files keep their names', async () => {
+    const senderHome = join(sandbox, 'sender-repeat')
+    mkdirSync(senderHome, { recursive: true })
+    const saveTo = savedPath(home, 'repeat-session')
+    const a = make('A · Claude Code', { home, saveTo })
+    const b = make('B · Codex', { home: senderHome })
+    a.open()
+    await b.connect(a.newCode())
+    await a.wait(200)
+
+    const { thread } = await b.ask(undefined, 'Which cache TTL do we use?')
+    await a.wait(200)
+    await a.reply(thread!, '60 seconds.')
+    await b.wait(200)
+
+    // 같은 상대가 같은 대화에 합의문을 두 번 쓰면 전과 같이 그 대화의 파일을 새 판으로 바꾼다.
+    const wrote1 = await b.agree(thread!, { conclusion: 'Draft: 30 seconds.' })
+    const got1 = (await a.wait(300)).find(e => e.type === 'message') as Extract<BridgeEvent, { type: 'message' }>
+    const wrote2 = await b.agree(thread!, { conclusion: 'Final: 60 seconds.' })
+    const got2 = (await a.wait(300)).find(e => e.type === 'message') as Extract<BridgeEvent, { type: 'message' }>
+
+    expect(wrote2.file).toBe(wrote1.file)
+    expect(got2.file).toBe(got1.file)
+    expect(walkFiles(join(home, 'agreements'))).toHaveLength(1)
+    expect(readFileSync(got2.file!, 'utf8')).toContain('Final: 60 seconds.')
+    expect(readFileSync(got2.file!, 'utf8')).not.toContain('Draft: 30 seconds.')
+
+    // 반대쪽이 자기 판을 더해도 같은 파일 하나에 두 판이 함께 남는다.
+    const wroteA = await a.agree(thread!, { conclusion: 'Agreed: 60 seconds.' })
+    expect(wroteA.file).toBe(got2.file)
+    const combined = readFileSync(wroteA.file!, 'utf8')
+    expect(combined).toContain('# 합의문 · B · Codex 작성')
+    expect(combined).toContain('# 합의문 · A · Claude Code 작성')
+
+    // 예전 이름(<날짜>-<대화 id>.md)으로 저장된 파일은 그대로 남고, 같은 날 다시 저장하면 새 이름으로 따로 남는다.
+    const day = new Date().toISOString().slice(0, 10)
+    const legacyThread = '1122aabb'
+    const legacyPath = join(home, 'agreements', `${day}-${legacyThread}.md`)
+    const legacyBytes = Buffer.from('# 합의문: Legacy topic\n\npre-update file bytes\n', 'utf8')
+    writeFileSync(legacyPath, legacyBytes)
+
+    await Bun.sleep(150)
+    a.shutdown()
+    opened.splice(opened.indexOf(a), 1)
+
+    const saved = JSON.parse(readFileSync(saveTo, 'utf8'))
+    const legacyAgreement: Agreement = {
+      by: 'B · Codex',
+      conclusion: 'Pre-update conclusion.',
+      facts: [],
+      guesses: [],
+      disagreements: [],
+      forHumans: [],
+    }
+    saved.threads.push({
+      id: legacyThread,
+      peer: b.key,
+      peerName: 'B · Codex',
+      subject: 'Legacy topic',
+      startedBy: 'peer',
+      status: 'agreed',
+      messages: [
+        { id: 'm1', from: 'peer', kind: 'question', text: 'Legacy topic?', at: `${day}T00:00:00.000Z` },
+        { id: 'm2', from: 'peer', kind: 'agreement', text: renderAgreement(legacyAgreement), agreement: legacyAgreement, at: `${day}T00:01:00.000Z` },
+      ],
+    })
+    saved.events = [
+      {
+        type: 'message',
+        thread: legacyThread,
+        from: 'B · Codex',
+        kind: 'agreement',
+        text: renderAgreement(legacyAgreement),
+        status: 'agreed',
+        agreement: legacyAgreement,
+        file: legacyPath,
+        at: `${day}T00:01:00.000Z`,
+      },
+    ]
+
+    const start = nextPort
+    nextPort += 10
+    const restored = Bridge.restore(saved, {
+      ports: [start, start + 9],
+      addrs: () => ['127.0.0.1'],
+      retryMs: 50,
+      connectTimeoutMs: 500,
+      home,
+      saveTo,
+    })
+    opened.push(restored)
+
+    expect(restored.threads.get(legacyThread)?.status).toBe('agreed')
+    expect(restored.threadSummaries().some(s => s.id === legacyThread && s.status === 'agreed')).toBe(true)
+    const unread = await restored.wait(0)
+    expect(unread.find(e => e.type === 'message' && e.thread === legacyThread)).toMatchObject({ file: legacyPath })
+
+    const updated = await restored.agree(legacyThread, { conclusion: 'Post-update addition.' })
+    expect(updated.file).toBeDefined()
+    expect(updated.file).not.toBe(legacyPath)
+    expect(Buffer.compare(readFileSync(legacyPath), legacyBytes)).toBe(0)
+    expect(readFileSync(updated.file!, 'utf8')).toContain('Pre-update conclusion.')
+    expect(readFileSync(updated.file!, 'utf8')).toContain('Post-update addition.')
   })
 })
