@@ -14,7 +14,8 @@ const once: TryAgain = async body => {
     await body()
   } catch {}
 }
-const tryAgain: TryAgain = (body, tries, limitMs, name, write) => (marker.tryAgain ?? once)(body, tries, limitMs, name, write)
+// 이 파일의 시험이 일부러 실패시키는 차례는 검사 기록에 적지 않는다. 적는 줄을 보는 시험만 받아 적을 곳을 준다.
+const tryAgain: TryAgain = (body, tries, limitMs, name, write = () => {}) => (marker.tryAgain ?? once)(body, tries, limitMs, name, write)
 const triesFor: TriesFor = env => (marker.triesFor ? marker.triesFor(env) : -1)
 
 test('a body that is wrong every time fails after three tries, with its last error', async () => {
