@@ -2,13 +2,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { version } from '../package.json'
-import { Bridge, defersToHuman, isRelayAddr, MAX_CATEGORY, MAX_FILE_BYTES, MAX_FILES, MAX_FILES_BYTES, parsePorts, saysNoAnswer, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
+import { Bridge, defersToHuman, isOutsideCode, MAX_CATEGORY, MAX_FILE_BYTES, MAX_FILES, MAX_FILES_BYTES, parsePorts, saysNoAnswer, type BridgeEvent, type HumanQuestion, type SavedBridge } from './bridge'
 import { decodeCode } from './code'
 import { firstTimeHint } from './hint'
 import { waitSeconds } from './limits'
 import { shortHostname } from './net'
 import { osNotify, type Notify } from './notify'
 import { outsideRelayError } from './outside'
+import { OUTSIDE_ONLY, type OutsideLimits } from './bridge'
 import { rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -62,6 +63,8 @@ export type SessionOptions = {
   sessionId?: string
   // 다시 켠 세션이면 되살릴 브릿지 상태. stdio 서버가 뜰 때 찾아서 넘긴다.
   restore?: SavedBridge
+  // 외부용 코드로 들어온 세션에 두는 한도(COWORKER_OUTSIDE_MAX_… 설정). 준 것만 기본값을 바꾼다.
+  outsideLimits?: Partial<OutsideLimits>
   // 플러그인으로 설치해서 도는 서버면, 새 판이 나왔을 때 스스로 올린다.
   autoUpdate?: boolean
   // 시험에서 실제 claude·codex 명령 대신 쓸 업데이트 함수.
@@ -139,7 +142,9 @@ export function createSession(opts: SessionOptions) {
 
   Groups and codes
   - A connection code from open_bridge is a group code by default: whoever joins with it is also connected, automatically, with every session already in this session's group. You get a "connected" event for each, with "via" naming who introduced them. A private code (open_bridge with private: true) links only the two sessions.
-  - An outside code (open_bridge with outside: true, for example when your human asks for an outside code / 외부용 코드 for someone they do not know, such as an outside contributor) requires a working relay and never falls back to direct addresses. It is always private (links only the two sessions and tells neither side about other sessions), uses "<tool>" as the default session name with no computer name, puts only the relay mailbox in the code, and blocks this computer's name, account name, home or project folder paths, and internal or VPN addresses from leaving towards that peer. When talking to an outside session, refer to files by paths relative to the project (for example src/index.ts:10), never full paths on this PC.
+  - An outside code (open_bridge with outside: true, for example when your human asks for an outside code / 외부용 코드 for someone they do not know, such as an outside contributor) requires a working relay and never falls back to direct addresses. It is always private (links only the two sessions and tells neither side about other sessions), uses "<tool>" as the default session name with no computer name, puts only the relay mailbox in the code, and blocks this computer's name, account name, home or project folder paths, and internal or VPN addresses from leaving towards that peer, also in your name, model and effort. When talking to an outside session, refer to files by paths relative to the project (for example src/index.ts:10), never full paths on this PC. A file goes to an outside session only when it is UTF-8 text that passes the same check.
+  - A bridge first opened with outside: true is for outside sessions only until it is closed: call open_bridge with outside: true again for each further outside session; it refuses to make a group or private code. A bridge opened for colleagues can also make outside codes and stays as it is.
+  - An outside session is not part of "everyone": ask it by name. It may connect only while fewer than the allowed number of outside sessions are connected (5 by default), and what it may send is limited (conversations, messages, size); beyond that its messages are refused and it is told why. Its files are refused unless the bridge was opened with outside_files: true. list_connections marks such sessions with outside: true. To end one of them, call close_bridge with peer when your human says so.
   - send_question can go to one session, to several (a list of names), or to "everyone". With several, set answers: "all" (default) to get everyone's answer, or "one" when the first answer is enough; the others are then told the question is closed.
   - Each recipient answers in its own conversation; recipients do not see each other's answers. Events for a question to several sessions carry "ask" with who was asked and who has answered.
   - When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
@@ -243,7 +248,7 @@ export function createSession(opts: SessionOptions) {
     } catch {}
   }
 
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, projectDir: folderDir, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS })
+  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, projectDir: folderDir, outsideLimits: opts.outsideLimits, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS })
   const notify = opts.notify ?? osNotify
   const normalDefaultName = () => `${folder ? `${folder} · ` : ''}${clientLabel()} @ ${shortHostname()}`
 
@@ -604,6 +609,12 @@ export function createSession(opts: SessionOptions) {
           .describe(
             'true: make an outside code (외부용 코드) for someone you do not know, such as an outside open-source contributor. Requires a working relay and never falls back to direct addresses. Carries only the relay mailbox, hides this computer\'s name, account, folder paths, port and internal or VPN addresses from that peer, and is always private.',
           ),
+        outside_files: z
+          .boolean()
+          .optional()
+          .describe(
+            'With outside: true only: also take files that outside sessions send. Off by default: their files are refused. Set it only when your human asks for it; each outside session then has a quota for its files. It stays on until this bridge closes.',
+          ),
         model: z.string().min(1).max(60).optional().describe('The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess.'),
         effort: z.string().min(1).max(60).optional().describe('Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess.'),
         expires_minutes: z
@@ -629,6 +640,7 @@ export function createSession(opts: SessionOptions) {
         name,
         private: only,
         outside,
+        outside_files: outsideFiles,
         expires_minutes: minutes = DEFAULT_CODE_MINUTES,
         resume,
         model,
@@ -638,6 +650,7 @@ export function createSession(opts: SessionOptions) {
         name?: string
         private?: boolean
         outside?: boolean
+        outside_files?: boolean
         expires_minutes?: number
         resume?: string
         model?: string
@@ -669,27 +682,42 @@ export function createSession(opts: SessionOptions) {
         if (outside) {
           if (!relay) throw new Error(outsideRelayError(undefined, 'off'))
           const b = getBridge(true)
-          const chosenName = name ?? clientLabel()
-          b.assertOutsideSafe({ name: chosenName })
           const wasOpen = b.isOpen
-          b.outsideName = chosenName
-          if (!wasOpen) b.name = chosenName
-          introduce(b, model, effort)
-          b.open(port, { outsideOnly: !wasOpen })
+          const chosenName = name ?? (wasOpen ? b.outsideName : undefined) ?? clientLabel()
+          // 이름뿐 아니라 이 세션이 자기에 관해 알리는 것을 모두, 무엇도 바꾸기 전에 확인한다.
+          b.assertOutsideSafe({ name: chosenName, model, effort, tool: clientLabel() })
+          // 열려 있는 브릿지는 그대로 둔다: 외부용으로만 연 것이든 동료에게도 연 것이든, 외부용 코드를 더 만든다고 바뀌지 않는다.
+          if (!wasOpen) {
+            b.outsideName = chosenName
+            b.name = chosenName
+            introduce(b, model, effort)
+            b.open(port, { outsideOnly: true })
+          }
           const status = await b.relayReady(5000)
           if (status !== 'ok') {
             if (!wasOpen) b.shutdown()
             throw new Error(outsideRelayError(relay, status))
           }
+          if (wasOpen) {
+            introduce(b, model, effort)
+            b.outsideName = chosenName
+          }
+          if (outsideFiles) b.allowOutsideFiles()
           const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60_000).toISOString()
+          const code = b.newCode({ outside: true, private: true, ttlMs: minutes === 0 ? null : minutes * 60_000 })
+          const joined = [...b.peers.values()].filter(p => p.outside && !p.host).length
+          const most = b.limits.sessions
           return {
-            code: b.newCode({ outside: true, private: true, ttlMs: minutes === 0 ? null : minutes * 60_000 }),
+            code,
             session_id: identity,
             expires: expires ?? 'never: works until this bridge closes',
             kind: 'outside: relay only, hides this computer, and links only this session and the one who joins',
             name: b.nameFor(true),
             addresses: b.addrsFor(true),
             relay: { url: relay, status },
+            outside_sessions: `${joined} of at most ${most} connected`,
+            files_from_outside: b.takesOutsideFiles ? 'taken, up to a quota for each outside session' : 'refused (open_bridge with outside_files: true takes them)',
+            full: joined >= most ? `This bridge already has ${most} outside sessions connected, the most it takes. Whoever uses this code is refused, without using the code up, until one of them leaves or your human ends one with close_bridge and its name. Tell your human.` : undefined,
             group: [],
             viewer: viewerUrl(),
             listen_command: listenCommand(),
@@ -697,6 +725,8 @@ export function createSession(opts: SessionOptions) {
           }
         }
         const b = getBridge()
+        // 외부용으로만 연 브릿지는 닫을 때까지 그대로다. 동료용 코드를 달라는 요청은 무엇도 바꾸지 않고 거절한다.
+        if (b.isOpen && b.isOutsideOnly) throw new Error(OUTSIDE_ONLY)
         if (b.isOutsideOnly && !name && b.name === b.outsideName) b.name = normalDefaultName()
         if (name) b.name = name
         introduce(b, model, effort)
@@ -737,15 +767,19 @@ export function createSession(opts: SessionOptions) {
     tool(async ({ code, name, model, effort }: { code: string; name?: string; model?: string; effort?: string }) => {
       await resolveFolder()
       freshIfMoved()
-      const relayOnlyCode = decodeCode(code).addrs.every(isRelayAddr)
-      const b = getBridge(relayOnlyCode && !name)
-      if (!b.isOpen && relayOnlyCode && !name) {
-        b.name = clientLabel()
-        b.outsideName = clientLabel()
-      }
-      if (name) b.name = name
+      // 외부용 코드로 들어갈 때는 이 컴퓨터에 관한 것을 보내지 않는다:
+      // 이름은 도구 이름(또는 사람이 정한 이름)만, 주소와 포트는 보내지 않고, 이 세션이 자기에 관해 알리는 것은 먼저 확인한다.
+      const outsideCode = isOutsideCode(decodeCode(code))
+      const b = getBridge(outsideCode)
+      if (b.isOpen && b.isOutsideOnly && !outsideCode) throw new Error(OUTSIDE_ONLY)
+      if (outsideCode) {
+        const shown = name ?? b.outsideName ?? clientLabel()
+        b.assertOutsideSafe({ name: shown, model, effort, tool: clientLabel() })
+        b.outsideName = shown
+        if (!b.isOpen) b.name = shown
+      } else if (name) b.name = name
       introduce(b, model, effort)
-      if (!b.isOpen) b.open(undefined, { outsideOnly: relayOnlyCode && !name })
+      if (!b.isOpen) b.open(undefined, { outsideOnly: outsideCode })
       const { relay: relayInfo, warn = '' } = await relayStatus(b)
       const before = new Set(b.peers.keys())
       const peer = await b.connect(code)
@@ -756,7 +790,7 @@ export function createSession(opts: SessionOptions) {
         already_connected: again || undefined,
         joining,
         session_id: identity,
-        myName: b.name,
+        myName: outsideCode ? b.nameFor(true) : b.name,
         myPort: b.port,
         relay: relayInfo,
         viewer: viewerUrl(),
@@ -1073,10 +1107,17 @@ export function createSession(opts: SessionOptions) {
     {
       title: 'Close bridge',
       annotations: { readOnlyHint: false, openWorldHint: true },
-      description: 'Tell the connected sessions this session is leaving, and stop listening.',
-      inputSchema: {},
+      description:
+        'Tell the connected sessions this session is leaving, and stop listening. With peer, end only the connection with that one session and keep the bridge open for the others (for example to free a place among the outside sessions).',
+      inputSchema: {
+        peer: z.string().min(1).max(200).optional().describe('End only the connection with this session (name or [id]). Leave it out to close the whole bridge. Only when your human says so.'),
+      },
     },
-    tool(async () => {
+    tool(async ({ peer }: { peer?: string }) => {
+      if (peer) {
+        const ended = await getBridge().endPeer(peer)
+        return { ended: `${ended.name} [${ended.id}]`, bridge: 'still open', next: 'Tell your human in one line that this connection is ended and the others go on. That session needs a new code to connect again.' }
+      }
       closeWindows(true)
       await getBridge().close()
       return { closed: true }

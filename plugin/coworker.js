@@ -9275,6 +9275,3067 @@ var require_dist = __commonJS(function(exports, module) {
   exports.default = formatsPlugin;
 });
 
+// src/bridge.ts
+import { createHash as createHash4, randomUUID } from "crypto";
+import { appendFileSync as appendFileSync2, chmodSync, closeSync, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readdirSync, readFileSync as readFileSync2, readSync, renameSync as renameSync2, rmSync, statSync as statSync2, writeFileSync } from "fs";
+import { basename as basename2, dirname as dirname2, extname, isAbsolute, relative, resolve } from "path";
+
+// src/agreement.ts
+import { createHash } from "crypto";
+var isText = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
+var isList = (v) => Array.isArray(v) && v.length <= 50 && v.every((s) => isText(s, 2000));
+function isAgreement(a) {
+  const v = a;
+  return !!v && isText(v.by, 200) && isText(v.conclusion, 5000) && Array.isArray(v.facts) && v.facts.length <= 50 && v.facts.every((f) => !!f && isText(f.fact, 2000) && isText(f.evidence, 2000) && isText(f.checkedBy, 200)) && isList(v.guesses) && isList(v.disagreements) && isList(v.forHumans);
+}
+var bullets = (items) => items.length ? items.map((i) => `- ${i}`).join(`
+`) : "- \uC5C6\uC74C";
+function renderAgreement(a) {
+  const facts = a.facts.length ? a.facts.map((f) => `- ${f.fact}
+  - \uADFC\uAC70: ${f.evidence}
+  - \uD655\uC778\uD55C \uCABD: ${f.checkedBy}`).join(`
+`) : "- \uC5C6\uC74C";
+  return [
+    `## \uACB0\uB860
+
+${a.conclusion}`,
+    `## \uD655\uC778\uD55C \uC0AC\uC2E4\uACFC \uADFC\uAC70
+
+${facts}`,
+    `## \uCD94\uCE21 (\uC544\uBB34\uB3C4 \uD655\uC778\uD558\uC9C0 \uC54A\uC74C)
+
+${bullets(a.guesses)}`,
+    `## \uC758\uACAC\uC774 \uAC08\uB9B0 \uC810
+
+${bullets(a.disagreements)}`,
+    `## \uC0AC\uB78C\uC774 \uC815\uD560 \uAC83
+
+${bullets(a.forHumans)}`
+  ].join(`
+
+`);
+}
+var THREAD_ID = /^[0-9a-f]{8}$/;
+var DAY = /^\d{4}-\d{2}-\d{2}$/;
+var BASE64_KEY = /^[A-Za-z0-9+/]+={0,2}$/;
+function keyBytesOf(key) {
+  if (typeof key !== "string" || !key)
+    return;
+  if (BASE64_KEY.test(key)) {
+    const bytes = Buffer.from(key, "base64");
+    if (bytes.length === 32)
+      return bytes;
+  }
+  return Buffer.from(`key text:${key}`, "utf8");
+}
+function agreementFileName(startedAt, threadId, ownKey, peerKey) {
+  if (typeof threadId !== "string" || threadId.length !== 8 || !THREAD_ID.test(threadId))
+    return;
+  const ownBytes = keyBytesOf(ownKey), peerBytes = keyBytesOf(peerKey);
+  if (!ownBytes || !peerBytes)
+    return;
+  const day = typeof startedAt === "string" && DAY.test(startedAt.slice(0, 10)) ? startedAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const pairHash = createHash("sha256").update(ownBytes).update(peerBytes).digest("hex").slice(0, 24);
+  return `${day}-${threadId}-${pairHash}.md`;
+}
+
+// src/code.ts
+import { createHash as createHash2 } from "crypto";
+var PREFIX = "cw1.";
+var check = (body) => createHash2("sha256").update(body).digest("base64url").slice(0, 8);
+function encodeCode(code) {
+  const body = Buffer.from(JSON.stringify(code)).toString("base64url");
+  return `${PREFIX}${body}.${check(body)}`;
+}
+function decodeCode(text) {
+  const trimmed = text.trim().replace(/^`+|`+$/g, "");
+  if (!trimmed.startsWith(PREFIX))
+    throw new Error('not a coworker connection code (it should start with "cw1.")');
+  const [body = "", sum] = trimmed.slice(PREFIX.length).split(".");
+  if (sum !== undefined && sum !== check(body))
+    throw new Error("connection code was copied wrong: some character differs from the original. Copy the whole line again exactly as the coworker sent it");
+  let code;
+  try {
+    code = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("connection code is damaged; copy the whole line again");
+  }
+  const valid = code?.v === 1 && typeof code.name === "string" && Array.isArray(code.addrs) && code.addrs.length > 0 && code.addrs.every((a) => typeof a === "string" && a.length > 0) && Number.isInteger(code.port) && code.port > 0 && code.port < 65536 && typeof code.key === "string" && typeof code.token === "string" && (code.outside === undefined || code.outside === true);
+  if (!valid)
+    throw new Error("connection code is damaged; copy the whole line again");
+  return code;
+}
+
+// src/crypto.ts
+var import_tweetnacl = __toESM(require_nacl_fast(), 1);
+var newKeyPair = () => import_tweetnacl.default.box.keyPair();
+var toB64 = (bytes) => Buffer.from(bytes).toString("base64");
+var fromB64 = (text) => new Uint8Array(Buffer.from(text, "base64"));
+var randomToken = () => Buffer.from(import_tweetnacl.default.randomBytes(16)).toString("base64url");
+function seal(payload, to, me) {
+  const nonce = import_tweetnacl.default.randomBytes(import_tweetnacl.default.box.nonceLength);
+  const stamped = payload && typeof payload === "object" && !Array.isArray(payload) ? { ...payload, t: Date.now() } : payload;
+  const message = new TextEncoder().encode(JSON.stringify(stamped));
+  return {
+    from: toB64(me.publicKey),
+    nonce: toB64(nonce),
+    box: toB64(import_tweetnacl.default.box(message, nonce, to, me.secretKey))
+  };
+}
+function open(sealed, me) {
+  if (!isSealed(sealed))
+    return null;
+  try {
+    const from = fromB64(sealed.from);
+    const nonce = fromB64(sealed.nonce);
+    if (from.length !== import_tweetnacl.default.box.publicKeyLength || nonce.length !== import_tweetnacl.default.box.nonceLength)
+      return null;
+    const opened = import_tweetnacl.default.box.open(fromB64(sealed.box), nonce, from, me.secretKey);
+    return opened ? JSON.parse(new TextDecoder().decode(opened)) : null;
+  } catch {
+    return null;
+  }
+}
+function isSealed(value) {
+  const v = value;
+  return !!v && typeof v.from === "string" && typeof v.nonce === "string" && typeof v.box === "string";
+}
+var REPLAY_MAX_AGE_MS = 2 * 60 * 60000;
+
+class ReplayGuard {
+  maxAgeMs;
+  clock;
+  nonces = new Map;
+  lastSweep = 0;
+  constructor(maxAgeMs = REPLAY_MAX_AGE_MS, clock = Date.now) {
+    this.maxAgeMs = maxAgeMs;
+    this.clock = clock;
+  }
+  check(sealed, opened, now = this.clock()) {
+    const t = opened?.t;
+    if (typeof t === "number" && Math.abs(now - t) > this.maxAgeMs)
+      return "stale";
+    if (now - this.lastSweep > 60000) {
+      for (const [n, at] of this.nonces)
+        if (now - at > this.maxAgeMs * 2)
+          this.nonces.delete(n);
+      this.lastSweep = now;
+    }
+    if (this.nonces.has(sealed.nonce))
+      return "again";
+    this.nonces.set(sealed.nonce, now);
+    return "ok";
+  }
+}
+
+// src/net.ts
+import { networkInterfaces, hostname, platform } from "os";
+var isPrivateLan = (ip) => ip.startsWith("10.") || ip.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+function localAddresses() {
+  const lan = [];
+  const other = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const nic of list ?? []) {
+      if (nic.family !== "IPv4" || nic.internal || nic.address.startsWith("169.254."))
+        continue;
+      (isPrivateLan(nic.address) ? lan : other).push(nic.address);
+    }
+  }
+  const name = bonjourName();
+  return [...new Set([...lan, ...other, ...name ? [name] : [], "127.0.0.1"])];
+}
+function bonjourName() {
+  if (platform() === "darwin") {
+    try {
+      const out = Bun.spawnSync(["scutil", "--get", "LocalHostName"]).stdout.toString().trim();
+      if (out)
+        return `${out}.local`;
+    } catch {}
+  }
+  if (platform() === "linux")
+    return `${hostname()}.local`;
+  return;
+}
+var shortHostname = () => hostname().replace(/\.local$/, "");
+var hostForUrl = (addr) => addr.includes(":") ? `[${addr}]` : addr;
+
+// src/box.ts
+import { createHash as createHash3 } from "crypto";
+var boxOf = (secret) => createHash3("sha256").update(secret).digest("base64url").slice(0, 22);
+
+// src/secrets.ts
+var KEYWORDS = "password|passwd|passphrase|secret|api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|\uBE44\uBC00\uBC88\uD638|\uD328\uC2A4\uC6CC\uB4DC|\uC554\uD638";
+var RULES = [
+  { kind: "private key", re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/g },
+  { kind: "AWS access key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { kind: "GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/g },
+  { kind: "GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}/g },
+  { kind: "Slack token", re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/g },
+  { kind: "Anthropic API key", re: /\bsk-ant-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}/g },
+  { kind: "OpenAI API key", re: /\bsk-(?!ant-)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}/g },
+  { kind: "Stripe key", re: /\b[sr]k_live_[A-Za-z0-9]{20,}/g },
+  { kind: "Google API key", re: /\bAIza[0-9A-Za-z_-]{35}/g },
+  { kind: "npm token", re: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  { kind: "JSON web token", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  { kind: "password in a URL", re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)@/gi, value: 1 },
+  { kind: "bearer token", re: /\bBearer\s+([A-Za-z0-9._~+/-]{20,}=*)/g, value: 1 },
+  { kind: "password or secret", re: new RegExp(`(?:${KEYWORDS})["']?\\s*[:=]\\s*["']?([^\\s"'\`,;]{6,})`, "gi"), value: 1 }
+];
+var PLACEHOLDER = [
+  /^<.*>$/,
+  /^\[.*\]$/,
+  /^\{\{.*\}\}$/,
+  /^\$\{.*\}$/,
+  /^\$[A-Za-z_]\w*$/,
+  /^%[A-Za-z_]\w*%$/,
+  /^[*x\u2022.]+$/i,
+  /^(?:redacted|hidden|masked|changeme|example|placeholder|password|passwd|secret|dummy|test|null|none|undefined|required|optional)$/i,
+  /^(?:your|my|the)[_-]/i,
+  /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+/,
+  /^[A-Za-z_$][\w$]*\(/,
+  /^[A-Z][A-Z0-9_]*$/,
+  /^(?:[A-Za-z]:)?[\\/]/,
+  /^~?\.{0,2}[\\/]/
+];
+var looksLikeSecret = (rule, value) => {
+  if (rule.value === undefined)
+    return true;
+  if (PLACEHOLDER.some((p) => p.test(value)))
+    return false;
+  if (rule.kind === "password or secret")
+    return /[^A-Za-z\uAC00-\uD7A3]/.test(value);
+  return true;
+};
+function findSecrets(fields) {
+  const found = [];
+  for (const [field, text] of Object.entries(fields)) {
+    if (!text)
+      continue;
+    for (const rule of RULES)
+      for (const m of text.matchAll(rule.re)) {
+        const value = m[rule.value ?? 0] ?? m[0];
+        if (!looksLikeSecret(rule, value))
+          continue;
+        found.push({ kind: rule.kind, field, preview: `${value.slice(0, 4)}\u2026` });
+      }
+  }
+  return found;
+}
+function assertNoSecrets(fields) {
+  const found = findSecrets(fields);
+  if (!found.length)
+    return;
+  const what = [...new Set(found.map((f) => `${f.kind} in ${f.field} ("${f.preview}")`))].join(", ");
+  throw new Error(`nothing was sent: this looks like it contains a secret (${what}). Remove it or replace it with a placeholder such as <redacted>. If the other side really needs it, tell your human; humans share secrets their own way, never through coworker.`);
+}
+
+// src/linklog.ts
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from "fs";
+import { dirname } from "path";
+var MAX_BYTES = 1 << 20;
+var MAX_LOG_LINES = 300;
+
+class LinkLog {
+  path;
+  constructor(path) {
+    this.path = path;
+  }
+  write(event, fields = {}) {
+    if (!this.path)
+      return;
+    try {
+      mkdirSync(dirname(this.path), { recursive: true, mode: 448 });
+      if (existsSync(this.path) && statSync(this.path).size > MAX_BYTES)
+        renameSync(this.path, `${this.path}.1`);
+      appendFileSync(this.path, `${JSON.stringify({ at: new Date().toISOString(), event, ...fields })}
+`, { mode: 384 });
+    } catch {}
+  }
+  read(options = {}) {
+    if (!this.path)
+      return [];
+    const lines = Math.min(Math.max(options.lines ?? 100, 1), MAX_LOG_LINES);
+    const entries = [];
+    for (const file of [`${this.path}.1`, this.path]) {
+      let text = "";
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+      for (const line of text.split(`
+`)) {
+        if (!line)
+          continue;
+        try {
+          const e = JSON.parse(line);
+          if (!options.id || !e.id || e.id === options.id)
+            entries.push(e);
+        } catch {}
+      }
+    }
+    return entries.slice(-lines);
+  }
+}
+
+// src/outside.ts
+import { realpathSync } from "fs";
+import { homedir, hostname as hostname2, networkInterfaces as networkInterfaces2, platform as platform2, userInfo } from "os";
+import { basename } from "path";
+var PRIVATE_OR_VPN_IPV4 = /(?<![\d.])(?:10(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}|192\.168(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2})(?![\d.])/;
+var COMMON_SHORT_WORDS = new Set(["user", "root", "test", "main", "code", "node", "work", "home", "info", "admin", "dev"]);
+var escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function scutilGet(key) {
+  if (platform2() !== "darwin")
+    return;
+  try {
+    const out = Bun.spawnSync(["scutil", "--get", key]);
+    if (out.exitCode !== 0)
+      return;
+    return out.stdout.toString().trim() || undefined;
+  } catch {
+    return;
+  }
+}
+function pathVariants(dir) {
+  const raw = dir?.trim();
+  if (!raw || raw.includes("${"))
+    return [];
+  const candidates = new Set([raw]);
+  try {
+    candidates.add(realpathSync(raw));
+  } catch {}
+  const out = [];
+  for (const c of candidates) {
+    const clean = c.replace(/[\\/]+$/, "");
+    if (clean.length < 4 || clean === "/" || /^[A-Za-z]:$/.test(clean))
+      continue;
+    out.push(clean);
+    if (clean.includes("\\"))
+      out.push(clean.replace(/\\/g, "/"));
+  }
+  return [...new Set(out)];
+}
+var cachedHostMarks;
+function baseMarks() {
+  if (cachedHostMarks)
+    return cachedHostMarks;
+  const marks = [];
+  const seen = new Set;
+  const addSubstring = (kind, value) => {
+    const v = value?.trim();
+    if (!v || v.length < 2)
+      return;
+    const lower = v.toLowerCase();
+    const key = `${kind}:${lower}`;
+    if (seen.has(key))
+      return;
+    seen.add(key);
+    marks.push({ kind, test: (text) => text.toLowerCase().includes(lower) });
+  };
+  const names = new Set;
+  const addName = (n) => {
+    const v = n?.trim();
+    if (!v || v.toLowerCase() === "localhost")
+      return;
+    names.add(v);
+    if (v.includes("\u2019"))
+      names.add(v.replace(/\u2019/g, "'"));
+  };
+  const host = hostname2();
+  const short = shortHostname();
+  addName(host);
+  addName(short);
+  if (short && short.toLowerCase() !== "localhost")
+    names.add(`${short}.local`);
+  for (const key of ["LocalHostName", "ComputerName", "HostName"]) {
+    const v = scutilGet(key);
+    addName(v);
+    if (v && key === "LocalHostName")
+      names.add(`${v}.local`);
+  }
+  if (platform2() === "linux" && host && host.toLowerCase() !== "localhost")
+    names.add(`${host}.local`);
+  if (platform2() === "win32")
+    addName(process.env.COMPUTERNAME);
+  for (const n of names) {
+    if (n.length <= 3) {
+      const re = new RegExp(`(?<![A-Za-z0-9])${escapeRegex(n)}(?![A-Za-z0-9])`, "i");
+      marks.push({ kind: "computer name", test: (text) => re.test(text) });
+    } else {
+      addSubstring("computer name", n);
+    }
+  }
+  for (const p of pathVariants(homedir()))
+    addSubstring("home folder path", p);
+  const accounts = new Set;
+  try {
+    if (userInfo().username)
+      accounts.add(userInfo().username.trim());
+  } catch {}
+  for (const envUser of [process.env.USER, process.env.USERNAME, basename(homedir())]) {
+    if (envUser?.trim())
+      accounts.add(envUser.trim());
+  }
+  for (const u of accounts) {
+    if (!u || u.length < 2)
+      continue;
+    const lower = u.toLowerCase();
+    const pathRe = new RegExp(`(?:[/\\\\](?:Users|home)[/\\\\]|~)${escapeRegex(u)}(?=$|[/\\\\\\s"'\`:,;)])`, "i");
+    marks.push({ kind: "account name", test: (text) => pathRe.test(text) });
+    if (COMMON_SHORT_WORDS.has(lower))
+      continue;
+    if (u.length >= 5) {
+      addSubstring("account name", u);
+    } else {
+      const tokenRe = new RegExp(`(?<![A-Za-z0-9])${escapeRegex(u)}(?![A-Za-z0-9])`, "i");
+      marks.push({ kind: "account name", test: (text) => tokenRe.test(text) });
+    }
+  }
+  for (const list of Object.values(networkInterfaces2())) {
+    for (const nic of list ?? []) {
+      if (nic.internal)
+        continue;
+      const addr = nic.address.trim();
+      if (!addr)
+        continue;
+      const bare = addr.split("%")[0];
+      if (bare.includes(":")) {
+        addSubstring("internal or VPN address", addr);
+        addSubstring("internal or VPN address", bare);
+      } else {
+        const re = new RegExp(`(?<![\\d.])${escapeRegex(bare)}(?![\\d.])`);
+        marks.push({ kind: "internal or VPN address", test: (text) => re.test(text) });
+      }
+    }
+  }
+  marks.push({ kind: "internal or VPN address", test: (text) => PRIVATE_OR_VPN_IPV4.test(text) });
+  cachedHostMarks = marks;
+  return marks;
+}
+function workingDirSafe() {
+  try {
+    return process.cwd();
+  } catch {
+    return;
+  }
+}
+function findComputerInfo(fields, extraDirs = []) {
+  const dirs = new Set;
+  for (const d of [workingDirSafe(), process.env.PWD, process.env.COWORKER_PROJECT_DIR, ...extraDirs]) {
+    for (const v of pathVariants(d))
+      dirs.add(v.toLowerCase());
+  }
+  const dirList = [...dirs];
+  const marks = [
+    ...baseMarks(),
+    ...dirList.map((d) => ({ kind: "project folder path", test: (text) => text.toLowerCase().includes(d) }))
+  ];
+  const found = [];
+  for (const [field, text] of Object.entries(fields)) {
+    if (!text)
+      continue;
+    const plain = text.normalize("NFKC");
+    for (const m of marks) {
+      if (m.test(text) || plain !== text && m.test(plain))
+        found.push({ kind: m.kind, field });
+    }
+  }
+  return found;
+}
+function utf8Text(bytes) {
+  if (bytes.includes(0))
+    return;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return;
+  }
+}
+function assertNoComputerInfo(fields, extraDirs = []) {
+  const found = findComputerInfo(fields, extraDirs);
+  if (!found.length)
+    return;
+  const what = [...new Set(found.map((f) => `${f.kind} in ${f.field}`))].slice(0, 8).join(", ");
+  throw new Error(`nothing was sent: this session is connected through an outside code, and the content holds information about this computer (${what}). Remove it, and write file references as paths relative to the project instead of full paths on this PC.`);
+}
+function relayPortOf(relayUrl) {
+  try {
+    const u = new URL(relayUrl);
+    const port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+    return Number.isInteger(port) && port > 0 && port < 65536 ? port : 443;
+  } catch {
+    return 443;
+  }
+}
+function outsideRelayError(relay, state) {
+  if (!relay)
+    return "cannot open a bridge for outsiders without a relay: set a relay server URL first (in Claude Code: /plugin configure coworker@ai-coworker-without-me -> Relay server, or set COWORKER_RELAY=https://relay.example.com, and Relay key / COWORKER_RELAY_KEY if the relay uses a key), then restart this session";
+  if (typeof state === "object" && /relay key/i.test(state.error))
+    return `cannot open a bridge for outsiders: ${state.error}. Set Relay key in /plugin configure coworker@ai-coworker-without-me or COWORKER_RELAY_KEY to the key from whoever runs the relay, then restart this session`;
+  const detail = typeof state === "object" ? state.error : "the relay did not answer in time";
+  return `cannot open a bridge for outsiders: the relay ${relay} is not answering as a coworker relay (${detail}). Check that COWORKER_RELAY (or Relay server in /plugin configure coworker@ai-coworker-without-me) points to a running coworker relay (${relay}/healthz should answer "coworker relay") and set COWORKER_RELAY_KEY if it uses a key`;
+}
+
+// src/bridge.ts
+var DEFAULT_PORTS = [7700, 7799];
+function parsePorts(text) {
+  if (!text?.trim())
+    return DEFAULT_PORTS;
+  const m = text.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+  const min = Number(m?.[1]);
+  const max = Number(m?.[2] ?? m?.[1]);
+  if (!m || min < 1024 || max > 65535 || min > max)
+    throw new Error(`COWORKER_PORTS must look like "9000-9010" or "9000", between 1024 and 65535 (got "${text}")`);
+  return [min, max];
+}
+var routeId = (key) => Buffer.from(key, "base64").toString("base64url").slice(0, 16);
+var peerId = (key) => routeId(key).slice(0, 6);
+var labelOf = (p) => `${p.name} [${peerId(p.key)}]`;
+var CLOCK_FIX = "Messages are kept and sent once the clocks agree. Turn on automatic date and time on this PC and ask the coworker to do the same (macOS: System Settings > General > Date & Time; Windows: Settings > Time & language > Date & time > Set time automatically).";
+var isLoopback = (addr) => addr.startsWith("127.") || addr === "::1" || addr === "localhost";
+var isRelayAddr = (addr) => /^https?:\/\//.test(addr);
+var isOutsideCode = (code) => code.outside === true && code.addrs.every(isRelayAddr);
+var LINK_ERRORS = {
+  no_route: "no route to it: it is asleep, turned off, or on another network",
+  refused: "its computer answered, but no bridge is listening on that port: coworker there is restarting or stopped",
+  cut: "the connection was cut while it was open: coworker there stopped, or the network dropped",
+  timeout: "no answer in time",
+  not_recognized: "its bridge answered but does not know this session; this side keeps offering the code it joined with",
+  bad_answer: "an answer came back that could not be read",
+  clock: "its bridge answered, but the clocks of the two PCs differ by more than two hours, so neither side takes the other's messages. Turn on automatic date and time on both PCs"
+};
+var MAX_ABOUT = 60;
+function cleanAbout(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const out = {};
+  for (const key of ["app", "model", "effort"]) {
+    const v = value[key];
+    if (typeof v !== "string")
+      continue;
+    const text = v.replace(/\s+/g, " ").trim().slice(0, MAX_ABOUT);
+    if (text)
+      out[key] = text;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+var KINDS = ["question", "answer", "note", "closed", "agreement"];
+var EVERYONE = ["everyone", "all"];
+var FILE_CHUNK = 256 * 1024;
+var MAX_FILE_BYTES = 10 * 1024 * 1024;
+var MAX_FILES = 10;
+var MAX_FILES_BYTES = 30 * 1024 * 1024;
+var BATCH_BYTES = 600 * 1024;
+var CAN = ["files", "refusals"];
+var OUTSIDE_LIMITS = {
+  sessions: 5,
+  conversations: 20,
+  messages: 200,
+  messageBytes: 64 * 1024,
+  totalBytes: 2 * 1024 * 1024,
+  fileBytes: 20 * 1024 * 1024
+};
+function outsideLimitsFrom(env) {
+  const read = (name, unit = 1) => {
+    const n = Number(env[name]);
+    return env[name]?.trim() && Number.isFinite(n) && n >= 0 ? Math.floor(n * unit) : undefined;
+  };
+  const out = {
+    sessions: read("COWORKER_OUTSIDE_MAX_SESSIONS"),
+    conversations: read("COWORKER_OUTSIDE_MAX_CONVERSATIONS"),
+    messages: read("COWORKER_OUTSIDE_MAX_MESSAGES"),
+    messageBytes: read("COWORKER_OUTSIDE_MAX_MESSAGE_KB", 1024),
+    totalBytes: read("COWORKER_OUTSIDE_MAX_TOTAL_MB", 1024 * 1024),
+    fileBytes: read("COWORKER_OUTSIDE_MAX_FILES_MB", 1024 * 1024)
+  };
+  for (const k of Object.keys(out))
+    if (out[k] === undefined)
+      delete out[k];
+  return out;
+}
+var OUTSIDE_ONLY = "this bridge was opened for outside sessions only, and it stays that way until it is closed: it listens on this computer only and makes outside codes only. Nothing was changed. For a code for a colleague, use another session, or close this bridge with close_bridge first (that ends its connections) and open a new one";
+var MAX_ID = 100;
+var cleanCan = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.length <= 20).slice(0, 20) : undefined;
+var FILE_PROBLEM = {
+  incomplete: "the file did not arrive completely",
+  size: "the size differs from what the sender said",
+  sha256: "the sha256 differs from what the sender said",
+  limit: "the files of this message are over the size limit",
+  no_folder: "this session has no folder to save files in",
+  refused: "the receiving session does not take this file: it takes no files from an outside session, or the quota for them is used up"
+};
+var FILE_ID = /^[A-Za-z0-9-]{8,64}$/;
+var SHA256 = /^[0-9a-f]{64}$/;
+var THREAD_ID2 = /^[0-9a-f]{8}$/;
+var isThreadId = (value) => typeof value === "string" && value.length === 8 && THREAD_ID2.test(value);
+var WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+function pathInside(folder, name) {
+  if (!folder || !name || name === "." || name === "..")
+    return;
+  if (name.includes("/") || name.includes("\\") || name.includes("\x00") || name.includes(":"))
+    return;
+  if (basename2(name) !== name)
+    return;
+  const base = resolve(folder);
+  const full = resolve(base, name);
+  const rel = relative(base, full);
+  if (!rel || rel !== name || rel.startsWith("..") || isAbsolute(rel) || dirname2(full) !== base)
+    return;
+  return full;
+}
+var SECRET_FILE = /^(?:\.env(?:\..*)?|\.netrc|\.npmrc|\.pypirc|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|.*\.(?:pem|key|p12|pfx|jks|keystore|kdbx))$/i;
+function safeFileName(name) {
+  const base = String(name ?? "").split(/[\\/]/).pop() ?? "";
+  const clean = base.replace(/[\x00-\x1f\x7f<>:"|?*]/g, "_").replace(/^\.+/, "").trim().slice(0, 150).replace(/[. ]+$/, "");
+  if (!clean)
+    return "file";
+  return WINDOWS_RESERVED.test(clean) ? `_${clean}`.slice(0, 150).replace(/[. ]+$/, "") : clean;
+}
+function freePath(folder, name) {
+  const clean = safeFileName(name);
+  const ext = extname(clean), stem = clean.slice(0, clean.length - ext.length);
+  let path = pathInside(folder, clean);
+  for (let n = 2;path && existsSync2(path); n++)
+    path = pathInside(folder, `${stem} (${n})${ext}`);
+  return path;
+}
+var DEFERS_TO_HUMAN = [
+  /(\uC0AC\uB78C|\uB2F4\uB2F9\uC790?|\uCC45\uC784\uC790|\uD300\uC7A5|\uC0C1\uC0AC|\uAD00\uB9AC\uC790|\uBCF4\uC548\s*\uB2F4\uB2F9|\uC717\uC120|\uACB0\uC7AC\uAD8C\uC790|\uC0AC\uC6A9\uC790|\uC8FC\uC778)(\uC5D0\uAC8C|\uAED8|\uD55C\uD14C|\uCABD\uC5D0|\uBD84\uAED8)\s*(\uC62C\uB838|\uC62C\uB9AC|\uB118\uACBC|\uB118\uAE30|\uC804\uB2EC|\uC5EC\uCB64|\uBB3C\uC5B4|\uBB3B|\uD655\uC778\s*\uC694\uCCAD|\uBCF4\uACE0)/,
+  /(\uD655\uC778|\uACB0\uC815|\uAC80\uD1A0|\uC2B9\uC778|\uB17C\uC758)\s*(\uD6C4|\uB418\uBA74|\uB418\uB294\s*\uB300\uB85C|\uD558\uACE0\s*\uB098\uC11C|\uBC1B\uB294\s*\uB300\uB85C|\uBC1B\uC73C\uBA74)[^.\n]{0,20}(\uC54C\uB824|\uC54C\uB9AC|\uD68C\uC2E0|\uB2F5|\uC5F0\uB77D|\uACF5\uC720)/,
+  /(\uC815\uD574\uC9C0\uBA74|\uC815\uD574\uC9C0\uB294\s*\uB300\uB85C|\uACB0\uC815\uB418\uBA74|\uB2F5\uC774\s*\uC624\uBA74|\uD68C\uC2E0\uC774\s*\uC624\uBA74|\uB2F5\uC744\s*\uBC1B\uC73C\uBA74)[^.\n]{0,20}(\uC54C\uB824|\uC54C\uB9AC|\uD68C\uC2E0|\uB2F5|\uC5F0\uB77D|\uACF5\uC720)/,
+  /\b(ask(ed|ing)?|check(ed|ing)? with|run (it|this) by|escalat\w*|pass(ed|ing)? (it|this) to|forward(ed|ing)? (it|this) to)\b[^.\n]{0,30}\b(my|our|the) (human|owner|user|manager|lead|team|boss|security)/i,
+  /\b(get back to you|let you know)\b[^.\n]{0,30}\b(once|when|after|as soon as)\b/i
+];
+var defersToHuman = (text) => DEFERS_TO_HUMAN.some((r) => r.test(text));
+var MAX_CATEGORY = 30;
+function cleanCategory(value) {
+  if (typeof value !== "string")
+    return;
+  return value.replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY) || undefined;
+}
+var NO_ANSWER_TEXT = [
+  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294|\uC744|\uC774|\uB3C4)?\s*(?:\uD558\uC2E4|\uD560|\uC8FC\uC2E4|\uC904)?\s*\uD544\uC694(?:(?:\uB294|\uAC00|\uB3C4)?\s*\uC5C6(?!\uC73C\uBA74|\uB2E4\uBA74|\uB2E4\uACE0|\uB2E4\uB294|\uB2E4\uBA70|\uB2E4\uB358|\uB294\uC9C0|\uC744\uC9C0|\uB098\uC694|\uC2B5\uB2C8\uAE4C|\uC5C8|\uC9C0\s*\uC54A|\uB294\s*(?:\uAC74|\uAC83\uC740|\uAC83\uC774|\uAC8C)\s*\uC544\uB2C8)|\uD558\uC9C0\s*\uC54A(?:\uC2B5\uB2C8\uB2E4|\uC544\uC694|\uC74C|\uB2E4(?![\uACE0\uB294\uBA70\uB358\uBA74])))/,
+  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294)?\s*\uBD88\uD544\uC694(?!\uD55C\uC9C0|\uD558\uBA74|\uD558\uB2E4\uBA74)/,
+  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294|\uC744)?\s*(?:\uC548\s*(?:\uD558\uC154|\uD574|\uC8FC\uC154|\uC918)\uB3C4|(?:\uD558|\uC8FC)\uC2DC?\uC9C0\s*\uC54A(?:\uC73C\uC154|\uC544)\uB3C4)\s*(?:\uB429|\uB3FC|\uAD1C\uCC2E|\uB418(?!\uB098|\uB294\uC9C0|\uB290\uB0D0|\uB0D0|\uACA0\uC2B5\uB2C8\uAE4C|\uACA0\uC5B4\uC694|\uACA0\uC8E0))/,
+  /(?<!\b(?:if|whether)\s)\bno\s+(?:reply|answer)\s+(?:is\s+)?(?:needed|required|necessary|expected)\b/i,
+  /\bno\s+need\s+to\s+(?:reply|answer|respond)\b/i,
+  /\b(?:do(?:es)?\s+not|don['\u2019]?t|doesn['\u2019]?t)\s+need\s+(?:to\s+)?(?:an?\s+|any\s+)?(?:reply|answer)\b/i,
+  /\bneed(?:n['\u2019]?t|\s+not)\s+(?:reply|answer)\b/i
+];
+var ASKS = /[?\uFF1F](?![A-Za-z0-9_%=&-])/;
+function saysNoAnswer(text) {
+  return typeof text === "string" && !ASKS.test(text) && NO_ANSWER_TEXT.some((re) => re.test(text));
+}
+function openQuestion(thread) {
+  for (let i = thread.messages.length - 1;i >= 0; i--) {
+    const m = thread.messages[i];
+    if (m.kind === "question")
+      return m;
+    if (m.kind === "answer")
+      return;
+  }
+  return;
+}
+var wireFiles = (files) => files.length ? { files: files.map(({ id, name, size, sha256 }) => ({ id, name, size, sha256 })) } : {};
+var sentFiles = (files) => files.length ? { files: files.map(({ name, size, sha256 }) => ({ name, size, sha256 })) } : {};
+var seenFile = (f) => ({ name: f.name, size: f.size, sha256: f.sha256, ...f.path ? { saved_to: f.path } : {}, verified: f.ok === true, ...f.problem ? { problem: FILE_PROBLEM[f.problem] } : {} });
+
+class DeliveryError extends Error {
+  reason;
+  constructor(reason, message) {
+    super(message);
+    this.reason = reason;
+  }
+}
+function isSavedBridge(v) {
+  const s = v;
+  return !!s && s.v === 1 && typeof s.name === "string" && (s.outsideName === undefined || typeof s.outsideName === "string") && (s.outsideOnly === undefined || typeof s.outsideOnly === "boolean") && (s.outsideFiles === undefined || typeof s.outsideFiles === "boolean") && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && (s.used === undefined || Array.isArray(s.used)) && (s.ended === undefined || Array.isArray(s.ended)) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && (s.viewer === undefined || !!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === "string") && (s.asking === undefined || Array.isArray(s.asking) && s.asking.every(isHumanQuestion)) && typeof s.savedAt === "string";
+}
+function isHumanQuestion(v) {
+  const q = v;
+  return !!q && typeof q.thread === "string" && typeof q.question === "string" && Array.isArray(q.options) && q.options.every((o) => typeof o === "string");
+}
+var now = () => new Date().toISOString();
+var AGREEMENT_NOT_SAVED = "this agreement was shown but could not be saved as a file on this PC. Tell your human, and keep its text another way if it is needed later";
+var NO_PEERS = "no connected session yet; open the bridge and exchange a connection code first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result";
+var POLL_FRESH_MS = 60000;
+var firstLine = (text) => text.trim().split(`
+`)[0].slice(0, 80);
+var counted = (t) => t.messages.filter((m) => m.kind === "question" || m.kind === "answer").length;
+var memberOf = (p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port });
+var MAX_NAME = 200;
+var MAX_ADDRS = 32;
+var isHelloFields = (p) => typeof p.name === "string" && Array.isArray(p.addrs) && p.addrs.length <= MAX_ADDRS && p.addrs.every((a) => typeof a === "string" && a.length > 0 && a.length <= 300) && Number.isInteger(p.port) && p.port > 0 && p.port < 65536;
+var isMember = (m) => {
+  const v = m;
+  return !!v && typeof v.key === "string" && isHelloFields(v);
+};
+var isAskInfo = (a) => {
+  const v = a;
+  return !!v && typeof v.id === "string" && Array.isArray(v.to) && v.to.every((n) => typeof n === "string") && (v.answers === "all" || v.answers === "one");
+};
+var placeOf = (addr, port) => isRelayAddr(addr) ? `${new URL(addr).host} (relay)` : `${hostForUrl(addr)}:${port}`;
+var whereIs = (p) => {
+  const addr = p.lastAddr ?? p.addrs[0];
+  return addr ? placeOf(addr, p.port) : undefined;
+};
+var detailOf = (e) => {
+  const err = e;
+  const name = err?.name === "TimeoutError" || err?.name === "AbortError" ? err.name : undefined;
+  return String(name ?? err?.code ?? err?.name ?? err?.message ?? e).slice(0, 120);
+};
+var isToken = (t) => typeof t === "string" && t.length > 0 && t.length <= 200;
+var cleanReason = (r) => (typeof r === "string" ? r.replace(/\s+/g, " ").trim().slice(0, 300) : "") || "no reason was given";
+
+class RefusedError extends Error {
+}
+var linkErrorOf = (e) => {
+  const err = e;
+  if (err?.name === "TimeoutError")
+    return "timeout";
+  if (err?.code === "ECONNREFUSED" || err?.code === "ConnectionRefused")
+    return "refused";
+  if (err?.code === "ECONNRESET" || err?.code === "EPIPE" || err?.code === "ECONNABORTED" || err?.code === "ConnectionClosed")
+    return "cut";
+  return "no_route";
+};
+var isoOf = (ms) => ms ? new Date(ms).toISOString() : undefined;
+var MAX_USED = 500;
+var MAX_ENDED = 20;
+var savedPeer = (p) => ({
+  key: p.key,
+  name: p.name,
+  about: p.about,
+  can: p.can,
+  addrs: p.addrs,
+  port: p.port,
+  private: p.private || undefined,
+  outside: p.outside || undefined,
+  host: p.host || undefined,
+  lastSeen: p.lastSeen,
+  token: p.token,
+  given: p.given
+});
+var TICK_MS = 5000;
+var PAUSE_MS = 30000;
+
+class Bridge {
+  keys;
+  about;
+  key;
+  route;
+  name;
+  outsideName;
+  projectDir;
+  outsideOnly = false;
+  outsideFiles = false;
+  limits;
+  kept = new Map;
+  counts = new Map;
+  partialSizes = new Map;
+  toldLimit = new Set;
+  port = 0;
+  peers = new Map;
+  threads = new Map;
+  server;
+  timer;
+  tokens = new Map;
+  used = new Map;
+  ended = [];
+  retryWakers = new Map;
+  log;
+  ticker;
+  stopReason;
+  rejoinTried = new Map;
+  down = new Map;
+  addedAt = new Map;
+  invites = new Map;
+  closedAsks = new Map;
+  seen = new Set;
+  replay;
+  clockOff = new Map;
+  outbox = [];
+  events = [];
+  waiters = [];
+  onEvent;
+  onMoved;
+  watchers = new Set;
+  viewerAddress;
+  asking = new Map;
+  lastWaitPing = 0;
+  onSlow;
+  waiting = 0;
+  flushing = false;
+  lastCode;
+  polling = new Set;
+  pollWaiters = new Map;
+  abort = new AbortController;
+  relaySecret;
+  relayBox;
+  keptRelaySecret;
+  relayState = "off";
+  relayWaiters = [];
+  saveTimer;
+  forget = false;
+  opts;
+  constructor(options) {
+    this.keys = options.keys ?? newKeyPair();
+    this.replay = new ReplayGuard(undefined, options.clock);
+    this.key = toB64(this.keys.publicKey);
+    this.route = routeId(this.key);
+    this.name = options.name;
+    this.outsideName = options.outsideName;
+    this.outsideOnly = !!options.outsideOnly;
+    this.outsideFiles = !!options.outsideFiles;
+    this.limits = { ...OUTSIDE_LIMITS, ...options.outsideLimits };
+    this.projectDir = options.projectDir;
+    this.opts = {
+      ports: DEFAULT_PORTS,
+      addrs: localAddresses,
+      retryMs: 3000,
+      maxRetryMs: 30000,
+      tokenTtlMs: 60 * 60000,
+      connectTimeoutMs: 2000,
+      pollWaitMs: 20000,
+      relayTimeoutMs: 15000,
+      nudgeMs: 30 * 60000,
+      tickMs: TICK_MS,
+      ...options,
+      relay: options.relay?.trim().replace(/\/+$/, "") || undefined
+    };
+    const logsDir = this.opts.home ? pathInside(this.opts.home, "logs") : undefined;
+    this.log = new LinkLog(logsDir ? pathInside(logsDir, `${this.route}.log`) : undefined);
+  }
+  static restore(saved, options) {
+    const b = new Bridge({
+      ...options,
+      name: saved.name,
+      outsideName: saved.outsideName ?? options.outsideName,
+      outsideOnly: saved.outsideOnly ?? options.outsideOnly,
+      outsideFiles: saved.outsideFiles ?? options.outsideFiles,
+      keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) }
+    });
+    b.about = cleanAbout(saved.about);
+    for (const p of saved.peers)
+      b.peers.set(p.key, {
+        key: p.key,
+        name: p.name,
+        about: cleanAbout(p.about),
+        can: cleanCan(p.can),
+        addrs: p.outside && !p.host ? [] : p.addrs,
+        port: p.port,
+        private: p.private || p.outside || undefined,
+        outside: p.outside || undefined,
+        host: p.outside && p.host || undefined,
+        directFailed: p.outside && !p.host ? true : undefined,
+        lastSeen: typeof p.lastSeen === "number" ? p.lastSeen : undefined,
+        token: isToken(p.token) ? p.token : undefined,
+        given: isToken(p.given) ? p.given : undefined
+      });
+    for (const t of saved.threads)
+      if (t && isThreadId(t.id))
+        b.threads.set(t.id, t);
+    for (const t of b.threads.values())
+      for (const m of t.messages ?? [])
+        if (m.kind === "question" && !m.noAnswer && saysNoAnswer(m.text))
+          m.noAnswer = true;
+    b.outbox = saved.outbox.filter((o) => b.peers.has(o.peer));
+    for (const t of saved.tokens)
+      b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private || !!t.outside, outside: t.outside || undefined });
+    for (const u of saved.used ?? [])
+      if (typeof u?.token === "string" && typeof u.key === "string")
+        b.used.set(u.token, { key: u.key, private: !!u.private || !!u.outside, outside: u.outside || undefined });
+    b.ended = (saved.ended ?? []).filter((e) => typeof e?.name === "string" && typeof e.id === "string");
+    b.seen = new Set(saved.seen);
+    b.closedAsks = new Map(saved.closedAsks);
+    b.events = (saved.events ?? []).filter((e) => e.type !== "moved");
+    b.viewerAddress = saved.viewer;
+    if (isToken(saved.relaySecret))
+      b.keptRelaySecret = saved.relaySecret;
+    for (const q of saved.asking ?? [])
+      if (q && isThreadId(q.thread))
+        b.asking.set(q.thread, q);
+    try {
+      b.open(saved.port, { outsideOnly: b.outsideOnly });
+    } catch {
+      b.open(undefined, { outsideOnly: b.outsideOnly });
+    }
+    b.log.write("restored", { name: b.outsideOnly ? b.nameFor(true) : b.name, peers: b.peers.size, queued: b.outbox.length });
+    for (const peer of b.peers.values()) {
+      b.greet(peer, { back: true });
+      b.pollLoop(peer.key);
+    }
+    return b;
+  }
+  static async askToMove(saved) {
+    const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) };
+    try {
+      const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(seal({ type: "handover" }, keys.publicKey, keys)),
+        signal: AbortSignal.timeout(5000)
+      });
+      if (!res.ok)
+        return false;
+      return open(await res.json(), keys)?.type === "handover_ok";
+    } catch {
+      return false;
+    }
+  }
+  persist() {
+    this.save();
+  }
+  snapshot() {
+    return {
+      v: 1,
+      name: this.name,
+      outsideName: this.outsideName,
+      outsideOnly: this.outsideOnly || undefined,
+      outsideFiles: this.outsideFiles || undefined,
+      publicKey: toB64(this.keys.publicKey),
+      secretKey: toB64(this.keys.secretKey),
+      port: this.port,
+      about: this.about,
+      peers: [...this.peers.values()].map(savedPeer),
+      threads: [...this.threads.values()],
+      outbox: this.outbox,
+      tokens: [...this.tokens].filter(([, t]) => t.expires > Date.now()).map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private, outside: t.outside || undefined })),
+      used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private, outside: u.outside || undefined })),
+      ended: this.ended,
+      relaySecret: this.keptRelaySecret,
+      seen: [...this.seen].slice(-2000),
+      closedAsks: [...this.closedAsks],
+      events: this.events,
+      viewer: this.viewerAddress,
+      asking: [...this.asking.values()],
+      pid: process.pid,
+      savedAt: now()
+    };
+  }
+  get isOpen() {
+    return !!this.server;
+  }
+  get isOutsideOnly() {
+    return this.outsideOnly;
+  }
+  relayAddr() {
+    return this.opts.relay && this.relayBox ? `${this.opts.relay}/v1/box/${this.relayBox}` : undefined;
+  }
+  nameFor(outsideOrPeer) {
+    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
+    if (!out)
+      return this.name;
+    const name = this.outsideName ? this.outsideName : this.about?.app ? this.about.app : this.name.includes(" @ ") ? this.name.replace(/\s*@\s*.*$/, "").replace(/^.*\u00B7\s*/, "").trim() || "coworker" : this.name;
+    return findComputerInfo({ name }, [this.projectDir]).length ? "coworker" : name;
+  }
+  aboutFor(peer) {
+    if (!peer?.outside || !this.about)
+      return this.about;
+    const out = {};
+    for (const k of ["app", "model", "effort"])
+      if (this.about[k] && !findComputerInfo({ [k]: this.about[k] }, [this.projectDir]).length)
+        out[k] = this.about[k];
+    return Object.keys(out).length ? out : undefined;
+  }
+  canFor(peer) {
+    return peer?.outside && !peer.host && !this.outsideFiles ? CAN.filter((c) => c !== "files") : CAN;
+  }
+  joinedOutside() {
+    return [...this.peers.values()].filter((p) => p.outside && !p.host);
+  }
+  facesOutside() {
+    return this.outsideOnly || [...this.peers.values()].some((p) => p.outside) || [...this.tokens.values()].some((t) => t.outside && t.expires > Date.now());
+  }
+  allowOutsideFiles() {
+    if (this.outsideFiles)
+      return;
+    this.outsideFiles = true;
+    this.dirty();
+    for (const peer of this.joinedOutside())
+      this.greet(peer);
+  }
+  get takesOutsideFiles() {
+    return this.outsideFiles;
+  }
+  addrsFor(outsideOrPeer) {
+    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
+    if (!out)
+      return this.addrs();
+    const box = this.relayAddr();
+    return box ? [box] : [];
+  }
+  portFor(outsideOrPeer) {
+    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
+    if (!out)
+      return this.port;
+    return this.opts.relay ? relayPortOf(this.opts.relay) : 443;
+  }
+  assertOutsideSafe(fields) {
+    assertNoComputerInfo(fields, [this.projectDir]);
+  }
+  addrs() {
+    const box = this.relayAddr();
+    const relay = box ? [box] : [];
+    if (this.outsideOnly)
+      return relay;
+    return [...this.opts.addrs(), ...relay];
+  }
+  open(port, options) {
+    if (this.server) {
+      if (options?.outsideOnly === false && this.outsideOnly)
+        throw new Error(OUTSIDE_ONLY);
+      if (port && port !== this.port && !this.outsideOnly)
+        throw new Error(`bridge is already open on port ${this.port}`);
+      return;
+    }
+    if (options?.outsideOnly !== undefined)
+      this.outsideOnly = options.outsideOnly;
+    const bindHost = this.outsideOnly ? "127.0.0.1" : "0.0.0.0";
+    if (this.outsideOnly) {
+      if (!this.listen(0, bindHost))
+        throw new Error("cannot listen on this computer (127.0.0.1)");
+    } else if (port) {
+      if (!this.listen(port, bindHost))
+        throw new Error(`port ${port} is already in use; pick another port or leave it empty`);
+    } else {
+      const [min, max] = this.opts.ports;
+      for (let p = min;p <= max && !this.server; p++)
+        this.listen(p, bindHost);
+      if (!this.server)
+        throw new Error(`no free port between ${min} and ${max}`);
+    }
+    this.abort = new AbortController;
+    if (this.opts.relay) {
+      this.relaySecret = this.keptRelaySecret ?? randomToken();
+      this.keptRelaySecret = this.relaySecret;
+      this.relayBox = boxOf(this.relaySecret);
+      this.relayState = "connecting";
+      this.relayLoop();
+    }
+    this.timer = setInterval(() => {
+      this.flush();
+      this.tryInvites();
+    }, this.opts.retryMs);
+    this.timer.unref?.();
+    this.log.write("open", this.outsideOnly ? { name: this.nameFor(true), relay: this.opts.relay } : { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay });
+    this.watchThisPc();
+    this.writeState();
+    this.changed();
+    this.save();
+  }
+  newCode(options = {}) {
+    if (options.outside) {
+      if (!this.opts.relay)
+        throw new Error(outsideRelayError(undefined, "off"));
+      if (!this.server || this.relayState !== "ok" || !this.relayBox)
+        throw new Error(outsideRelayError(this.opts.relay, this.relayState));
+      const shownName = this.outsideName ?? this.nameFor(true);
+      this.assertOutsideSafe({ name: shownName, ...this.about });
+      const token = randomToken();
+      const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs;
+      this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: true, outside: true });
+      this.lastCode = encodeCode({ v: 1, name: shownName, addrs: this.addrsFor(true), port: this.portFor(true), key: this.key, token, outside: true });
+      this.writeState();
+      this.dirty();
+      return this.lastCode;
+    }
+    if (this.server && this.outsideOnly)
+      throw new Error(OUTSIDE_ONLY);
+    this.open(undefined, { outsideOnly: false });
+    const token = randomToken();
+    const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs;
+    this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: !!options.private });
+    this.lastCode = encodeCode({ v: 1, name: this.name, addrs: this.addrs(), port: this.port, key: this.key, token });
+    this.writeState();
+    this.dirty();
+    return this.lastCode;
+  }
+  async connect(codeText) {
+    const code = decodeCode(codeText);
+    if (code.key === this.key)
+      throw new Error("that is this session's own code; give it to your coworker instead");
+    const outside = isOutsideCode(code);
+    if (this.server && this.outsideOnly && !outside)
+      throw new Error(OUTSIDE_ONLY);
+    if (outside)
+      this.assertOutsideSafe({ name: this.outsideName ?? this.nameFor(true), ...this.about });
+    if (!this.server)
+      this.open();
+    const known = this.peers.get(code.key);
+    if (known) {
+      known.addrs = [...new Set([...known.addrs, ...code.addrs])].slice(0, MAX_ADDRS);
+      known.token ??= code.token;
+      this.wakeRetry(known.key);
+      this.log.write("code_again", { id: peerId(known.key), peer: known.name });
+      await this.sayHello(known, { token: known.token }).catch(() => {});
+      this.dirty();
+      return known;
+    }
+    const peer = {
+      key: code.key,
+      name: code.name,
+      addrs: code.addrs,
+      port: code.port,
+      outside: outside || undefined,
+      host: outside || undefined,
+      private: outside || undefined,
+      token: code.token
+    };
+    let reply;
+    try {
+      reply = await this.sayHello(peer, { token: code.token });
+    } catch (e) {
+      this.forgetGiven(peer);
+      this.log.write("connect_failed", { id: peerId(peer.key), peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail, addrs: peer.addrs, port: peer.port });
+      if (e instanceof DeliveryError && e.reason === "rejected")
+        throw new Error("the other session refused this code; it was already used, expired, or that bridge was reopened. Ask for a new code");
+      if (this.clockOff.has(code.key))
+        throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`);
+      throw new Error(`cannot reach ${code.name} at ${code.addrs.join(", ")} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`);
+    }
+    if (reply.type === "refused") {
+      this.forgetGiven(peer);
+      throw new Error(`${code.name} did not take this connection: ${cleanReason(reply.reason)}`);
+    }
+    if (reply.type !== "hello_ack") {
+      this.forgetGiven(peer);
+      throw new Error("unexpected answer from the other session");
+    }
+    peer.name = String(reply.name).slice(0, MAX_NAME);
+    peer.private = !!reply.private || outside;
+    peer.token ??= code.token;
+    if (peer.given)
+      this.used.set(peer.given, { key: peer.key, private: peer.private, outside: outside || undefined });
+    this.addPeer(peer, { how: "code" });
+    if (!peer.private)
+      for (const m of Array.isArray(reply.members) ? reply.members : [])
+        this.invite(m, peer.name);
+    return peer;
+  }
+  connecting() {
+    return [...this.invites.values()].map((i) => ({ name: i.name, introducedBy: i.by }));
+  }
+  links() {
+    return [...this.peers.values()].map((peer) => {
+      const pulling = this.isPulling(peer);
+      const down = pulling ? undefined : this.down.get(peer.key);
+      return {
+        key: peer.key,
+        id: peerId(peer.key),
+        name: peer.name,
+        about: peer.about,
+        ...peer.outside ? { outside: true } : {},
+        state: down ? "reconnecting" : "connected",
+        since: isoOf(down?.since),
+        via: peer.lastAddr ? isRelayAddr(peer.lastAddr) ? "relay" : "direct" : pulling ? "pickup" : "direct"
+      };
+    });
+  }
+  async ask(to, question, context, files, reviewed = false) {
+    const peer = await this.resolvePeer(to);
+    if (peer.outside)
+      this.assertOutsideSafe({ question, context });
+    if (files?.length)
+      await this.assertTakesFiles([peer]);
+    return this.sendQuestion(peer, question, context, undefined, false, undefined, this.stage(files, reviewed, !!peer.outside));
+  }
+  async askMany(to, question, context, answers = "all", noAnswer = false, category, files, reviewed = false) {
+    const peers = await this.resolvePeers(to);
+    if (peers.some((p) => p.outside))
+      this.assertOutsideSafe({ question, context, category });
+    if (files?.length)
+      await this.assertTakesFiles(peers);
+    const staged = peers.map((p) => this.stage(files, reviewed, !!p.outside));
+    if (peers.length === 1)
+      return this.sendQuestion(peers[0], question, context, undefined, noAnswer, category, staged[0]);
+    const ask = { id: randomUUID().slice(0, 8), to: peers.filter((p) => !p.outside).map((p) => p.name), answers };
+    const sent = await Promise.all(peers.map((peer, i) => this.sendQuestion(peer, question, context, ask, noAnswer, category, staged[i]).catch((e) => ({
+      thread: undefined,
+      to: peer.name,
+      delivery: "refused",
+      error: e instanceof Error ? e.message : String(e)
+    }))));
+    return { ask: ask.id, answers, to: peers.map((p) => p.name), sent };
+  }
+  async sendQuestion(peer, question, context, ask, noAnswer = false, category, files = []) {
+    assertNoSecrets({ question, context, category });
+    if (peer.outside)
+      this.assertOutsideSafe({ question, context, category });
+    const label = cleanCategory(category);
+    const thread = {
+      id: randomUUID().slice(0, 8),
+      peer: peer.key,
+      peerName: peer.name,
+      peerAddr: whereIs(peer),
+      subject: firstLine(question),
+      startedBy: "me",
+      status: "waiting_for_peer",
+      ask,
+      category: label,
+      messages: []
+    };
+    this.threads.set(thread.id, thread);
+    const notice = noAnswer || saysNoAnswer(question) ? { noAnswer: true } : {};
+    const wireAsk = peer.outside ? {} : { ask };
+    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ...wireAsk, ...notice, category: label, ...wireFiles(files), at: now() };
+    thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text: msg.text, context: msg.context, ...notice, ...files.length ? { files } : {}, at: msg.at });
+    this.changed();
+    try {
+      return { thread: thread.id, to: peer.name, delivery: await this.sendMessage(peer, msg, thread.id), ...sentFiles(files) };
+    } catch (e) {
+      this.outbox = this.outbox.filter((o) => o.thread !== thread.id);
+      this.unspool({ type: "msg", msg });
+      this.threads.delete(thread.id);
+      this.changed();
+      throw e;
+    }
+  }
+  async reply(threadId, text, opts = {}) {
+    const thread = this.threads.get(threadId);
+    if (!thread)
+      throw new Error(`no conversation with id ${threadId}`);
+    if (!(opts.human && thread.status === "agreed"))
+      this.assertOpen(thread);
+    assertNoSecrets({ answer: text });
+    const peer = this.peers.get(thread.peer);
+    if (!peer)
+      throw new Error(`${thread.peerName} is no longer connected`);
+    if (peer.outside)
+      this.assertOutsideSafe({ answer: text });
+    if (opts.files?.length)
+      await this.assertTakesFiles([peer]);
+    const files = this.stage(opts.files, opts.reviewed, !!peer.outside);
+    const human = opts.human ? { human: true } : {};
+    const before = thread.status;
+    const msg = { id: randomUUID(), thread: thread.id, kind: "answer", text, ...human, ...wireFiles(files), at: now() };
+    thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text, ...human, ...files.length ? { files } : {}, at: msg.at });
+    if (thread.status !== "agreed" && !(thread.status === "peer_checking_with_their_human" && thread.humanSince))
+      thread.status = "waiting_for_peer";
+    this.changed();
+    const delivery = await this.sendMessage(peer, msg, thread.id).catch((e) => {
+      throw this.unsaid(thread, msg, before, e);
+    });
+    return { thread: thread.id, to: peer.name, delivery, status: thread.status, ...sentFiles(files) };
+  }
+  async hold(threadId, note) {
+    const thread = this.threads.get(threadId);
+    if (!thread)
+      throw new Error(`no conversation with id ${threadId}`);
+    if (thread.status !== "agreed")
+      this.assertOpen(thread);
+    assertNoSecrets({ note });
+    const peer = this.peers.get(thread.peer);
+    if (!peer)
+      throw new Error(`${thread.peerName} is no longer connected`);
+    if (peer.outside)
+      this.assertOutsideSafe({ note });
+    const before = thread.status;
+    const msg = { id: randomUUID(), thread: thread.id, kind: "note", text: note, at: now() };
+    thread.messages.push({ id: msg.id, from: "me", kind: "note", text: note, at: msg.at });
+    if (thread.status !== "agreed")
+      thread.status = "checking_with_your_human";
+    this.changed();
+    const delivery = await this.sendOrQueue(peer, { type: "msg", msg }, thread.id).catch((e) => {
+      throw this.unsaid(thread, msg, before, e);
+    });
+    return { thread: thread.id, to: peer.name, delivery, status: thread.status };
+  }
+  async agree(threadId, input) {
+    const thread = this.threads.get(threadId);
+    if (!thread)
+      throw new Error(`no conversation with id ${threadId}`);
+    if (thread.status === "closed")
+      this.assertOpen(thread);
+    const facts = input.facts ?? [];
+    const fields = {
+      conclusion: input.conclusion,
+      facts: facts.map((f) => `${f.fact}
+${f.evidence}`).join(`
+`),
+      guesses: input.guesses?.join(`
+`),
+      disagreements: input.disagreements?.join(`
+`),
+      for_humans: input.forHumans?.join(`
+`)
+    };
+    assertNoSecrets(fields);
+    const peer = this.peers.get(thread.peer);
+    if (peer?.outside)
+      this.assertOutsideSafe(fields);
+    const me = this.nameFor(peer);
+    const agreement = {
+      by: me,
+      conclusion: input.conclusion,
+      facts: facts.map((f) => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy === "me" ? me : thread.peerName })),
+      guesses: input.guesses ?? [],
+      disagreements: input.disagreements ?? [],
+      forHumans: input.forHumans ?? []
+    };
+    if (!isAgreement(agreement))
+      throw new Error("the agreement is too long or has an empty item");
+    const msg = { id: randomUUID(), thread: thread.id, kind: "agreement", text: renderAgreement(agreement), agreement, at: now() };
+    thread.messages.push({ id: msg.id, from: "me", kind: "agreement", text: msg.text, agreement, at: msg.at });
+    thread.status = "agreed";
+    this.changed();
+    const file = this.saveAgreement(thread);
+    const delivery = peer ? await this.sendOrQueue(peer, { type: "msg", msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`;
+    return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file };
+  }
+  unsaid(thread, msg, before, e) {
+    if (!(e instanceof RefusedError))
+      return e;
+    thread.messages = thread.messages.filter((m) => m.id !== msg.id);
+    thread.status = before;
+    this.outbox = this.outbox.filter((o) => !(o.thread === thread.id && o.payload.type === "file" && msg.files?.some((f) => f.id === o.payload.id)));
+    this.unspool({ type: "msg", msg });
+    this.changed();
+    return e;
+  }
+  async endPeer(to) {
+    const peer = await this.resolvePeer(to);
+    try {
+      await this.deliver(peer, { type: "bye" });
+    } catch {
+      if (this.isPulling(peer))
+        await this.handOver(peer, { type: "bye" }, 2000);
+    }
+    this.dropPeer(peer, "this side's human (close_bridge for this session only)");
+    return { name: peer.name, id: peerId(peer.key) };
+  }
+  unread() {
+    return this.events;
+  }
+  unreadThreads() {
+    return [...new Set(this.events.flatMap((e) => e.type === "message" ? [e.thread] : []))];
+  }
+  async wait(timeoutMs, signal) {
+    if (timeoutMs <= 0)
+      return this.take();
+    const turn = ++this.waiting;
+    for (const wake of [...this.waiters])
+      wake();
+    const live = () => turn === this.waiting && !signal?.aborted;
+    const deadline = Date.now() + timeoutMs;
+    while (this.events.length === 0 && live() && Date.now() < deadline) {
+      await new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", done);
+          this.waiters = this.waiters.filter((w) => w !== done);
+          resolve();
+        };
+        const timer = Number.isFinite(deadline) ? setTimeout(done, deadline - Date.now()) : undefined;
+        signal?.addEventListener("abort", done);
+        this.waiters.push(done);
+      });
+    }
+    return live() ? this.take() : [];
+  }
+  take() {
+    const taken = this.events.splice(0);
+    if (taken.length)
+      this.changed();
+    return taken;
+  }
+  async connections() {
+    const peers = await Promise.all([...this.peers.values()].map(async (peer) => {
+      let direct = false;
+      try {
+        const pong = await this.deliver(peer, { type: "ping" });
+        direct = pong.type === "pong";
+        if (pong.type === "pong")
+          this.takeWaiting(peer, pong.waiting);
+      } catch {}
+      const deciding = [...this.threads.values()].filter((t) => t.peer === peer.key).flatMap((t) => {
+        const h = this.theirHuman(t);
+        return h ? [{ thread: t.id, subject: t.subject, ...h }] : [];
+      });
+      const pulling = this.isPulling(peer);
+      const reachable = direct || pulling;
+      const error = !reachable && peer.lastError;
+      return {
+        name: peer.name,
+        about: peer.about,
+        id: peerId(peer.key),
+        group: !peer.private,
+        outside: peer.outside || undefined,
+        refused: this.refusedFrom(peer) || undefined,
+        reachable,
+        state: reachable ? "connected" : "reconnecting",
+        via: direct ? placeOf(peer.lastAddr, peer.port) : pulling ? "the other side cannot be reached directly, so it comes here to pick up messages" : undefined,
+        queued: this.outbox.filter((o) => o.peer === peer.key).length,
+        last_seen: isoOf(peer.lastSeen),
+        last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
+        next_try: reachable ? undefined : isoOf(peer.retryAt) ?? "now",
+        their_human_deciding: deciding.length ? deciding : undefined
+      };
+    }));
+    return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined, log: this.log.path };
+  }
+  threadSummaries() {
+    return [...this.threads.values()].map((t) => {
+      const last = t.messages.at(-1);
+      return {
+        id: t.id,
+        with: t.peerName,
+        subject: t.subject,
+        category: t.category,
+        status: t.status,
+        ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
+        messages: counted(t),
+        last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
+        no_answer_needed: openQuestion(t)?.noAnswer || undefined,
+        their_human: this.theirHuman(t)
+      };
+    });
+  }
+  describe() {
+    const relay = this.opts.relay ? { url: this.opts.relay, status: this.relayState } : undefined;
+    const codes = this.outsideOnly ? ["outside"] : this.opts.relay ? ["group", "outside"] : ["group"];
+    return { name: this.name, about: this.about, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay, outside_only: this.outsideOnly || undefined, codes };
+  }
+  async relayReady(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.relayState === "connecting" && Date.now() < deadline)
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, Math.max(deadline - Date.now(), 0));
+        this.relayWaiters.push(() => (clearTimeout(timer), resolve()));
+      });
+    return this.relayState;
+  }
+  async close() {
+    if (!this.server)
+      return;
+    this.forget = true;
+    await Promise.all([...this.peers.values()].map(async (p) => {
+      try {
+        await this.deliver(p, { type: "bye" });
+      } catch {
+        if (this.isPulling(p))
+          await this.handOver(p, { type: "bye" }, 2000);
+      }
+    }));
+    this.shutdown();
+  }
+  shutdown() {
+    if (this.server)
+      this.log.write("closed", { by: this.forget ? "this side's human (close_bridge)" : this.stopReason ?? "the process stopped; it comes back on restart" });
+    this.stopReason = undefined;
+    clearInterval(this.ticker);
+    clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
+    if (this.opts.saveTo) {
+      if (this.forget)
+        rmSync(this.opts.saveTo, { force: true });
+      else
+        this.save();
+    }
+    if (this.forget)
+      for (const kind of ["out", "partial"]) {
+        const dir = this.filesDir(kind);
+        if (dir)
+          rmSync(dir, { recursive: true, force: true });
+      }
+    if (this.forget)
+      this.keptRelaySecret = undefined;
+    this.forget = false;
+    this.abort.abort();
+    for (const wakers of this.pollWaiters.values())
+      for (const wake of [...wakers])
+        wake();
+    clearInterval(this.timer);
+    this.server?.stop(true);
+    this.server = undefined;
+    this.relaySecret = undefined;
+    this.relayBox = undefined;
+    if (this.opts.relay)
+      this.relayState = "off";
+    this.removeState();
+    this.peers.clear();
+    this.tokens.clear();
+    this.used.clear();
+    this.ended = [];
+    this.retryWakers.clear();
+    this.invites.clear();
+    this.kept.clear();
+    this.counts.clear();
+    this.toldLimit.clear();
+    this.partialSizes.clear();
+    this.outbox = [];
+    this.changed();
+  }
+  listen(port, hostname = "0.0.0.0") {
+    try {
+      this.server = Bun.serve({
+        port,
+        hostname,
+        maxRequestBodySize: 1 << 20,
+        idleTimeout: 60,
+        fetch: (req, server) => this.handle(req, server)
+      });
+      this.port = this.server.port ?? port;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async handle(req, server) {
+    if (req.method !== "POST" || new URL(req.url).pathname !== `/v1/${this.route}`)
+      return new Response("not found", { status: 404 });
+    const sealed = await req.json().catch(() => null);
+    const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, "");
+    const { status, body } = await this.respond(sealed, seenAt);
+    return new Response(body, { status, headers: { "content-type": status === 200 ? "application/json" : "text/plain" } });
+  }
+  async respond(sealed, seenAt, relayed = false) {
+    try {
+      return await this.respondInner(sealed, seenAt, relayed);
+    } catch {
+      return { status: 500, body: "error" };
+    }
+  }
+  async respondInner(sealed, seenAt, relayed) {
+    const payload = open(sealed, this.keys);
+    if (!payload)
+      return { status: 403, body: "forbidden" };
+    const fresh = this.replay.check(sealed, payload);
+    if (fresh === "stale")
+      this.clockDiffers(sealed.from);
+    if (fresh !== "ok")
+      return { status: 409, body: fresh === "stale" ? "stale: the two PCs clocks differ by more than two hours" : "already received" };
+    const from = sealed.from;
+    const answer = (p) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) });
+    const forbidden = { status: 403, body: "forbidden" };
+    if (from === this.key && payload.type === "handover" && this.server) {
+      this.emit({ type: "moved", at: now() });
+      this.stopReason = "another session on this PC took over this bridge";
+      this.save();
+      setTimeout(() => {
+        this.shutdown();
+        this.onMoved?.();
+      }, 50);
+      return answer({ type: "handover_ok" });
+    }
+    const peer = this.peers.get(from);
+    if (!peer) {
+      if (payload.type !== "hello" || !isHelloFields(payload))
+        return forbidden;
+      const invite = this.invites.get(from);
+      const invited = !!invite;
+      const outsideToken = typeof payload.token === "string" && !!(this.tokens.get(payload.token)?.outside || this.used.get(payload.token)?.outside);
+      if (!invited && !relayed && outsideToken)
+        return forbidden;
+      const why = invited ? undefined : this.whyRefused(payload.token, from);
+      if (!invited && outsideToken && !why && this.joinedOutside().length >= this.limits.sessions) {
+        this.logEvery("full", "refused_stranger", { reason: `${this.limits.sessions} outside sessions are connected, the most this bridge takes` });
+        return answer({
+          type: "refused",
+          reason: `that session already has ${this.limits.sessions} outside sessions connected, the most it takes. This code was not used up: it works as soon as one of them has left, until the code expires`
+        });
+      }
+      const token = invited ? undefined : this.takeToken(payload.token, from);
+      if (!invited && !token) {
+        this.logEvery("stranger", "refused_stranger", { id: peerId(from), peer: payload.name.slice(0, MAX_NAME), from: seenAt ?? (relayed ? "relay" : undefined), reason: why });
+        return forbidden;
+      }
+      const outside = !!token?.outside;
+      const remote = relayed || !!seenAt && !isLoopback(seenAt);
+      const given = remote ? payload.addrs.filter((a) => !isLoopback(a)) : payload.addrs;
+      const addrs = outside ? [] : [...new Set([...seenAt ? [seenAt] : [], ...given])];
+      const isPrivate = !!token?.private || outside;
+      const added = {
+        key: from,
+        name: payload.name.slice(0, MAX_NAME),
+        about: cleanAbout(payload.about),
+        can: cleanCan(payload.can),
+        addrs,
+        port: outside ? this.portFor(true) : payload.port,
+        directFailed: outside ? true : undefined,
+        private: isPrivate || undefined,
+        outside: outside || undefined,
+        token: isToken(payload.rejoin) ? payload.rejoin : undefined
+      };
+      const members = token && !isPrivate ? this.groupPeers().filter((p) => p.key !== from) : [];
+      for (const m of members)
+        this.sendOrQueue(m, { type: "introduce", member: memberOf(added) }).catch(() => {});
+      const rejoin = this.rejoinFor(added);
+      const again = !!token && "again" in token;
+      this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again, how: invited ? "introduced" : again ? "came back with its token" : "code" });
+      return answer({ type: "hello_ack", name: this.nameFor(added), members: members.map(memberOf), private: isPrivate || undefined, rejoin, about: this.aboutFor(added), can: this.canFor(added) });
+    }
+    if (peer.outside && !relayed)
+      return forbidden;
+    peer.lastSeen = Date.now();
+    this.wakeRetry(peer.key);
+    if (payload.type === "hello")
+      return answer(this.welcomeBack(peer, payload, seenAt, relayed));
+    if (payload.type === "poll") {
+      peer.lastPollAt = Date.now();
+      const acked = new Set(Array.isArray(payload.ack) ? payload.ack : []);
+      if (acked.size) {
+        for (const o of this.outbox)
+          if (o.peer === peer.key && acked.has(o.id))
+            this.unspool(o.payload);
+        this.outbox = this.outbox.filter((o) => !(o.peer === peer.key && acked.has(o.id)));
+        this.dirty();
+      }
+      const items = await this.pending(peer.key, Math.min(Math.max(payload.wait, 0), 25000));
+      return answer({ type: "batch", items });
+    }
+    const reply = this.process(peer, payload);
+    return reply ? answer(reply) : { status: 400, body: "bad request" };
+  }
+  async relayLoop() {
+    const base = `${this.opts.relay}/v1`;
+    const box = this.relayBox;
+    const signal = this.abort.signal;
+    const headers = { authorization: `Bearer ${this.relaySecret}`, "content-type": "application/json", ...this.opts.relayKey ? { "x-relay-key": this.opts.relayKey } : {} };
+    const setState = (state) => {
+      if (JSON.stringify(state) !== JSON.stringify(this.relayState))
+        this.log.write("relay", { state });
+      this.relayState = state;
+      for (const wake of this.relayWaiters.splice(0))
+        wake();
+    };
+    let backoff = this.opts.retryMs;
+    let wait = 0;
+    while (!signal.aborted && this.relayBox === box) {
+      try {
+        const res = await fetch(`${base}/inbox/${box}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ wait }),
+          signal: AbortSignal.any([AbortSignal.timeout(35000), signal])
+        });
+        if (res.status === 401) {
+          setState({ error: "the relay refused this session: wrong or missing relay key (COWORKER_RELAY_KEY)" });
+          return;
+        }
+        if (!res.ok)
+          throw new Error(`the relay answered ${res.status}`);
+        const data = await res.json().catch(() => null);
+        if (!Array.isArray(data?.items))
+          throw new Error("the server did not answer like a coworker relay");
+        const items = data.items;
+        setState("ok");
+        wait = 25000;
+        backoff = this.opts.retryMs;
+        for (const item of items)
+          this.answerRelayed(base, box, headers, item);
+      } catch (e) {
+        if (signal.aborted)
+          return;
+        setState({ error: `cannot reach the relay ${this.opts.relay}: ${e instanceof Error ? e.message : String(e)}` });
+        wait = 0;
+        await Bun.sleep(backoff);
+        backoff = Math.min(backoff * 2, 30000);
+      }
+    }
+  }
+  async answerRelayed(base, box, headers, item) {
+    let sealed = null;
+    try {
+      sealed = JSON.parse(item.body);
+    } catch {}
+    const { status, body } = await this.respond(sealed, undefined, true);
+    await fetch(`${base}/reply/${box}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ id: item.id, status, body }),
+      signal: AbortSignal.any([AbortSignal.timeout(1e4), this.abort.signal])
+    }).catch(() => {});
+  }
+  welcomeBack(peer, hello, seenAt, relayed) {
+    if (peer.outside)
+      this.logEvery(`h:${peer.key}`, "hello_in", { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: "relay" });
+    else if (isHelloFields(hello)) {
+      const remote = relayed || !!seenAt && !isLoopback(seenAt);
+      const given = remote ? hello.addrs.filter((a) => !isLoopback(a)) : hello.addrs;
+      const addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])].slice(0, MAX_ADDRS);
+      const port = hello.port;
+      const moved = addrs.join() !== peer.addrs.join() || port !== peer.port;
+      this.log.write("hello_in", { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? "relay" : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? port : undefined });
+      peer.addrs = addrs;
+      peer.port = port;
+      peer.lastAddr = undefined;
+      peer.directFailed = false;
+    }
+    if (isToken(hello.rejoin))
+      peer.token = hello.rejoin;
+    if (hello.back && !this.events.some((e) => e.type === "connected" && e.again && e.peer === peer.name))
+      this.emit({ type: "connected", peer: peer.name, again: true, at: now() });
+    else
+      this.changed();
+    this.flush();
+    this.learn(peer, hello.about, hello.can);
+    return { type: "hello_ack", name: this.nameFor(peer), rejoin: this.rejoinFor(peer), about: this.aboutFor(peer), can: this.canFor(peer) };
+  }
+  process(peer, payload) {
+    switch (payload.type) {
+      case "ping":
+        return { type: "pong", waiting: this.waitingFor(peer), can: this.canFor(peer) };
+      case "msg": {
+        const refused = this.receive(peer, payload.msg);
+        return refused ? { type: "refused", reason: refused } : { type: "ok" };
+      }
+      case "bye":
+        this.dropPeer(peer);
+        return { type: "ok" };
+      case "hello":
+        if (!isHelloFields(payload))
+          return null;
+        if (!peer.outside) {
+          peer.addrs = payload.addrs;
+          peer.port = payload.port;
+        }
+        if (isToken(payload.rejoin))
+          peer.token = payload.rejoin;
+        this.learn(peer, payload.about, payload.can);
+        return { type: "hello_ack", name: this.nameFor(peer), about: this.aboutFor(peer), can: this.canFor(peer) };
+      case "introduce":
+        if (!peer.private)
+          this.invite(payload.member, peer.name);
+        return { type: "ok" };
+      case "file": {
+        const refused = this.takeChunk(peer, payload);
+        return refused ? { type: "refused", reason: refused } : { type: "ok" };
+      }
+      case "receipt":
+        this.takeReceipt(peer, payload);
+        return { type: "ok" };
+      case "log_request": {
+        const lines = typeof payload.lines === "number" ? payload.lines : 100;
+        const id = peerId(peer.key);
+        if (peer.outside) {
+          const entries = this.log.read({ id, lines }).filter((e) => e.id === id).map((e) => ({
+            at: e.at,
+            event: e.event,
+            id,
+            ...typeof e.how === "string" ? { how: e.how } : {},
+            ...typeof e.kind === "string" ? { kind: e.kind } : {},
+            ...typeof e.tries === "number" ? { tries: e.tries } : {},
+            ...typeof e.down_for_s === "number" ? { down_for_s: e.down_for_s } : {},
+            ...typeof e.last_seen === "string" ? { last_seen: e.last_seen } : {}
+          }));
+          return { type: "log", entries };
+        }
+        return { type: "log", entries: this.log.read({ id, lines }) };
+      }
+      default:
+        return null;
+    }
+  }
+  groupPeers() {
+    return [...this.peers.values()].filter((p) => !p.private);
+  }
+  addPeer(peer, options = {}) {
+    if (this.peers.has(peer.key))
+      return false;
+    this.peers.set(peer.key, peer);
+    this.addedAt.set(peer.key, Date.now());
+    this.log.write("connected", { id: peerId(peer.key), peer: peer.name, how: options.how, via: options.via, addrs: peer.addrs, port: peer.port });
+    this.invites.delete(peer.key);
+    this.ended = this.ended.filter((e) => e.id !== peerId(peer.key));
+    this.save();
+    if (options.emit)
+      this.emit({ type: "connected", peer: peer.name, via: options.via, again: options.again || undefined, about: peer.about, at: now() });
+    else
+      this.changed();
+    this.pollLoop(peer.key);
+    return true;
+  }
+  invite(member, by) {
+    if (!isMember(member) || member.key === this.key || this.peers.has(member.key))
+      return;
+    const { key, name, addrs, port } = member;
+    this.invites.set(key, { key, name, addrs, port, by, nextTry: 0, backoff: this.opts.retryMs });
+    this.tryInvites();
+  }
+  async tryInvites() {
+    await Promise.all([...this.invites.values()].map(async (invite) => {
+      if (this.peers.has(invite.key))
+        return void this.invites.delete(invite.key);
+      if (invite.trying || invite.nextTry > Date.now() || !this.server)
+        return;
+      invite.trying = true;
+      const peer = { key: invite.key, name: invite.name, addrs: invite.addrs, port: invite.port };
+      try {
+        const reply = await this.sayHello(peer);
+        if (reply.type === "hello_ack" && this.invites.has(invite.key)) {
+          peer.name = reply.name;
+          this.addPeer(peer, { emit: true, via: invite.by, how: "introduced" });
+        } else
+          this.forgetGiven(peer);
+      } catch {
+        this.forgetGiven(peer);
+        invite.nextTry = Date.now() + invite.backoff;
+        invite.backoff = Math.min(invite.backoff * 2, this.opts.maxRetryMs);
+      } finally {
+        invite.trying = false;
+      }
+    }));
+  }
+  assertOpen(thread) {
+    if (thread.status === "closed") {
+      const notice = thread.messages.findLast((m) => m.kind === "closed");
+      throw new Error(notice?.text ?? "this question is closed. No answer is needed.");
+    }
+    if (thread.status === "agreed")
+      throw new Error("this conversation is finished: an agreement was written. If you disagree with it, write your own version with write_agreement; for anything new, send a new question");
+  }
+  closeSiblings(ask, answerer, except) {
+    const answeredBy = answerer.name;
+    this.closedAsks.set(ask.id, answeredBy);
+    for (const t of this.threads.values()) {
+      if (t.ask?.id !== ask.id || t.id === except || t.status === "closed")
+        continue;
+      const peer = this.peers.get(t.peer);
+      const text = peer?.outside || answerer.outside ? "Another session answered first, so this question is closed. No answer is needed." : `${answeredBy} answered first, so this question is closed. No answer is needed.`;
+      const msg = { id: randomUUID(), thread: t.id, kind: "closed", text, at: now() };
+      t.messages.push({ id: msg.id, from: "me", kind: "closed", text, at: msg.at });
+      t.status = "closed";
+      if (peer)
+        this.sendOrQueue(peer, { type: "msg", msg }, t.id).catch(() => {});
+    }
+  }
+  askProgress(ask) {
+    const threads = [...this.threads.values()].filter((t) => t.ask?.id === ask.id);
+    const answered = threads.filter((t) => t.messages.some((m) => m.from === "peer" && m.kind === "answer")).map((t) => t.peerName);
+    return { id: ask.id, answers: ask.answers, asked: threads.map((t) => t.peerName), answered, closedBy: this.closedAsks.get(ask.id) };
+  }
+  dropPeer(peer, by) {
+    if (!this.peers.delete(peer.key))
+      return;
+    this.log.write("ended", { id: peerId(peer.key), peer: peer.name, by: by ?? "the other side's human (close_bridge)" });
+    for (const [token, u] of this.used)
+      if (u.key === peer.key)
+        this.used.delete(token);
+    for (const o of this.outbox)
+      if (o.peer === peer.key)
+        this.unspool(o.payload);
+    this.outbox = this.outbox.filter((o) => o.peer !== peer.key);
+    this.wakeRetry(peer.key);
+    this.kept.delete(peer.key);
+    if (by)
+      return this.changed();
+    const id = peerId(peer.key);
+    this.ended = [...this.ended.filter((e) => e.id !== id), { name: peer.name, id, at: now() }].slice(-MAX_ENDED);
+    this.emit({ type: "peer_closed", peer: peer.name, at: now() });
+  }
+  pause(peer, ms) {
+    const signal = this.abort.signal;
+    peer.retryAt = Date.now() + ms;
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", done);
+        if (this.retryWakers.get(peer.key) === done)
+          this.retryWakers.delete(peer.key);
+        peer.retryAt = undefined;
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal.addEventListener("abort", done);
+      this.retryWakers.set(peer.key, done);
+    });
+  }
+  wakeRetry(key) {
+    this.retryWakers.get(key)?.();
+  }
+  isPulling(peer) {
+    return !!peer.lastPollAt && Date.now() - peer.lastPollAt < POLL_FRESH_MS;
+  }
+  async handOver(peer, payload, waitMs, thread) {
+    const item = { id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() };
+    this.outbox.push(item);
+    this.dirty();
+    this.wakePoll(peer.key);
+    for (let waited = 0;waited < waitMs && this.outbox.includes(item); waited += 50)
+      await Bun.sleep(50);
+    return !this.outbox.includes(item);
+  }
+  wakePoll(key) {
+    for (const wake of [...this.pollWaiters.get(key) ?? []])
+      wake();
+  }
+  async pending(key, waitMs) {
+    const take = () => {
+      const out = [];
+      let bytes = 0;
+      for (const o of this.outbox) {
+        if (o.peer !== key)
+          continue;
+        const payload = this.withData(o.payload);
+        const size = JSON.stringify(payload).length;
+        if (out.length && bytes + size > BATCH_BYTES)
+          break;
+        out.push({ id: o.id, payload });
+        bytes += size;
+      }
+      return out;
+    };
+    const ready = take();
+    if (ready.length || waitMs === 0 || !this.server)
+      return ready;
+    for (const end of [...this.pollWaiters.get(key) ?? []])
+      end(true);
+    let replaced = false;
+    await new Promise((resolve) => {
+      const done = (by) => {
+        replaced = by === true;
+        clearTimeout(timer);
+        this.pollWaiters.get(key)?.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, waitMs);
+      if (!this.pollWaiters.has(key))
+        this.pollWaiters.set(key, new Set);
+      this.pollWaiters.get(key).add(done);
+    });
+    return replaced ? [] : take();
+  }
+  async pollLoop(key) {
+    if (this.polling.has(key))
+      return;
+    this.polling.add(key);
+    let backoff = this.opts.retryMs;
+    let ack = [];
+    let lost = false;
+    try {
+      while (this.server && !this.abort.signal.aborted) {
+        const peer = this.peers.get(key);
+        if (!peer)
+          break;
+        if (peer.outside && !peer.host) {
+          await this.pause(peer, backoff);
+          continue;
+        }
+        try {
+          if (!peer.lastAddr)
+            await this.deliver(peer, { type: "ping" });
+          const body = JSON.stringify(seal({ type: "poll", wait: this.opts.pollWaitMs, ack }, fromB64(peer.key), this.keys));
+          const reply = await this.deliverTo(peer, peer.lastAddr, body, this.opts.pollWaitMs + 5000);
+          if (reply === "refused")
+            throw new DeliveryError("rejected", "refused");
+          if (!reply)
+            throw new DeliveryError("unreachable", "no answer");
+          backoff = this.opts.retryMs;
+          ack = [];
+          if (lost) {
+            lost = false;
+            this.greet(peer);
+            this.flush();
+            this.changed();
+          }
+          if (reply.type === "batch")
+            for (const item of reply.items) {
+              this.process(peer, item.payload);
+              ack.push(item.id);
+            }
+        } catch (e) {
+          if (this.abort.signal.aborted)
+            break;
+          this.noteDown(peer);
+          if (e instanceof DeliveryError && e.reason === "rejected")
+            await this.rejoin(peer);
+          peer.lastAddr = undefined;
+          if (!lost)
+            this.changed();
+          lost = true;
+          await this.pause(peer, backoff);
+          backoff = Math.min(backoff * 2, this.opts.maxRetryMs);
+        }
+      }
+    } finally {
+      this.polling.delete(key);
+    }
+  }
+  receive(peer, msg) {
+    if (!msg || typeof msg !== "object")
+      return;
+    const guest = !!peer.outside && !peer.host;
+    if (!isThreadId(msg.thread)) {
+      this.logEvery(`r:${peer.key}:thread`, "refused_thread_id", { id: peerId(peer.key) });
+      this.dropStagedChunks(peer, msg.files);
+      return guest ? "the conversation id is not valid" : undefined;
+    }
+    if (typeof msg.id !== "string" || !msg.id || msg.id.length > MAX_ID || typeof msg.text !== "string")
+      return;
+    if (!KINDS.includes(msg.kind))
+      return;
+    if (this.seen.has(msg.id))
+      return;
+    const known = this.threads.get(msg.thread);
+    if (known && known.peer !== peer.key)
+      return;
+    const got = msg.kind === "agreement" && isAgreement(msg.agreement) ? msg.agreement : undefined;
+    const agreement = got && {
+      by: peer.name,
+      conclusion: got.conclusion,
+      facts: got.facts.map((f) => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy })),
+      guesses: got.guesses,
+      disagreements: got.disagreements,
+      forHumans: got.forHumans
+    };
+    if (msg.kind === "agreement" && !agreement)
+      return;
+    const cost = Buffer.byteLength(JSON.stringify(msg)) * (agreement ? 2 : 1) + (agreement ? 4096 : 512);
+    if (guest) {
+      const over = this.overLimit(peer, cost, !known);
+      if (over) {
+        this.dropStagedChunks(peer, msg.files);
+        return this.refuse(peer, over[0], over[1], msg.thread);
+      }
+      const kept = this.keptFor(peer.key);
+      kept.messages++;
+      kept.bytes += cost;
+      if (!known)
+        kept.conversations++;
+    }
+    this.seen.add(msg.id);
+    let thread = known;
+    if (!thread) {
+      thread = {
+        id: msg.thread,
+        peer: peer.key,
+        peerName: peer.name,
+        peerAddr: whereIs(peer),
+        subject: (typeof msg.subject === "string" && msg.subject.trim() ? msg.subject : firstLine(msg.text)).slice(0, 200),
+        startedBy: "peer",
+        status: "your_turn",
+        ask: !guest && isAskInfo(msg.ask) ? { id: msg.ask.id, to: msg.ask.to, answers: msg.ask.answers } : undefined,
+        category: cleanCategory(msg.category),
+        messages: []
+      };
+      this.threads.set(thread.id, thread);
+    }
+    const context = typeof msg.context === "string" ? msg.context : undefined;
+    const text = agreement ? renderAgreement(agreement) : msg.text;
+    const human = msg.human === true ? { human: true } : {};
+    const notice = msg.kind === "question" && (msg.noAnswer === true || saysNoAnswer(msg.text));
+    const files = this.collect(peer, thread, msg.files);
+    thread.messages.push({ id: msg.id, from: "peer", kind: msg.kind, text, context, agreement, ...human, ...notice ? { noAnswer: true } : {}, ...files ? { files } : {}, at: now() });
+    if (files)
+      this.sendOrQueue(peer, { type: "receipt", thread: thread.id, msg: msg.id, files: files.map((f) => ({ id: f.id, ok: f.ok === true, problem: f.problem })) }, thread.id).catch(() => {});
+    if (thread.status === "closed" || msg.kind === "closed")
+      thread.status = "closed";
+    else if (agreement)
+      thread.status = "agreed";
+    else if (thread.status === "agreed") {} else if (msg.kind === "note")
+      this.peerAsksHuman(thread, false);
+    else if (msg.kind === "answer" && !msg.human && defersToHuman(text))
+      this.peerAsksHuman(thread, true);
+    else {
+      thread.status = "your_turn";
+      this.peerAnswered(thread);
+    }
+    if (agreement || thread.status === "closed")
+      this.peerAnswered(thread);
+    const file = agreement ? this.saveAgreement(thread) : undefined;
+    let ask = thread.ask;
+    if (thread.ask && thread.startedBy === "me") {
+      if (msg.kind === "answer" && thread.ask.answers === "one" && !this.closedAsks.has(thread.ask.id))
+        this.closeSiblings(thread.ask, peer, thread.id);
+      ask = this.askProgress(thread.ask);
+    }
+    this.emit({ type: "message", thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...agreement && !file ? { not_saved: AGREEMENT_NOT_SAVED } : {}, ...files ? { files: files.map(seenFile) } : {}, ...human, ...notice ? { no_answer_needed: true } : {}, ...thread.category ? { category: thread.category } : {}, at: now() });
+    return;
+  }
+  keptFor(key) {
+    let kept = this.kept.get(key);
+    if (!kept) {
+      kept = { conversations: 0, messages: 0, bytes: 0 };
+      for (const t of this.threads.values()) {
+        if (t.peer !== key)
+          continue;
+        if (t.startedBy === "peer")
+          kept.conversations++;
+        for (const m of t.messages) {
+          if (m.from !== "peer")
+            continue;
+          kept.messages++;
+          kept.bytes += Buffer.byteLength(JSON.stringify(m)) + 512;
+        }
+      }
+      this.kept.set(key, kept);
+    }
+    return kept;
+  }
+  overLimit(peer, cost, starts) {
+    const kept = this.keptFor(peer.key), limit = this.limits;
+    const kib = (n) => Math.round(n / 1024);
+    const mib = (n) => Math.round(n / 1024 / 1024 * 10) / 10;
+    if (cost > limit.messageBytes)
+      return ["message_size", `that message is larger than ${kib(limit.messageBytes)} KiB, the most this session takes in one message from an outside session`];
+    if (starts && kept.conversations >= limit.conversations)
+      return ["conversations", `this session takes at most ${limit.conversations} conversations from one outside session, and that many were started. Go on in one of them`];
+    if (kept.messages >= limit.messages)
+      return ["messages", `this session takes at most ${limit.messages} messages from one outside session, and that many have arrived`];
+    if (kept.bytes + cost > limit.totalBytes)
+      return ["total", `this session keeps at most ${mib(limit.totalBytes)} MiB in total from one outside session, and that much has arrived`];
+    return;
+  }
+  refuse(peer, limit, reason, thread) {
+    this.logEvery(`r:${peer.key}:${limit}`, "refused_outside", { id: peerId(peer.key), peer: peer.name, limit });
+    const told = `${peer.key}:${limit}`;
+    if (!peer.can?.includes("refusals") && isThreadId(thread) && !this.toldLimit.has(told)) {
+      this.toldLimit.add(told);
+      const msg = { id: randomUUID(), thread, kind: "closed", text: `Not received: ${reason}.`, at: now() };
+      this.sendOrQueue(peer, { type: "msg", msg }, undefined, false).catch(() => {});
+    }
+    return reason;
+  }
+  logEvery(key, event, fields) {
+    const count = (this.counts.get(key) ?? 0) + 1;
+    this.counts.set(key, count);
+    if (/^10*$/.test(String(count)))
+      this.log.write(event, { ...fields, count });
+  }
+  refusedFrom(peer) {
+    let n = 0;
+    for (const [key, count] of this.counts)
+      if (key.startsWith(`r:${peer.key}:`))
+        n += count;
+    return n;
+  }
+  peerAsksHuman(thread, inText) {
+    if (thread.status !== "peer_checking_with_their_human" || !thread.humanSince) {
+      thread.humanSince = now();
+      thread.nudges = 0;
+      thread.peerWait = undefined;
+    }
+    thread.status = "peer_checking_with_their_human";
+    thread.saidInText = inText || undefined;
+  }
+  peerAnswered(thread) {
+    thread.humanSince = undefined;
+    thread.saidInText = undefined;
+    thread.nudges = undefined;
+    thread.peerWait = undefined;
+  }
+  waitingFor(peer) {
+    const out = [];
+    for (const q of this.asking.values()) {
+      if (this.threads.get(q.thread)?.peer !== peer.key)
+        continue;
+      out.push({
+        thread: q.thread,
+        since: q.at,
+        window: q.text ? "text" : q.closedAt ? "closed_without_answer" : "shown",
+        reminders: q.reminders ?? 0,
+        last_reminder: q.lastReminder,
+        closed_at: q.closedAt
+      });
+    }
+    return out.length ? out : undefined;
+  }
+  takeWaiting(peer, waiting) {
+    if (!Array.isArray(waiting))
+      return;
+    for (const w of waiting) {
+      if (!w || !isThreadId(w.thread) || typeof w.since !== "string")
+        continue;
+      const t = this.threads.get(w.thread);
+      if (!t || t.peer !== peer.key || t.status !== "peer_checking_with_their_human")
+        continue;
+      const window = ["shown", "closed_without_answer", "text"].includes(w.window) ? w.window : "shown";
+      const str = (v) => typeof v === "string" ? v.slice(0, 40) : undefined;
+      t.peerWait = { thread: t.id, since: str(w.since), window, reminders: Number.isInteger(w.reminders) ? w.reminders : 0, last_reminder: str(w.last_reminder), closed_at: str(w.closed_at) };
+    }
+  }
+  theirHuman(t) {
+    if (t.status !== "peer_checking_with_their_human" || !t.humanSince)
+      return;
+    const w = t.peerWait;
+    return {
+      since: t.humanSince,
+      minutes: Math.floor((Date.now() - Date.parse(t.humanSince)) / 60000),
+      window: w ? w.window === "shown" ? "a question window is on their human's screen" : w.window === "closed_without_answer" ? `their human saw the question window and closed it without answering at ${w.closed_at}; it opens again with the next reminder` : "their app cannot open a question window, so their AI asked their human in text" : t.saidInText ? "they only wrote that they passed it to their human (an older coworker version); whether a question window is open is unknown" : "unknown (the other side runs an older coworker version)",
+      reminders: w ? w.reminders : undefined,
+      last_reminder: w?.last_reminder
+    };
+  }
+  checkWaits() {
+    const t0 = Date.now();
+    const asking = [...this.threads.values()].filter((t) => t.status === "peer_checking_with_their_human" && t.humanSince);
+    if (!asking.length)
+      return;
+    if (t0 - this.lastWaitPing >= Math.min(60000, this.opts.nudgeMs)) {
+      this.lastWaitPing = t0;
+      for (const key of new Set(asking.map((t) => t.peer))) {
+        const peer = this.peers.get(key);
+        if (peer)
+          this.deliver(peer, { type: "ping" }).then((r) => r.type === "pong" && this.takeWaiting(peer, r.waiting)).catch(() => {});
+      }
+    }
+    for (const t of asking) {
+      const waited = t0 - Date.parse(t.humanSince);
+      const due = Math.floor(waited / this.opts.nudgeMs);
+      if (due <= (t.nudges ?? 0))
+        continue;
+      t.nudges = due;
+      const slow = {
+        type: "peer_human_slow",
+        thread: t.id,
+        peer: t.peerName,
+        subject: t.subject,
+        since: t.humanSince,
+        minutes: Math.floor(waited / 60000),
+        their_window: t.peerWait,
+        said_in_text: t.saidInText,
+        at: now()
+      };
+      this.emit(slow);
+      this.onSlow?.(slow);
+    }
+  }
+  emit(event) {
+    this.events.push(event);
+    for (const wake of [...this.waiters])
+      wake();
+    this.onEvent?.();
+    this.changed();
+  }
+  watch(onChange) {
+    this.watchers.add(onChange);
+    return () => void this.watchers.delete(onChange);
+  }
+  waitForHuman(question) {
+    this.asking.set(question.thread, question);
+    this.dirty();
+  }
+  humanQuestions() {
+    return [...this.asking.values()];
+  }
+  humanDone(thread) {
+    if (this.asking.delete(thread))
+      this.dirty();
+  }
+  remindedHuman(thread) {
+    const q = this.asking.get(thread);
+    if (!q)
+      return;
+    q.reminders = (q.reminders ?? 0) + 1;
+    q.lastReminder = now();
+    this.dirty();
+    return q;
+  }
+  humanClosedWindow(thread, closed) {
+    const q = this.asking.get(thread);
+    if (!q)
+      return;
+    q.closedAt = closed ? now() : undefined;
+    this.dirty();
+  }
+  tell(event) {
+    this.emit(event);
+  }
+  get viewerAt() {
+    return this.viewerAddress;
+  }
+  set viewerAt(at) {
+    if (at?.port === this.viewerAddress?.port && at?.token === this.viewerAddress?.token)
+      return;
+    this.viewerAddress = at;
+    this.dirty();
+  }
+  changed() {
+    this.dirty();
+    for (const onChange of [...this.watchers])
+      onChange();
+  }
+  dirty() {
+    if (!this.opts.saveTo || this.saveTimer || !this.server)
+      return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      this.save();
+    }, 100);
+    this.saveTimer.unref?.();
+  }
+  save() {
+    const path = this.opts.saveTo;
+    if (!path || !this.server)
+      return;
+    try {
+      mkdirSync2(dirname2(path), { recursive: true, mode: 448 });
+      const tmp = `${path}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.snapshot()), { mode: 384 });
+      renameSync2(tmp, path);
+    } catch {}
+  }
+  takeToken(token, from) {
+    if (typeof token !== "string")
+      return;
+    const used = this.used.get(token);
+    if (used)
+      return used.key === from ? { expires: Infinity, private: used.private, outside: used.outside, again: true } : undefined;
+    const entry = this.tokens.get(token);
+    this.tokens.delete(token);
+    this.dirty();
+    if (!entry || entry.expires <= Date.now())
+      return;
+    this.used.set(token, { key: from, private: entry.private, outside: entry.outside });
+    this.trimUsed();
+    return entry;
+  }
+  trimUsed() {
+    for (const [token, u] of this.used) {
+      if (this.used.size <= MAX_USED)
+        return;
+      if (!this.peers.has(u.key))
+        this.used.delete(token);
+    }
+  }
+  whyRefused(token, from) {
+    if (!isToken(token))
+      return "it brought no code: this side does not know it (it may have lost its saved state, or joined before 0.7.0)";
+    const used = this.used.get(token);
+    if (used)
+      return used.key === from ? undefined : "that code was already used by another session";
+    const entry = this.tokens.get(token);
+    if (entry)
+      return entry.expires <= Date.now() ? "the code has expired" : undefined;
+    return "unknown code: it was never issued here, or this side was closed by its human and forgot it";
+  }
+  rejoinFor(peer) {
+    if (peer.given && this.used.get(peer.given)?.key === peer.key)
+      return peer.given;
+    const token = randomToken();
+    this.used.set(token, { key: peer.key, private: !!peer.private, outside: peer.outside || undefined });
+    peer.given = token;
+    this.trimUsed();
+    this.dirty();
+    return token;
+  }
+  forgetGiven(peer) {
+    if (peer.given && !this.peers.has(peer.key))
+      this.used.delete(peer.given);
+    peer.given = undefined;
+  }
+  noteDown(peer) {
+    const err = peer.lastError;
+    if (err?.kind === "not_recognized" && Date.now() - (this.addedAt.get(peer.key) ?? 0) < 5000)
+      return;
+    const what = `${err?.kind}|${err?.detail}`;
+    const down = this.down.get(peer.key);
+    if (!down || down.what !== what)
+      this.log.write(down ? "still_down" : "link_down", {
+        id: peerId(peer.key),
+        peer: peer.name,
+        kind: err?.kind,
+        detail: err?.detail,
+        addr: err?.addr,
+        tried: [...new Set([...peer.lastAddr ? [peer.lastAddr] : [], ...peer.addrs])],
+        port: peer.port,
+        tries: down?.tries,
+        last_seen: isoOf(peer.lastSeen)
+      });
+    this.down.set(peer.key, { since: down?.since ?? Date.now(), tries: (down?.tries ?? 0) + 1, what });
+  }
+  noteUp(peer, addr) {
+    const down = this.down.get(peer.key);
+    if (!down)
+      return;
+    this.down.delete(peer.key);
+    this.log.write("link_up", { id: peerId(peer.key), peer: peer.name, down_for_s: Math.round((Date.now() - down.since) / 1000), tries: down.tries, addr: isRelayAddr(addr) ? "relay" : addr });
+  }
+  async rejoin(peer) {
+    const last = this.rejoinTried.get(peer.key) ?? 0;
+    if (Date.now() - last < this.opts.retryMs)
+      return;
+    this.rejoinTried.set(peer.key, Date.now());
+    const id = peerId(peer.key);
+    if (!peer.token) {
+      if (!last)
+        this.log.write("cannot_rejoin", { id, peer: peer.name, why: "the other side forgot this session, and this side holds no token for it (connected before 0.7.0). The other side can put in this side's code again, or use a new code" });
+      return;
+    }
+    try {
+      const reply = await this.sayHello(peer, { token: peer.token });
+      if (reply.type === "hello_ack") {
+        if (Date.now() - (this.addedAt.get(peer.key) ?? 0) >= 5000)
+          this.log.write("rejoined", { id, peer: peer.name });
+        this.flush();
+      }
+    } catch {
+      if (!last)
+        this.log.write("rejoin_failed", { id, peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail });
+    }
+  }
+  async sayHello(peer, extra = {}) {
+    const reply = await this.deliver(peer, this.helloFor(peer, extra));
+    if (reply.type === "hello_ack")
+      this.learn(peer, reply.about, reply.can);
+    if (reply.type === "hello_ack" && isToken(reply.rejoin)) {
+      peer.token = reply.rejoin;
+      if (this.peers.has(peer.key))
+        this.dirty();
+    }
+    return reply;
+  }
+  helloFor(peer, extra = {}) {
+    const joined = !!peer.outside && !!peer.host;
+    return {
+      type: "hello",
+      name: this.nameFor(peer),
+      addrs: joined ? [] : this.addrsFor(peer),
+      port: joined ? peer.port : this.portFor(peer),
+      rejoin: this.rejoinFor(peer),
+      about: this.aboutFor(peer),
+      can: this.canFor(peer),
+      ...extra
+    };
+  }
+  greet(peer, extra = {}) {
+    if (!(peer.outside && !peer.host))
+      return void this.sayHello(peer, extra).catch(() => {});
+    this.outbox = this.outbox.filter((o) => !(o.peer === peer.key && o.payload.type === "hello"));
+    this.outbox.push({ id: randomUUID(), peer: peer.key, payload: this.helloFor(peer, extra), since: Date.now() });
+    this.dirty();
+    this.wakePoll(peer.key);
+  }
+  learn(peer, about, can) {
+    const next = cleanAbout(about), skills = cleanCan(can);
+    if (JSON.stringify(next) === JSON.stringify(peer.about) && JSON.stringify(skills) === JSON.stringify(peer.can))
+      return;
+    peer.about = next;
+    peer.can = skills;
+    if (this.peers.has(peer.key))
+      this.changed();
+  }
+  setAbout(about) {
+    const next = cleanAbout({ ...this.about, ...about });
+    if (JSON.stringify(next) === JSON.stringify(this.about))
+      return;
+    if (this.facesOutside())
+      this.assertOutsideSafe({ ...next });
+    this.about = next;
+    this.changed();
+    for (const peer of this.peers.values())
+      this.greet(peer);
+  }
+  pin(ids, pinned) {
+    let changed = 0;
+    for (const id of new Set(ids)) {
+      const t = this.threads.get(id);
+      if (!t || !!t.pinned === pinned)
+        continue;
+      if (pinned)
+        t.pinned = true;
+      else
+        delete t.pinned;
+      changed++;
+    }
+    if (changed)
+      this.changed();
+    return changed;
+  }
+  filesDir(kind) {
+    if (!this.opts.home)
+      return;
+    const root = pathInside(this.opts.home, "files");
+    const mine = root ? pathInside(root, this.route) : undefined;
+    return mine ? pathInside(mine, kind) : undefined;
+  }
+  async assertTakesFiles(peers) {
+    for (const peer of peers) {
+      if (peer.can?.includes("files"))
+        continue;
+      try {
+        const pong = await this.deliver(peer, { type: "ping" });
+        if (pong.type === "pong")
+          this.learn(peer, peer.about, pong.can);
+      } catch {}
+      if (!peer.can?.includes("files"))
+        throw new Error(`nothing was sent: ${peer.name} cannot receive files. It runs a coworker version older than 0.12.0, or it has not answered since it was updated. Ask its human to update coworker and try again, or send the content another way`);
+    }
+  }
+  stage(paths, reviewed = false, outside = false) {
+    if (!paths?.length)
+      return [];
+    const dir = this.filesDir("out");
+    if (!dir)
+      throw new Error("nothing was sent: this session has no folder to keep files in");
+    const unique = [...new Set(paths)];
+    if (unique.length > MAX_FILES)
+      throw new Error(`nothing was sent: one message takes at most ${MAX_FILES} files`);
+    const read = unique.map((path) => {
+      const name = basename2(path);
+      if (SECRET_FILE.test(name))
+        throw new Error(`nothing was sent: ${name} looks like a file that holds keys or passwords. Humans share secrets their own way, never through coworker`);
+      let bytes;
+      try {
+        const stat = statSync2(path);
+        if (!stat.isFile())
+          throw new Error("not a file");
+        if (stat.size > MAX_FILE_BYTES)
+          throw new RangeError;
+        bytes = readFileSync2(path);
+      } catch (e) {
+        if (e instanceof RangeError)
+          throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`);
+        throw new Error(`nothing was sent: cannot read the file ${path}. Give the full path of a file on this PC`);
+      }
+      if (bytes.length > MAX_FILE_BYTES)
+        throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`);
+      return { path, name: safeFileName(name), bytes };
+    });
+    if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES)
+      throw new Error(`nothing was sent: the files are larger than ${MAX_FILES_BYTES >> 20} MiB together, the most one message can carry`);
+    if (outside) {
+      const outsideTexts = {};
+      for (const f of read) {
+        const body = utf8Text(f.bytes);
+        if (body === undefined)
+          throw new Error(`nothing was sent: ${f.name} is not UTF-8 text. To a session connected through an outside code, a file goes only when it is UTF-8 text, because only then can it be checked for information about this computer. Save it as UTF-8 text, or let your human share it another way`);
+        outsideTexts[`the file name "${f.name}"`] = f.name;
+        outsideTexts[`the file ${f.name}`] = body;
+      }
+      this.assertOutsideSafe(outsideTexts);
+    }
+    const texts = {};
+    for (const f of read)
+      if (f.bytes.length <= 2 * 1024 * 1024 && !f.bytes.subarray(0, 8192).includes(0))
+        texts[`the file ${f.name}`] = f.bytes.toString("utf8");
+    const found = findSecrets(texts);
+    const list = (items) => [...new Set(items.map((f) => `${f.kind} in ${f.field} ("${f.preview}")`))].slice(0, 12).join(", ");
+    const sure = found.filter((f) => f.kind !== "password or secret");
+    if (sure.length)
+      throw new Error(`nothing was sent: a file contains a secret (${list(sure)}). Humans share secrets their own way, never through coworker`);
+    const maybe = found.filter((f) => f.kind === "password or secret");
+    if (maybe.length && !reviewed)
+      throw new Error(`nothing was sent: a file may contain a password or secret (${list(maybe)}). Scripts and settings files often look like this without holding a real secret. Show these places to your human. If your human says none of them is a real secret, send again with files_reviewed_by_human: true`);
+    mkdirSync2(dir, { recursive: true, mode: 448 });
+    return read.map((f) => {
+      const id = randomUUID();
+      const file = pathInside(dir, id);
+      if (!file)
+        throw new Error("nothing was sent: this session has no folder to keep files in");
+      writeFileSync(file, f.bytes, { mode: 384 });
+      return { id, name: f.name, size: f.bytes.length, sha256: createHash4("sha256").update(f.bytes).digest("hex"), path: f.path };
+    });
+  }
+  async sendMessage(peer, msg, thread) {
+    let queued = false;
+    for (const f of msg.files ?? []) {
+      const of = Math.max(1, Math.ceil(f.size / FILE_CHUNK));
+      for (let seq = 0;seq < of; seq++)
+        if (await this.sendOrQueue(peer, { type: "file", id: f.id, seq, of, size: f.size }, thread, !queued) === "queued")
+          queued = true;
+    }
+    return this.sendOrQueue(peer, { type: "msg", msg }, thread, !queued);
+  }
+  withData(payload) {
+    if (payload.type !== "file" || payload.data !== undefined)
+      return payload;
+    const dir = this.filesDir("out");
+    const file = dir && typeof payload.id === "string" && FILE_ID.test(payload.id) ? pathInside(dir, payload.id) : undefined;
+    let data = "";
+    if (file)
+      try {
+        const fd = openSync(file, "r");
+        try {
+          const buf = Buffer.alloc(FILE_CHUNK);
+          data = buf.subarray(0, readSync(fd, buf, 0, FILE_CHUNK, payload.seq * FILE_CHUNK)).toString("base64");
+        } finally {
+          closeSync(fd);
+        }
+      } catch {}
+    return { ...payload, data };
+  }
+  unspool(payload) {
+    if (payload.type !== "msg" || !payload.msg.files?.length)
+      return;
+    const dir = this.filesDir("out");
+    if (!dir)
+      return;
+    for (const f of payload.msg.files) {
+      if (typeof f?.id !== "string" || !FILE_ID.test(f.id))
+        continue;
+      const file = pathInside(dir, f.id);
+      if (file)
+        rmSync(file, { force: true });
+    }
+  }
+  dropStagedChunks(peer, sent) {
+    if (!Array.isArray(sent) || !sent.length)
+      return;
+    const partial = this.filesDir("partial");
+    if (!partial)
+      return;
+    for (const f of sent.slice(0, MAX_FILES)) {
+      if (!f || typeof f.id !== "string" || !FILE_ID.test(f.id))
+        continue;
+      const file = pathInside(partial, `${peerId(peer.key)}-${f.id}`);
+      if (file)
+        rmSync(file, { force: true });
+      if (file)
+        this.partialSizes.delete(file);
+    }
+  }
+  takeChunk(peer, p) {
+    const guest = !!peer.outside && !peer.host;
+    if (guest && !this.outsideFiles)
+      return this.refuse(peer, "files", "this session takes no files from an outside session");
+    const dir = this.filesDir("partial");
+    if (!dir || typeof p.id !== "string" || !FILE_ID.test(p.id) || typeof p.data !== "string")
+      return;
+    if (!Number.isInteger(p.size) || p.size < 0 || p.size > MAX_FILE_BYTES)
+      return;
+    const of = Math.max(1, Math.ceil(p.size / FILE_CHUNK));
+    if (!Number.isInteger(p.seq) || p.seq < 0 || p.seq >= of || p.of !== of)
+      return;
+    const bytes = Buffer.from(p.data, "base64");
+    if (bytes.length !== (p.seq < of - 1 ? FILE_CHUNK : p.size - FILE_CHUNK * (of - 1)))
+      return;
+    const prefix = `${peerId(peer.key)}-`, path = pathInside(dir, prefix + p.id);
+    if (!path)
+      return;
+    if (guest) {
+      const said = this.partialSizes.get(path);
+      if (said !== undefined && said !== p.size)
+        return;
+      if (said === undefined && (p.seq > 0 || this.outsideFileBytes(peer, dir, prefix) + p.size > this.limits.fileBytes))
+        return this.refuse(peer, "file_quota", `this session keeps at most ${Math.round(this.limits.fileBytes / 1024 / 1024 * 10) / 10} MiB of files from one outside session, and this file would go over that`);
+    }
+    try {
+      if (p.seq === 0) {
+        mkdirSync2(dir, { recursive: true, mode: 448 });
+        const mine = readdirSync(dir).filter((n) => n.startsWith(prefix));
+        for (const n of mine) {
+          const old = pathInside(dir, n);
+          if (old && Date.now() - statSync2(old).mtimeMs > 24 * 60 * 60000)
+            rmSync(old, { force: true });
+        }
+        if (!existsSync2(path) && readdirSync(dir).filter((n) => n.startsWith(prefix)).length >= MAX_FILES * 2)
+          return;
+        writeFileSync(path, bytes, { mode: 384 });
+        if (guest)
+          this.partialSizes.set(path, p.size);
+      } else if (existsSync2(path) && statSync2(path).size === p.seq * FILE_CHUNK)
+        appendFileSync2(path, bytes);
+    } catch {}
+    return;
+  }
+  outsideFileBytes(peer, partial, prefix) {
+    let n = 0;
+    for (const t of this.threads.values())
+      if (t.peer === peer.key) {
+        for (const m of t.messages)
+          if (m.from === "peer") {
+            for (const f of m.files ?? [])
+              if (f.ok)
+                n += f.size;
+          }
+      }
+    try {
+      for (const name of readdirSync(partial)) {
+        if (!name.startsWith(prefix))
+          continue;
+        const path = pathInside(partial, name);
+        if (path)
+          n += this.partialSizes.get(path) ?? statSync2(path).size;
+      }
+    } catch {}
+    return n;
+  }
+  collect(peer, thread, sent) {
+    if (!Array.isArray(sent) || !sent.length)
+      return;
+    const partial = this.filesDir("partial"), received = this.filesDir("received");
+    let total = 0;
+    const notes = sent.slice(0, MAX_FILES).flatMap((f) => {
+      if (!f || typeof f.id !== "string" || !FILE_ID.test(f.id) || typeof f.name !== "string" || !Number.isInteger(f.size) || f.size < 0 || typeof f.sha256 !== "string" || !SHA256.test(f.sha256))
+        return [];
+      const note = { id: f.id, name: safeFileName(f.name), size: f.size, sha256: f.sha256 };
+      const from = partial ? pathInside(partial, `${peerId(peer.key)}-${f.id}`) : undefined;
+      const fail = (problem) => {
+        if (from)
+          rmSync(from, { force: true });
+        if (from)
+          this.partialSizes.delete(from);
+        return [{ ...note, ok: false, problem }];
+      };
+      if (peer.outside && !peer.host && (!this.outsideFiles || !from || !this.partialSizes.has(from)))
+        return fail("refused");
+      if (!from || !received || !isThreadId(thread.id))
+        return fail("no_folder");
+      total += note.size;
+      if (note.size > MAX_FILE_BYTES || total > MAX_FILES_BYTES)
+        return fail("limit");
+      let size = -1;
+      try {
+        size = statSync2(from).size;
+      } catch {}
+      if (size < note.size)
+        return fail("incomplete");
+      if (size > note.size)
+        return fail("size");
+      try {
+        if (createHash4("sha256").update(readFileSync2(from)).digest("hex") !== note.sha256)
+          return fail("sha256");
+        const folder = pathInside(received, thread.id);
+        if (!folder)
+          return fail("no_folder");
+        mkdirSync2(folder, { recursive: true, mode: 448 });
+        const to = freePath(folder, note.name);
+        if (!to)
+          return fail("no_folder");
+        renameSync2(from, to);
+        this.partialSizes.delete(from);
+        chmodSync(to, 384);
+        return [{ ...note, name: basename2(to), path: to, ok: true }];
+      } catch {
+        return fail("no_folder");
+      }
+    });
+    return notes.length ? notes : undefined;
+  }
+  takeReceipt(peer, r) {
+    const thread = isThreadId(r.thread) ? this.threads.get(r.thread) : undefined;
+    if (!thread || thread.peer !== peer.key || !Array.isArray(r.files))
+      return;
+    const message = thread.messages.find((m) => m.id === r.msg && m.from === "me");
+    if (!message?.files)
+      return;
+    const failed = [];
+    for (const got of r.files) {
+      const note = message.files.find((f) => f.id === got?.id);
+      if (!note || note.ok !== undefined)
+        continue;
+      note.ok = got.ok === true;
+      if (note.ok)
+        continue;
+      note.problem = typeof got.problem === "string" && got.problem in FILE_PROBLEM ? got.problem : "incomplete";
+      failed.push(`${note.name} (${FILE_PROBLEM[note.problem]})`);
+    }
+    this.changed();
+    if (failed.length)
+      this.emit({ type: "undelivered", to: peer.name, thread: thread.id, reason: `the message arrived, but these files did not arrive intact: ${failed.join(", ")}. Send them again`, at: now() });
+  }
+  watchThisPc() {
+    clearInterval(this.ticker);
+    let last = Date.now();
+    let addrs = this.outsideOnly ? "" : this.opts.addrs().join();
+    let n = 0;
+    this.ticker = setInterval(() => {
+      this.checkWaits();
+      const t = Date.now();
+      if (t - last > PAUSE_MS)
+        this.log.write("this_pc_paused", { for_s: Math.round((t - last) / 1000), what: "this computer was asleep or stopped; nothing could get through meanwhile" });
+      last = t;
+      if (!this.outsideOnly && ++n % 6 === 0) {
+        const now = this.opts.addrs().join();
+        if (now !== addrs)
+          this.log.write("this_pc_moved", { from: addrs.split(","), to: now.split(",") });
+        addrs = now;
+      }
+    }, this.opts.tickMs);
+    this.ticker.unref?.();
+  }
+  async logs(options = {}) {
+    const lines = Math.min(Math.max(options.lines ?? 100, 1), MAX_LOG_LINES);
+    const peer = options.peer ? await this.resolvePeer(options.peer) : undefined;
+    const mine = this.log.read({ id: peer && peerId(peer.key), lines });
+    if (!options.other)
+      return { file: this.log.path, mine };
+    const targets = peer ? [peer] : [...this.peers.values()];
+    const theirs = await Promise.all(targets.map(async (p) => {
+      if (p.outside && !p.host)
+        return { peer: labelOf(p), error: "not asked: this session never sends a request to a session that joined with an outside code. Its human can open its own log file" };
+      try {
+        const reply = await this.deliver(p, { type: "log_request", lines });
+        if (reply.type === "log" && Array.isArray(reply.entries))
+          return { peer: labelOf(p), entries: reply.entries.slice(-lines) };
+        return { peer: labelOf(p), error: "its answer could not be read" };
+      } catch {
+        return { peer: labelOf(p), error: "could not get its log: it cannot be reached now, or it runs a coworker older than 0.7.0. Its human can open its log file instead (list_connections there shows the path)" };
+      }
+    }));
+    return { file: this.log.path, mine, theirs };
+  }
+  async resolvePeers(to) {
+    const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map((n) => n.trim()).filter(Boolean);
+    if (names.some((n) => EVERYONE.includes(n.toLowerCase()))) {
+      if (this.peers.size === 0)
+        throw new Error(NO_PEERS);
+      const own = [...this.peers.values()].filter((p) => !p.outside);
+      if (own.length === 0)
+        throw new Error(`"everyone" means the sessions of your own side, and none is connected. A session connected through an outside code is asked only by name: ${[...this.peers.values()].map(labelOf).join(", ")}`);
+      return this.withoutLeftBehind(own);
+    }
+    if (names.length === 0)
+      return [await this.resolvePeer(undefined)];
+    return [...new Set(await Promise.all(names.map((n) => this.resolvePeer(n))))];
+  }
+  async resolvePeer(to) {
+    const peers = [...this.peers.values()];
+    if (peers.length === 0)
+      throw new Error(NO_PEERS);
+    if (!to) {
+      if (peers.length === 1)
+        return peers[0];
+      throw new Error(`several sessions are connected; say which one, several, or "everyone": ${peers.map(labelOf).join(", ")}`);
+    }
+    const wanted = to.trim();
+    const byId = peers.find((p) => wanted === peerId(p.key) || wanted.endsWith(`[${peerId(p.key)}]`));
+    if (byId)
+      return byId;
+    const needle = wanted.toLowerCase();
+    const exact = peers.filter((p) => p.name.toLowerCase() === needle);
+    const matches = exact.length ? exact : peers.filter((p) => p.name.toLowerCase().includes(needle));
+    if (matches.length === 1)
+      return matches[0];
+    if (matches.length === 0)
+      throw new Error(`no connected session matches "${to}". Connected: ${peers.map(labelOf).join(", ")}`);
+    if (new Set(matches.map((p) => p.name)).size > 1)
+      throw new Error(`"${to}" matches more than one session: ${matches.map(labelOf).join(", ")}`);
+    const live = await this.likelyLive(matches);
+    if (live.length === 1)
+      return live[0];
+    throw new Error(`"${to}" matches more than one session that can be reached now: ${live.map(labelOf).join(", ")}. Say which one by the id in brackets`);
+  }
+  async withoutLeftBehind(peers) {
+    const byName = new Map;
+    for (const p of peers)
+      byName.set(p.name, [...byName.get(p.name) ?? [], p]);
+    const keep = new Set;
+    for (const same of byName.values())
+      for (const p of same.length === 1 ? same : await this.likelyLive(same))
+        keep.add(p);
+    return peers.filter((p) => keep.has(p));
+  }
+  async likelyLive(same) {
+    const scores = await Promise.all(same.map(async (p) => {
+      try {
+        if ((await this.deliver(p, { type: "ping" })).type === "pong")
+          return 2;
+      } catch {}
+      return this.isPulling(p) ? 1 : 0;
+    }));
+    const best = Math.max(...scores);
+    const top = same.filter((_, i) => scores[i] === best);
+    return best === 2 ? top : [top.at(-1)];
+  }
+  async deliver(peer, payload) {
+    if (peer.outside && !peer.host)
+      throw new DeliveryError("unreachable", `${peer.name} picks up its messages itself`);
+    const body = JSON.stringify(seal(this.withData(payload), fromB64(peer.key), this.keys));
+    const addrs = [...new Set([...peer.lastAddr ? [peer.lastAddr] : [], ...peer.addrs])];
+    let refused = false;
+    for (const addr of addrs) {
+      const reply = await this.deliverTo(peer, addr, body, this.opts.connectTimeoutMs);
+      if (reply === "refused")
+        refused = true;
+      if (!reply || reply === "refused")
+        continue;
+      peer.lastAddr = addr;
+      return reply;
+    }
+    if (refused)
+      throw new DeliveryError("rejected", `${peer.name} refused the message`);
+    throw new DeliveryError("unreachable", `${peer.name} is not reachable right now`);
+  }
+  async deliverTo(peer, addr, body, timeoutMs) {
+    const relayed = isRelayAddr(addr);
+    const url = relayed ? addr : `http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`;
+    const failed = (kind, detail) => {
+      if (!this.abort.signal.aborted)
+        peer.lastError = { kind, at: Date.now(), detail, addr: relayed ? "relay" : addr };
+      return null;
+    };
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: AbortSignal.any([AbortSignal.timeout(relayed ? Math.max(timeoutMs, this.opts.relayTimeoutMs) : timeoutMs), this.abort.signal])
+      });
+    } catch (e) {
+      return failed(linkErrorOf(e), detailOf(e));
+    }
+    if (res.status === 403)
+      return failed("not_recognized", "HTTP 403"), "refused";
+    if (res.status === 409) {
+      const stale = (await res.text().catch(() => "")).startsWith("stale");
+      if (stale)
+        this.clockDiffers(peer.key);
+      return failed(stale ? "clock" : "bad_answer", stale ? "HTTP 409 stale" : "HTTP 409");
+    }
+    if (!res.ok)
+      return failed("bad_answer", `HTTP ${res.status}`);
+    const sealed = await res.json().catch(() => null);
+    if (sealed?.from !== peer.key)
+      return failed("bad_answer");
+    const reply = open(sealed, this.keys);
+    if (!reply)
+      return failed("bad_answer");
+    const fresh = this.replay.check(sealed, reply);
+    if (fresh === "stale")
+      this.clockDiffers(peer.key);
+    if (fresh !== "ok")
+      return failed(fresh === "stale" ? "clock" : "bad_answer");
+    peer.lastSeen = Date.now();
+    peer.lastError = undefined;
+    this.noteUp(peer, addr);
+    this.wakeRetry(peer.key);
+    return reply;
+  }
+  clockDiffers(key) {
+    const last = this.clockOff.get(key);
+    this.clockOff.set(key, Date.now());
+    const peer = this.peers.get(key);
+    if (peer && (!last || Date.now() - last > 60 * 60000)) {
+      this.log.write("clock_differs", { id: peerId(key), peer: peer.name, what: "the two clocks differ by more than two hours, so envelopes are refused" });
+      this.emit({ type: "clock", peer: peer.name, fix: CLOCK_FIX, at: now() });
+    }
+  }
+  async sendOrQueue(peer, payload, thread, patient = true) {
+    const skipDirect = peer.directFailed && this.isPulling(peer);
+    if (!skipDirect && !this.outbox.some((o) => o.peer === peer.key)) {
+      try {
+        const reply = await this.deliver(peer, payload);
+        peer.directFailed = false;
+        this.unspool(payload);
+        if (reply.type === "refused")
+          throw new RefusedError(`nothing was kept on the other side: ${peer.name} did not take it: ${cleanReason(reply.reason)}`);
+        return "delivered";
+      } catch (e) {
+        if (e instanceof RefusedError)
+          throw e;
+        peer.directFailed = true;
+        if (e instanceof DeliveryError && e.reason === "rejected")
+          this.rejoin(peer);
+      }
+    }
+    if (this.isPulling(peer) && patient)
+      return await this.handOver(peer, payload, 3000, thread) ? "delivered" : "queued";
+    this.outbox.push({ id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() });
+    this.dirty();
+    this.wakePoll(peer.key);
+    return "queued";
+  }
+  async flush() {
+    if (this.flushing || this.outbox.length === 0)
+      return;
+    this.flushing = true;
+    try {
+      const blocked = new Set;
+      for (const item of [...this.outbox]) {
+        if (blocked.has(item.peer))
+          continue;
+        const peer = this.peers.get(item.peer);
+        const drop = (reason) => {
+          this.log.write("undelivered", { id: peerId(item.peer), reason });
+          this.unspool(item.payload);
+          this.outbox = this.outbox.filter((o) => o !== item);
+          this.emit({ type: "undelivered", to: peer?.name ?? "disconnected session", thread: item.thread, reason, at: now() });
+        };
+        if (!peer) {
+          drop("the other side's human closed the connection");
+          continue;
+        }
+        if (peer.retryAt && peer.retryAt > Date.now()) {
+          blocked.add(item.peer);
+          continue;
+        }
+        try {
+          const reply = await this.deliver(peer, item.payload);
+          if (reply.type === "refused") {
+            drop(`${peer.name} did not take it: ${cleanReason(reply.reason)}`);
+            continue;
+          }
+          this.unspool(item.payload);
+          this.outbox = this.outbox.filter((o) => o !== item);
+          this.dirty();
+        } catch (e) {
+          blocked.add(item.peer);
+          if (e instanceof DeliveryError && e.reason === "rejected")
+            this.rejoin(peer);
+        }
+      }
+    } finally {
+      this.flushing = false;
+    }
+  }
+  saveAgreement(thread) {
+    if (!this.opts.home || !isThreadId(thread.id))
+      return;
+    const dir = pathInside(this.opts.home, "agreements");
+    if (!dir)
+      return;
+    const started = thread.messages[0]?.at ?? now();
+    const name = agreementFileName(started, thread.id, this.key, thread.peer);
+    const path = name ? pathInside(dir, name) : undefined;
+    if (!path)
+      return;
+    const latest = new Map;
+    for (const m of thread.messages)
+      if (m.agreement)
+        latest.set(m.agreement.by, m);
+    const who = (m) => m.from === "me" ? `${this.name} \u2192 ${thread.peerName}` : `${thread.peerName} \u2192 ${this.name}`;
+    const label = { question: "\uC9C8\uBB38", answer: "\uB2F5", note: "\uC54C\uB9BC", closed: "\uB9C8\uAC10", agreement: "\uD569\uC758\uBB38" };
+    const versions = [...latest.values()].map((m) => `# \uD569\uC758\uBB38 \xB7 ${m.agreement.by} \uC791\uC131 (${m.at})
+
+${m.text}`);
+    const log = thread.messages.filter((m) => m.kind !== "agreement").map((m) => `### ${label[m.kind]} \xB7 ${who(m)} \xB7 ${m.at}
+
+${m.text}${m.context ? `
+
+\uBC30\uACBD:
+
+${m.context}` : ""}`);
+    const text = [
+      `# \uD569\uC758\uBB38: ${thread.subject}`,
+      `- \uB300\uD654: ${thread.id}
+- \uC0AC\uC774: ${this.name} \u2194 ${thread.peerName}${thread.peerAddr ? ` (${thread.peerAddr})` : ""}
+- \uC2DC\uC791: ${started}`,
+      ...versions,
+      `# \uB300\uD654 \uAE30\uB85D
+
+${log.join(`
+
+`)}`
+    ].join(`
+
+`);
+    try {
+      mkdirSync2(dir, { recursive: true, mode: 448 });
+      writeFileSync(path, `${text}
+`, { mode: 384 });
+      return path;
+    } catch {
+      return;
+    }
+  }
+  statePath() {
+    if (!this.opts.home || !Number.isInteger(this.port) || this.port <= 0)
+      return;
+    const dir = pathInside(this.opts.home, "bridges");
+    return dir ? pathInside(dir, `${this.port}.json`) : undefined;
+  }
+  writeState() {
+    const path = this.statePath();
+    if (!path)
+      return;
+    try {
+      mkdirSync2(dirname2(path), { recursive: true, mode: 448 });
+      const state = { name: this.name, port: this.port, pid: process.pid, addrs: this.addrs(), code: this.lastCode, updatedAt: now() };
+      writeFileSync(path, JSON.stringify(state, null, 2), { mode: 384 });
+    } catch {}
+  }
+  removeState() {
+    const path = this.statePath();
+    if (path)
+      rmSync(path, { force: true });
+  }
+}
+
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 import process2 from "process";
 
@@ -9445,7 +12506,7 @@ function shallowClone(o) {
   return o;
 }
 var propertyKeyTypes = /* @__PURE__ */ new Set(["string", "number", "symbol"]);
-function escapeRegex(str) {
+function escapeRegex2(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function clone(inst, def, params) {
@@ -10532,7 +13593,7 @@ var $ZodCheckUpperCase = /* @__PURE__ */ $constructor("$ZodCheckUpperCase", (ins
 });
 var $ZodCheckIncludes = /* @__PURE__ */ $constructor("$ZodCheckIncludes", (inst, def) => {
   $ZodCheck.init(inst, def);
-  const escapedRegex = escapeRegex(def.includes);
+  const escapedRegex = escapeRegex2(def.includes);
   const pattern = new RegExp(typeof def.position === "number" ? `^.{${def.position},}${escapedRegex}` : escapedRegex);
   def.pattern = pattern;
   inst._zod.check = (payload) => {
@@ -10551,7 +13612,7 @@ var $ZodCheckIncludes = /* @__PURE__ */ $constructor("$ZodCheckIncludes", (inst,
 });
 var $ZodCheckStartsWith = /* @__PURE__ */ $constructor("$ZodCheckStartsWith", (inst, def) => {
   $ZodCheck.init(inst, def);
-  const pattern = new RegExp(`^${escapeRegex(def.prefix)}.*`);
+  const pattern = new RegExp(`^${escapeRegex2(def.prefix)}.*`);
   def.pattern ?? (def.pattern = pattern);
   inst._zod.check = (payload) => {
     if (payload.value.startsWith(def.prefix))
@@ -10569,7 +13630,7 @@ var $ZodCheckStartsWith = /* @__PURE__ */ $constructor("$ZodCheckStartsWith", (i
 });
 var $ZodCheckEndsWith = /* @__PURE__ */ $constructor("$ZodCheckEndsWith", (inst, def) => {
   $ZodCheck.init(inst, def);
-  const pattern = new RegExp(`.*${escapeRegex(def.suffix)}$`);
+  const pattern = new RegExp(`.*${escapeRegex2(def.suffix)}$`);
   def.pattern ?? (def.pattern = pattern);
   inst._zod.check = (payload) => {
     if (payload.value.endsWith(def.suffix))
@@ -12003,7 +15064,7 @@ var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def) => {
   inst._zod.values = valuesSet;
   defineLazyInternal(inst, "pattern", (zod) => {
     const patternValues = getEnumValues(zod.def.entries).filter((k) => propertyKeyTypes.has(typeof k));
-    return new RegExp(patternValues.length ? `^(${patternValues.map((o) => escapeRegex(o.toString())).join("|")})$` : "^[^\\s\\S]$");
+    return new RegExp(patternValues.length ? `^(${patternValues.map((o) => escapeRegex2(o.toString())).join("|")})$` : "^[^\\s\\S]$");
   });
   inst._zod.parse = (payload, _ctx) => {
     const input = payload.value;
@@ -12025,7 +15086,7 @@ var $ZodLiteral = /* @__PURE__ */ $constructor("$ZodLiteral", (inst, def) => {
   inst._zod.values = values;
   defineLazyInternal(inst, "pattern", (zod) => {
     const vals = zod.def.values;
-    return new RegExp(vals.length ? `^(${vals.map((o) => typeof o === "string" ? escapeRegex(o) : o ? escapeRegex(o.toString()) : String(o)).join("|")})$` : "^[^\\s\\S]$");
+    return new RegExp(vals.length ? `^(${vals.map((o) => typeof o === "string" ? escapeRegex2(o) : o ? escapeRegex2(o.toString()) : String(o)).join("|")})$` : "^[^\\s\\S]$");
   });
   inst._zod.parse = (payload, _ctx) => {
     const input = payload.value;
@@ -12458,7 +15519,7 @@ function bucketFor(state, inst) {
   return bucket;
 }
 var handoff;
-var open = [];
+var open2 = [];
 var memo = {
   alloc(_inst, payload, empty) {
     const bucket = handoff;
@@ -12467,7 +15528,7 @@ var memo = {
     handoff = undefined;
     const entry = { value: empty, issues: null };
     bucket.set(payload.value, entry);
-    open.push(entry);
+    open2.push(entry);
     return empty;
   },
   guard(inst) {
@@ -12538,10 +15599,10 @@ var memo = {
           return payload;
         }
         handoff = bucket;
-        const depth = open.length;
+        const depth = open2.length;
         const result = base(payload, ctx);
         handoff = undefined;
-        const entry = open.length > depth ? open.pop() : undefined;
+        const entry = open2.length > depth ? open2.pop() : undefined;
         if (result instanceof Promise) {
           return result.then((r) => {
             if (entry)
@@ -16414,9 +19475,9 @@ import { homedir as homedir4 } from "os";
 import { basename as basename4, join as join7, resolve as resolve5 } from "path";
 
 // src/autostart.ts
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
-import { homedir, platform } from "os";
-import { join, resolve } from "path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { homedir as homedir2, platform as platform3 } from "os";
+import { join as join2, resolve as resolve2 } from "path";
 var LABEL = "com.brillianttiger.coworker";
 var xml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 function launchAgentPlist(bun, script, log) {
@@ -16456,19 +19517,19 @@ async function autostart(mode, home) {
     return 1;
   }
   const bun = process.execPath;
-  const script = resolve(process.argv[1] ?? "");
-  if (platform() === "darwin") {
-    const plist = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+  const script = resolve2(process.argv[1] ?? "");
+  if (platform3() === "darwin") {
+    const plist = join2(homedir2(), "Library", "LaunchAgents", `${LABEL}.plist`);
     const domain = `gui/${process.getuid?.() ?? 501}`;
     run(["launchctl", "bootout", `${domain}/${LABEL}`]);
     if (mode === "off") {
-      rmSync(plist, { force: true });
+      rmSync2(plist, { force: true });
       console.log("coworker app stopped and will no longer start at login");
       return 0;
     }
-    mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
-    mkdirSync(home, { recursive: true });
-    writeFileSync(plist, launchAgentPlist(bun, script, join(home, "app.log")));
+    mkdirSync3(join2(homedir2(), "Library", "LaunchAgents"), { recursive: true });
+    mkdirSync3(home, { recursive: true });
+    writeFileSync2(plist, launchAgentPlist(bun, script, join2(home, "app.log")));
     const loaded = run(["launchctl", "bootstrap", domain, plist]);
     if (!loaded.success) {
       console.error(`launchctl could not start it: ${loaded.stderr.toString().trim()}`);
@@ -16477,18 +19538,18 @@ async function autostart(mode, home) {
     console.log(`coworker app is running and starts at login (${plist})`);
     return 0;
   }
-  if (platform() === "win32") {
-    const startup = join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
-    const lnk = join(startup, "coworker.lnk");
+  if (platform3() === "win32") {
+    const startup = join2(process.env.APPDATA ?? join2(homedir2(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
+    const lnk = join2(startup, "coworker.lnk");
     powershell(`Get-CimInstance Win32_Process -Filter "Name like 'bun%'" | Where-Object { $_.CommandLine -like '*${ps(script.replace(/\[|\]/g, ""))}*serve*' } | Invoke-CimMethod -MethodName Terminate | Out-Null`);
     if (mode === "off") {
-      rmSync(lnk, { force: true });
+      rmSync2(lnk, { force: true });
       console.log("coworker app stopped and will no longer start at login");
       return 0;
     }
-    mkdirSync(startup, { recursive: true });
+    mkdirSync3(startup, { recursive: true });
     const made = powershell(windowsShortcutScript(bun, script, lnk));
-    if (!made.success || !existsSync(lnk)) {
+    if (!made.success || !existsSync3(lnk)) {
       console.error(`could not set it up: ${made.stderr.toString().trim()}`);
       return 1;
     }
@@ -16500,7 +19561,7 @@ async function autostart(mode, home) {
 }
 
 // src/channel.ts
-import { platform as platform2 } from "os";
+import { platform as platform4 } from "os";
 var CHANNEL_FLAG = "--dangerously-load-development-channels";
 function channelRequested(commandLine, asPlugin = false, server = "coworker") {
   const args = commandLine.trim().split(/\s+/);
@@ -16522,7 +19583,7 @@ function channelRequested(commandLine, asPlugin = false, server = "coworker") {
 }
 function ancestorCommandLines(depth = 4) {
   try {
-    return platform2() === "win32" ? windowsAncestors(depth) : posixAncestors(depth);
+    return platform4() === "win32" ? windowsAncestors(depth) : posixAncestors(depth);
   } catch {
     return [];
   }
@@ -16575,2786 +19636,6 @@ function detectChannel(env = process.env) {
 // src/resume.ts
 import { readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync as rmSync3, statSync as statSync3 } from "fs";
 import { join as join3, resolve as resolve3 } from "path";
-
-// src/bridge.ts
-import { createHash as createHash4, randomUUID } from "crypto";
-import { appendFileSync as appendFileSync2, chmodSync, closeSync, existsSync as existsSync3, mkdirSync as mkdirSync3, openSync, readdirSync, readFileSync as readFileSync2, readSync, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
-import { basename as basename2, dirname as dirname2, extname, isAbsolute, relative, resolve as resolve2 } from "path";
-
-// src/agreement.ts
-import { createHash } from "crypto";
-var isText = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
-var isList = (v) => Array.isArray(v) && v.length <= 50 && v.every((s) => isText(s, 2000));
-function isAgreement(a) {
-  const v = a;
-  return !!v && isText(v.by, 200) && isText(v.conclusion, 5000) && Array.isArray(v.facts) && v.facts.length <= 50 && v.facts.every((f) => !!f && isText(f.fact, 2000) && isText(f.evidence, 2000) && isText(f.checkedBy, 200)) && isList(v.guesses) && isList(v.disagreements) && isList(v.forHumans);
-}
-var bullets = (items) => items.length ? items.map((i) => `- ${i}`).join(`
-`) : "- \uC5C6\uC74C";
-function renderAgreement(a) {
-  const facts = a.facts.length ? a.facts.map((f) => `- ${f.fact}
-  - \uADFC\uAC70: ${f.evidence}
-  - \uD655\uC778\uD55C \uCABD: ${f.checkedBy}`).join(`
-`) : "- \uC5C6\uC74C";
-  return [
-    `## \uACB0\uB860
-
-${a.conclusion}`,
-    `## \uD655\uC778\uD55C \uC0AC\uC2E4\uACFC \uADFC\uAC70
-
-${facts}`,
-    `## \uCD94\uCE21 (\uC544\uBB34\uB3C4 \uD655\uC778\uD558\uC9C0 \uC54A\uC74C)
-
-${bullets(a.guesses)}`,
-    `## \uC758\uACAC\uC774 \uAC08\uB9B0 \uC810
-
-${bullets(a.disagreements)}`,
-    `## \uC0AC\uB78C\uC774 \uC815\uD560 \uAC83
-
-${bullets(a.forHumans)}`
-  ].join(`
-
-`);
-}
-var THREAD_ID = /^[0-9a-f]{8}$/;
-var DAY = /^\d{4}-\d{2}-\d{2}$/;
-var BASE64_KEY = /^[A-Za-z0-9+/]+={0,2}$/;
-function keyBytesOf(key) {
-  if (typeof key !== "string" || !BASE64_KEY.test(key))
-    return;
-  const bytes = Buffer.from(key, "base64");
-  return bytes.length === 32 ? bytes : undefined;
-}
-function agreementFileName(startedAt, threadId, ownKey, peerKey) {
-  if (typeof threadId !== "string" || threadId.length !== 8 || !THREAD_ID.test(threadId))
-    return;
-  const ownBytes = keyBytesOf(ownKey), peerBytes = keyBytesOf(peerKey);
-  if (!ownBytes || !peerBytes)
-    return;
-  const day = typeof startedAt === "string" && DAY.test(startedAt.slice(0, 10)) ? startedAt.slice(0, 10) : new Date().toISOString().slice(0, 10);
-  const pairHash = createHash("sha256").update(ownBytes).update(peerBytes).digest("hex").slice(0, 24);
-  return `${day}-${threadId}-${pairHash}.md`;
-}
-
-// src/code.ts
-import { createHash as createHash2 } from "crypto";
-var PREFIX = "cw1.";
-var check = (body) => createHash2("sha256").update(body).digest("base64url").slice(0, 8);
-function encodeCode(code) {
-  const body = Buffer.from(JSON.stringify(code)).toString("base64url");
-  return `${PREFIX}${body}.${check(body)}`;
-}
-function decodeCode(text) {
-  const trimmed = text.trim().replace(/^`+|`+$/g, "");
-  if (!trimmed.startsWith(PREFIX))
-    throw new Error('not a coworker connection code (it should start with "cw1.")');
-  const [body = "", sum] = trimmed.slice(PREFIX.length).split(".");
-  if (sum !== undefined && sum !== check(body))
-    throw new Error("connection code was copied wrong: some character differs from the original. Copy the whole line again exactly as the coworker sent it");
-  let code;
-  try {
-    code = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-  } catch {
-    throw new Error("connection code is damaged; copy the whole line again");
-  }
-  const valid = code?.v === 1 && typeof code.name === "string" && Array.isArray(code.addrs) && code.addrs.length > 0 && code.addrs.every((a) => typeof a === "string" && a.length > 0) && Number.isInteger(code.port) && code.port > 0 && code.port < 65536 && typeof code.key === "string" && typeof code.token === "string";
-  if (!valid)
-    throw new Error("connection code is damaged; copy the whole line again");
-  return code;
-}
-
-// src/crypto.ts
-var import_tweetnacl = __toESM(require_nacl_fast(), 1);
-var newKeyPair = () => import_tweetnacl.default.box.keyPair();
-var toB64 = (bytes) => Buffer.from(bytes).toString("base64");
-var fromB64 = (text) => new Uint8Array(Buffer.from(text, "base64"));
-var randomToken = () => Buffer.from(import_tweetnacl.default.randomBytes(16)).toString("base64url");
-function seal(payload, to, me) {
-  const nonce = import_tweetnacl.default.randomBytes(import_tweetnacl.default.box.nonceLength);
-  const stamped = payload && typeof payload === "object" && !Array.isArray(payload) ? { ...payload, t: Date.now() } : payload;
-  const message = new TextEncoder().encode(JSON.stringify(stamped));
-  return {
-    from: toB64(me.publicKey),
-    nonce: toB64(nonce),
-    box: toB64(import_tweetnacl.default.box(message, nonce, to, me.secretKey))
-  };
-}
-function open2(sealed, me) {
-  if (!isSealed(sealed))
-    return null;
-  try {
-    const from = fromB64(sealed.from);
-    const nonce = fromB64(sealed.nonce);
-    if (from.length !== import_tweetnacl.default.box.publicKeyLength || nonce.length !== import_tweetnacl.default.box.nonceLength)
-      return null;
-    const opened = import_tweetnacl.default.box.open(fromB64(sealed.box), nonce, from, me.secretKey);
-    return opened ? JSON.parse(new TextDecoder().decode(opened)) : null;
-  } catch {
-    return null;
-  }
-}
-function isSealed(value) {
-  const v = value;
-  return !!v && typeof v.from === "string" && typeof v.nonce === "string" && typeof v.box === "string";
-}
-var REPLAY_MAX_AGE_MS = 2 * 60 * 60000;
-
-class ReplayGuard {
-  maxAgeMs;
-  clock;
-  nonces = new Map;
-  lastSweep = 0;
-  constructor(maxAgeMs = REPLAY_MAX_AGE_MS, clock = Date.now) {
-    this.maxAgeMs = maxAgeMs;
-    this.clock = clock;
-  }
-  check(sealed, opened, now = this.clock()) {
-    const t = opened?.t;
-    if (typeof t === "number" && Math.abs(now - t) > this.maxAgeMs)
-      return "stale";
-    if (now - this.lastSweep > 60000) {
-      for (const [n, at] of this.nonces)
-        if (now - at > this.maxAgeMs * 2)
-          this.nonces.delete(n);
-      this.lastSweep = now;
-    }
-    if (this.nonces.has(sealed.nonce))
-      return "again";
-    this.nonces.set(sealed.nonce, now);
-    return "ok";
-  }
-}
-
-// src/net.ts
-import { networkInterfaces, hostname, platform as platform3 } from "os";
-var isPrivateLan = (ip) => ip.startsWith("10.") || ip.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
-function localAddresses() {
-  const lan = [];
-  const other = [];
-  for (const list of Object.values(networkInterfaces())) {
-    for (const nic of list ?? []) {
-      if (nic.family !== "IPv4" || nic.internal || nic.address.startsWith("169.254."))
-        continue;
-      (isPrivateLan(nic.address) ? lan : other).push(nic.address);
-    }
-  }
-  const name = bonjourName();
-  return [...new Set([...lan, ...other, ...name ? [name] : [], "127.0.0.1"])];
-}
-function bonjourName() {
-  if (platform3() === "darwin") {
-    try {
-      const out = Bun.spawnSync(["scutil", "--get", "LocalHostName"]).stdout.toString().trim();
-      if (out)
-        return `${out}.local`;
-    } catch {}
-  }
-  if (platform3() === "linux")
-    return `${hostname()}.local`;
-  return;
-}
-var shortHostname = () => hostname().replace(/\.local$/, "");
-var hostForUrl = (addr) => addr.includes(":") ? `[${addr}]` : addr;
-
-// src/box.ts
-import { createHash as createHash3 } from "crypto";
-var boxOf = (secret) => createHash3("sha256").update(secret).digest("base64url").slice(0, 22);
-
-// src/secrets.ts
-var KEYWORDS = "password|passwd|passphrase|secret|api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|\uBE44\uBC00\uBC88\uD638|\uD328\uC2A4\uC6CC\uB4DC|\uC554\uD638";
-var RULES = [
-  { kind: "private key", re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/g },
-  { kind: "AWS access key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
-  { kind: "GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/g },
-  { kind: "GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}/g },
-  { kind: "Slack token", re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/g },
-  { kind: "Anthropic API key", re: /\bsk-ant-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}/g },
-  { kind: "OpenAI API key", re: /\bsk-(?!ant-)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}/g },
-  { kind: "Stripe key", re: /\b[sr]k_live_[A-Za-z0-9]{20,}/g },
-  { kind: "Google API key", re: /\bAIza[0-9A-Za-z_-]{35}/g },
-  { kind: "npm token", re: /\bnpm_[A-Za-z0-9]{36}\b/g },
-  { kind: "JSON web token", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
-  { kind: "password in a URL", re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)@/gi, value: 1 },
-  { kind: "bearer token", re: /\bBearer\s+([A-Za-z0-9._~+/-]{20,}=*)/g, value: 1 },
-  { kind: "password or secret", re: new RegExp(`(?:${KEYWORDS})["']?\\s*[:=]\\s*["']?([^\\s"'\`,;]{6,})`, "gi"), value: 1 }
-];
-var PLACEHOLDER = [
-  /^<.*>$/,
-  /^\[.*\]$/,
-  /^\{\{.*\}\}$/,
-  /^\$\{.*\}$/,
-  /^\$[A-Za-z_]\w*$/,
-  /^%[A-Za-z_]\w*%$/,
-  /^[*x\u2022.]+$/i,
-  /^(?:redacted|hidden|masked|changeme|example|placeholder|password|passwd|secret|dummy|test|null|none|undefined|required|optional)$/i,
-  /^(?:your|my|the)[_-]/i,
-  /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+/,
-  /^[A-Za-z_$][\w$]*\(/,
-  /^[A-Z][A-Z0-9_]*$/,
-  /^(?:[A-Za-z]:)?[\\/]/,
-  /^~?\.{0,2}[\\/]/
-];
-var looksLikeSecret = (rule, value) => {
-  if (rule.value === undefined)
-    return true;
-  if (PLACEHOLDER.some((p) => p.test(value)))
-    return false;
-  if (rule.kind === "password or secret")
-    return /[^A-Za-z\uAC00-\uD7A3]/.test(value);
-  return true;
-};
-function findSecrets(fields) {
-  const found = [];
-  for (const [field, text] of Object.entries(fields)) {
-    if (!text)
-      continue;
-    for (const rule of RULES)
-      for (const m of text.matchAll(rule.re)) {
-        const value = m[rule.value ?? 0] ?? m[0];
-        if (!looksLikeSecret(rule, value))
-          continue;
-        found.push({ kind: rule.kind, field, preview: `${value.slice(0, 4)}\u2026` });
-      }
-  }
-  return found;
-}
-function assertNoSecrets(fields) {
-  const found = findSecrets(fields);
-  if (!found.length)
-    return;
-  const what = [...new Set(found.map((f) => `${f.kind} in ${f.field} ("${f.preview}")`))].join(", ");
-  throw new Error(`nothing was sent: this looks like it contains a secret (${what}). Remove it or replace it with a placeholder such as <redacted>. If the other side really needs it, tell your human; humans share secrets their own way, never through coworker.`);
-}
-
-// src/linklog.ts
-import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync, renameSync, statSync } from "fs";
-import { dirname } from "path";
-var MAX_BYTES = 1 << 20;
-var MAX_LOG_LINES = 300;
-
-class LinkLog {
-  path;
-  constructor(path) {
-    this.path = path;
-  }
-  write(event, fields = {}) {
-    if (!this.path)
-      return;
-    try {
-      mkdirSync2(dirname(this.path), { recursive: true, mode: 448 });
-      if (existsSync2(this.path) && statSync(this.path).size > MAX_BYTES)
-        renameSync(this.path, `${this.path}.1`);
-      appendFileSync(this.path, `${JSON.stringify({ at: new Date().toISOString(), event, ...fields })}
-`, { mode: 384 });
-    } catch {}
-  }
-  read(options = {}) {
-    if (!this.path)
-      return [];
-    const lines = Math.min(Math.max(options.lines ?? 100, 1), MAX_LOG_LINES);
-    const entries = [];
-    for (const file of [`${this.path}.1`, this.path]) {
-      let text = "";
-      try {
-        text = readFileSync(file, "utf8");
-      } catch {
-        continue;
-      }
-      for (const line of text.split(`
-`)) {
-        if (!line)
-          continue;
-        try {
-          const e = JSON.parse(line);
-          if (!options.id || !e.id || e.id === options.id)
-            entries.push(e);
-        } catch {}
-      }
-    }
-    return entries.slice(-lines);
-  }
-}
-
-// src/outside.ts
-import { realpathSync } from "fs";
-import { homedir as homedir2, hostname as hostname2, networkInterfaces as networkInterfaces2, platform as platform4, userInfo } from "os";
-import { basename } from "path";
-var PRIVATE_OR_VPN_IPV4 = /(?<![\d.])(?:10(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}|192\.168(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2})(?![\d.])/;
-var COMMON_SHORT_WORDS = new Set(["user", "root", "test", "main", "code", "node", "work", "home", "info", "admin", "dev"]);
-var escapeRegex2 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function scutilGet(key) {
-  if (platform4() !== "darwin")
-    return;
-  try {
-    const out = Bun.spawnSync(["scutil", "--get", key]);
-    if (out.exitCode !== 0)
-      return;
-    return out.stdout.toString().trim() || undefined;
-  } catch {
-    return;
-  }
-}
-function pathVariants(dir) {
-  const raw = dir?.trim();
-  if (!raw || raw.includes("${"))
-    return [];
-  const candidates = new Set([raw]);
-  try {
-    candidates.add(realpathSync(raw));
-  } catch {}
-  const out = [];
-  for (const c of candidates) {
-    const clean = c.replace(/[\\/]+$/, "");
-    if (clean.length < 4 || clean === "/" || /^[A-Za-z]:$/.test(clean))
-      continue;
-    out.push(clean);
-    if (clean.includes("\\"))
-      out.push(clean.replace(/\\/g, "/"));
-  }
-  return [...new Set(out)];
-}
-var cachedHostMarks;
-function baseMarks() {
-  if (cachedHostMarks)
-    return cachedHostMarks;
-  const marks = [];
-  const seen = new Set;
-  const addSubstring = (kind, value) => {
-    const v = value?.trim();
-    if (!v || v.length < 2)
-      return;
-    const lower = v.toLowerCase();
-    const key = `${kind}:${lower}`;
-    if (seen.has(key))
-      return;
-    seen.add(key);
-    marks.push({ kind, test: (text) => text.toLowerCase().includes(lower) });
-  };
-  const names = new Set;
-  const addName = (n) => {
-    const v = n?.trim();
-    if (!v || v.toLowerCase() === "localhost")
-      return;
-    names.add(v);
-    if (v.includes("\u2019"))
-      names.add(v.replace(/\u2019/g, "'"));
-  };
-  const host = hostname2();
-  const short = shortHostname();
-  addName(host);
-  addName(short);
-  if (short && short.toLowerCase() !== "localhost")
-    names.add(`${short}.local`);
-  for (const key of ["LocalHostName", "ComputerName", "HostName"]) {
-    const v = scutilGet(key);
-    addName(v);
-    if (v && key === "LocalHostName")
-      names.add(`${v}.local`);
-  }
-  if (platform4() === "linux" && host && host.toLowerCase() !== "localhost")
-    names.add(`${host}.local`);
-  if (platform4() === "win32")
-    addName(process.env.COMPUTERNAME);
-  for (const n of names) {
-    if (n.length <= 3) {
-      const re = new RegExp(`(?<![A-Za-z0-9])${escapeRegex2(n)}(?![A-Za-z0-9])`, "i");
-      marks.push({ kind: "computer name", test: (text) => re.test(text) });
-    } else {
-      addSubstring("computer name", n);
-    }
-  }
-  for (const p of pathVariants(homedir2()))
-    addSubstring("home folder path", p);
-  const accounts = new Set;
-  try {
-    if (userInfo().username)
-      accounts.add(userInfo().username.trim());
-  } catch {}
-  for (const envUser of [process.env.USER, process.env.USERNAME, basename(homedir2())]) {
-    if (envUser?.trim())
-      accounts.add(envUser.trim());
-  }
-  for (const u of accounts) {
-    if (!u || u.length < 2)
-      continue;
-    const lower = u.toLowerCase();
-    const pathRe = new RegExp(`(?:[/\\\\](?:Users|home)[/\\\\]|~)${escapeRegex2(u)}(?=$|[/\\\\\\s"'\`:,;)])`, "i");
-    marks.push({ kind: "account name", test: (text) => pathRe.test(text) });
-    if (COMMON_SHORT_WORDS.has(lower))
-      continue;
-    if (u.length >= 5) {
-      addSubstring("account name", u);
-    } else {
-      const tokenRe = new RegExp(`(?<![A-Za-z0-9])${escapeRegex2(u)}(?![A-Za-z0-9])`, "i");
-      marks.push({ kind: "account name", test: (text) => tokenRe.test(text) });
-    }
-  }
-  for (const list of Object.values(networkInterfaces2())) {
-    for (const nic of list ?? []) {
-      if (nic.internal)
-        continue;
-      const addr = nic.address.trim();
-      if (!addr)
-        continue;
-      const bare = addr.split("%")[0];
-      if (bare.includes(":")) {
-        addSubstring("internal or VPN address", addr);
-        addSubstring("internal or VPN address", bare);
-      } else {
-        const re = new RegExp(`(?<![\\d.])${escapeRegex2(bare)}(?![\\d.])`);
-        marks.push({ kind: "internal or VPN address", test: (text) => re.test(text) });
-      }
-    }
-  }
-  marks.push({ kind: "internal or VPN address", test: (text) => PRIVATE_OR_VPN_IPV4.test(text) });
-  cachedHostMarks = marks;
-  return marks;
-}
-function workingDirSafe() {
-  try {
-    return process.cwd();
-  } catch {
-    return;
-  }
-}
-function findComputerInfo(fields, extraDirs = []) {
-  const dirs = new Set;
-  for (const d of [workingDirSafe(), process.env.PWD, process.env.COWORKER_PROJECT_DIR, ...extraDirs]) {
-    for (const v of pathVariants(d))
-      dirs.add(v.toLowerCase());
-  }
-  const dirList = [...dirs];
-  const marks = [
-    ...baseMarks(),
-    ...dirList.map((d) => ({ kind: "project folder path", test: (text) => text.toLowerCase().includes(d) }))
-  ];
-  const found = [];
-  for (const [field, text] of Object.entries(fields)) {
-    if (!text)
-      continue;
-    for (const m of marks) {
-      if (m.test(text))
-        found.push({ kind: m.kind, field });
-    }
-  }
-  return found;
-}
-function assertNoComputerInfo(fields, extraDirs = []) {
-  const found = findComputerInfo(fields, extraDirs);
-  if (!found.length)
-    return;
-  const what = [...new Set(found.map((f) => `${f.kind} in ${f.field}`))].slice(0, 8).join(", ");
-  throw new Error(`nothing was sent: this session is connected through an outside code, and the content holds information about this computer (${what}). Remove it, and write file references as paths relative to the project instead of full paths on this PC.`);
-}
-function relayPortOf(relayUrl) {
-  try {
-    const u = new URL(relayUrl);
-    const port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
-    return Number.isInteger(port) && port > 0 && port < 65536 ? port : 443;
-  } catch {
-    return 443;
-  }
-}
-function outsideRelayError(relay, state) {
-  if (!relay)
-    return "cannot open a bridge for outsiders without a relay: set a relay server URL first (in Claude Code: /plugin configure coworker@ai-coworker-without-me -> Relay server, or set COWORKER_RELAY=https://relay.example.com, and Relay key / COWORKER_RELAY_KEY if the relay uses a key), then restart this session";
-  if (typeof state === "object" && /relay key/i.test(state.error))
-    return `cannot open a bridge for outsiders: ${state.error}. Set Relay key in /plugin configure coworker@ai-coworker-without-me or COWORKER_RELAY_KEY to the key from whoever runs the relay, then restart this session`;
-  const detail = typeof state === "object" ? state.error : "the relay did not answer in time";
-  return `cannot open a bridge for outsiders: the relay ${relay} is not answering as a coworker relay (${detail}). Check that COWORKER_RELAY (or Relay server in /plugin configure coworker@ai-coworker-without-me) points to a running coworker relay (${relay}/healthz should answer "coworker relay") and set COWORKER_RELAY_KEY if it uses a key`;
-}
-
-// src/bridge.ts
-var DEFAULT_PORTS = [7700, 7799];
-function parsePorts(text) {
-  if (!text?.trim())
-    return DEFAULT_PORTS;
-  const m = text.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-  const min = Number(m?.[1]);
-  const max = Number(m?.[2] ?? m?.[1]);
-  if (!m || min < 1024 || max > 65535 || min > max)
-    throw new Error(`COWORKER_PORTS must look like "9000-9010" or "9000", between 1024 and 65535 (got "${text}")`);
-  return [min, max];
-}
-var routeId = (key) => Buffer.from(key, "base64").toString("base64url").slice(0, 16);
-var peerId = (key) => routeId(key).slice(0, 6);
-var labelOf = (p) => `${p.name} [${peerId(p.key)}]`;
-var CLOCK_FIX = "Messages are kept and sent once the clocks agree. Turn on automatic date and time on this PC and ask the coworker to do the same (macOS: System Settings > General > Date & Time; Windows: Settings > Time & language > Date & time > Set time automatically).";
-var isLoopback = (addr) => addr.startsWith("127.") || addr === "::1" || addr === "localhost";
-var isRelayAddr = (addr) => /^https?:\/\//.test(addr);
-var LINK_ERRORS = {
-  no_route: "no route to it: it is asleep, turned off, or on another network",
-  refused: "its computer answered, but no bridge is listening on that port: coworker there is restarting or stopped",
-  cut: "the connection was cut while it was open: coworker there stopped, or the network dropped",
-  timeout: "no answer in time",
-  not_recognized: "its bridge answered but does not know this session; this side keeps offering the code it joined with",
-  bad_answer: "an answer came back that could not be read",
-  clock: "its bridge answered, but the clocks of the two PCs differ by more than two hours, so neither side takes the other's messages. Turn on automatic date and time on both PCs"
-};
-var MAX_ABOUT = 60;
-function cleanAbout(value) {
-  if (!value || typeof value !== "object")
-    return;
-  const out = {};
-  for (const key of ["app", "model", "effort"]) {
-    const v = value[key];
-    if (typeof v !== "string")
-      continue;
-    const text = v.replace(/\s+/g, " ").trim().slice(0, MAX_ABOUT);
-    if (text)
-      out[key] = text;
-  }
-  return Object.keys(out).length ? out : undefined;
-}
-var KINDS = ["question", "answer", "note", "closed", "agreement"];
-var EVERYONE = ["everyone", "all"];
-var FILE_CHUNK = 256 * 1024;
-var MAX_FILE_BYTES = 10 * 1024 * 1024;
-var MAX_FILES = 10;
-var MAX_FILES_BYTES = 30 * 1024 * 1024;
-var BATCH_BYTES = 600 * 1024;
-var CAN = ["files"];
-var cleanCan = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.length <= 20).slice(0, 20) : undefined;
-var FILE_PROBLEM = {
-  incomplete: "the file did not arrive completely",
-  size: "the size differs from what the sender said",
-  sha256: "the sha256 differs from what the sender said",
-  limit: "the files of this message are over the size limit",
-  no_folder: "this session has no folder to save files in"
-};
-var FILE_ID = /^[A-Za-z0-9-]{8,64}$/;
-var SHA256 = /^[0-9a-f]{64}$/;
-var THREAD_ID2 = /^[0-9a-f]{8}$/;
-var isThreadId = (value) => typeof value === "string" && value.length === 8 && THREAD_ID2.test(value);
-var WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
-function pathInside(folder, name) {
-  if (!folder || !name || name === "." || name === "..")
-    return;
-  if (name.includes("/") || name.includes("\\") || name.includes("\x00") || name.includes(":"))
-    return;
-  if (basename2(name) !== name)
-    return;
-  const base = resolve2(folder);
-  const full = resolve2(base, name);
-  const rel = relative(base, full);
-  if (!rel || rel !== name || rel.startsWith("..") || isAbsolute(rel) || dirname2(full) !== base)
-    return;
-  return full;
-}
-var SECRET_FILE = /^(?:\.env(?:\..*)?|\.netrc|\.npmrc|\.pypirc|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|.*\.(?:pem|key|p12|pfx|jks|keystore|kdbx))$/i;
-function safeFileName(name) {
-  const base = String(name ?? "").split(/[\\/]/).pop() ?? "";
-  const clean = base.replace(/[\x00-\x1f\x7f<>:"|?*]/g, "_").replace(/^\.+/, "").trim().replace(/[. ]+$/, "").slice(0, 150);
-  if (!clean)
-    return "file";
-  return WINDOWS_RESERVED.test(clean) ? `_${clean}`.slice(0, 150) : clean;
-}
-function freePath(folder, name) {
-  const clean = safeFileName(name);
-  const ext = extname(clean), stem = clean.slice(0, clean.length - ext.length);
-  let path = pathInside(folder, clean);
-  for (let n = 2;path && existsSync3(path); n++)
-    path = pathInside(folder, `${stem} (${n})${ext}`);
-  return path;
-}
-var DEFERS_TO_HUMAN = [
-  /(\uC0AC\uB78C|\uB2F4\uB2F9\uC790?|\uCC45\uC784\uC790|\uD300\uC7A5|\uC0C1\uC0AC|\uAD00\uB9AC\uC790|\uBCF4\uC548\s*\uB2F4\uB2F9|\uC717\uC120|\uACB0\uC7AC\uAD8C\uC790|\uC0AC\uC6A9\uC790|\uC8FC\uC778)(\uC5D0\uAC8C|\uAED8|\uD55C\uD14C|\uCABD\uC5D0|\uBD84\uAED8)\s*(\uC62C\uB838|\uC62C\uB9AC|\uB118\uACBC|\uB118\uAE30|\uC804\uB2EC|\uC5EC\uCB64|\uBB3C\uC5B4|\uBB3B|\uD655\uC778\s*\uC694\uCCAD|\uBCF4\uACE0)/,
-  /(\uD655\uC778|\uACB0\uC815|\uAC80\uD1A0|\uC2B9\uC778|\uB17C\uC758)\s*(\uD6C4|\uB418\uBA74|\uB418\uB294\s*\uB300\uB85C|\uD558\uACE0\s*\uB098\uC11C|\uBC1B\uB294\s*\uB300\uB85C|\uBC1B\uC73C\uBA74)[^.\n]{0,20}(\uC54C\uB824|\uC54C\uB9AC|\uD68C\uC2E0|\uB2F5|\uC5F0\uB77D|\uACF5\uC720)/,
-  /(\uC815\uD574\uC9C0\uBA74|\uC815\uD574\uC9C0\uB294\s*\uB300\uB85C|\uACB0\uC815\uB418\uBA74|\uB2F5\uC774\s*\uC624\uBA74|\uD68C\uC2E0\uC774\s*\uC624\uBA74|\uB2F5\uC744\s*\uBC1B\uC73C\uBA74)[^.\n]{0,20}(\uC54C\uB824|\uC54C\uB9AC|\uD68C\uC2E0|\uB2F5|\uC5F0\uB77D|\uACF5\uC720)/,
-  /\b(ask(ed|ing)?|check(ed|ing)? with|run (it|this) by|escalat\w*|pass(ed|ing)? (it|this) to|forward(ed|ing)? (it|this) to)\b[^.\n]{0,30}\b(my|our|the) (human|owner|user|manager|lead|team|boss|security)/i,
-  /\b(get back to you|let you know)\b[^.\n]{0,30}\b(once|when|after|as soon as)\b/i
-];
-var defersToHuman = (text) => DEFERS_TO_HUMAN.some((r) => r.test(text));
-var MAX_CATEGORY = 30;
-function cleanCategory(value) {
-  if (typeof value !== "string")
-    return;
-  return value.replace(/\s+/g, " ").trim().slice(0, MAX_CATEGORY) || undefined;
-}
-var NO_ANSWER_TEXT = [
-  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294|\uC744|\uC774|\uB3C4)?\s*(?:\uD558\uC2E4|\uD560|\uC8FC\uC2E4|\uC904)?\s*\uD544\uC694(?:(?:\uB294|\uAC00|\uB3C4)?\s*\uC5C6(?!\uC73C\uBA74|\uB2E4\uBA74|\uB2E4\uACE0|\uB2E4\uB294|\uB2E4\uBA70|\uB2E4\uB358|\uB294\uC9C0|\uC744\uC9C0|\uB098\uC694|\uC2B5\uB2C8\uAE4C|\uC5C8|\uC9C0\s*\uC54A|\uB294\s*(?:\uAC74|\uAC83\uC740|\uAC83\uC774|\uAC8C)\s*\uC544\uB2C8)|\uD558\uC9C0\s*\uC54A(?:\uC2B5\uB2C8\uB2E4|\uC544\uC694|\uC74C|\uB2E4(?![\uACE0\uB294\uBA70\uB358\uBA74])))/,
-  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294)?\s*\uBD88\uD544\uC694(?!\uD55C\uC9C0|\uD558\uBA74|\uD558\uB2E4\uBA74)/,
-  /(?:\uB2F5\uBCC0|\uB2F5\uC7A5|\uB2F5\uC2E0|\uD68C\uC2E0|\uB300\uB2F5|(?<![\uAC00-\uD7A3])\uB2F5)(?:\uC740|\uB294|\uC744)?\s*(?:\uC548\s*(?:\uD558\uC154|\uD574|\uC8FC\uC154|\uC918)\uB3C4|(?:\uD558|\uC8FC)\uC2DC?\uC9C0\s*\uC54A(?:\uC73C\uC154|\uC544)\uB3C4)\s*(?:\uB429|\uB3FC|\uAD1C\uCC2E|\uB418(?!\uB098|\uB294\uC9C0|\uB290\uB0D0|\uB0D0|\uACA0\uC2B5\uB2C8\uAE4C|\uACA0\uC5B4\uC694|\uACA0\uC8E0))/,
-  /(?<!\b(?:if|whether)\s)\bno\s+(?:reply|answer)\s+(?:is\s+)?(?:needed|required|necessary|expected)\b/i,
-  /\bno\s+need\s+to\s+(?:reply|answer|respond)\b/i,
-  /\b(?:do(?:es)?\s+not|don['\u2019]?t|doesn['\u2019]?t)\s+need\s+(?:to\s+)?(?:an?\s+|any\s+)?(?:reply|answer)\b/i,
-  /\bneed(?:n['\u2019]?t|\s+not)\s+(?:reply|answer)\b/i
-];
-var ASKS = /[?\uFF1F](?![A-Za-z0-9_%=&-])/;
-function saysNoAnswer(text) {
-  return typeof text === "string" && !ASKS.test(text) && NO_ANSWER_TEXT.some((re) => re.test(text));
-}
-function openQuestion(thread) {
-  for (let i = thread.messages.length - 1;i >= 0; i--) {
-    const m = thread.messages[i];
-    if (m.kind === "question")
-      return m;
-    if (m.kind === "answer")
-      return;
-  }
-  return;
-}
-var wireFiles = (files) => files.length ? { files: files.map(({ id, name, size, sha256 }) => ({ id, name, size, sha256 })) } : {};
-var sentFiles = (files) => files.length ? { files: files.map(({ name, size, sha256 }) => ({ name, size, sha256 })) } : {};
-var seenFile = (f) => ({ name: f.name, size: f.size, sha256: f.sha256, ...f.path ? { saved_to: f.path } : {}, verified: f.ok === true, ...f.problem ? { problem: FILE_PROBLEM[f.problem] } : {} });
-
-class DeliveryError extends Error {
-  reason;
-  constructor(reason, message) {
-    super(message);
-    this.reason = reason;
-  }
-}
-function isSavedBridge(v) {
-  const s = v;
-  return !!s && s.v === 1 && typeof s.name === "string" && (s.outsideName === undefined || typeof s.outsideName === "string") && (s.outsideOnly === undefined || typeof s.outsideOnly === "boolean") && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && (s.used === undefined || Array.isArray(s.used)) && (s.ended === undefined || Array.isArray(s.ended)) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && (s.viewer === undefined || !!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === "string") && (s.asking === undefined || Array.isArray(s.asking) && s.asking.every(isHumanQuestion)) && typeof s.savedAt === "string";
-}
-function isHumanQuestion(v) {
-  const q = v;
-  return !!q && typeof q.thread === "string" && typeof q.question === "string" && Array.isArray(q.options) && q.options.every((o) => typeof o === "string");
-}
-var now = () => new Date().toISOString();
-var NO_PEERS = "no connected session yet; open the bridge and exchange a connection code first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result";
-var POLL_FRESH_MS = 60000;
-var firstLine = (text) => text.trim().split(`
-`)[0].slice(0, 80);
-var counted = (t) => t.messages.filter((m) => m.kind === "question" || m.kind === "answer").length;
-var memberOf = (p) => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port });
-var MAX_NAME = 200;
-var MAX_ADDRS = 32;
-var isHelloFields = (p) => typeof p.name === "string" && Array.isArray(p.addrs) && p.addrs.length <= MAX_ADDRS && p.addrs.every((a) => typeof a === "string" && a.length > 0 && a.length <= 300) && Number.isInteger(p.port) && p.port > 0 && p.port < 65536;
-var isMember = (m) => {
-  const v = m;
-  return !!v && typeof v.key === "string" && isHelloFields(v);
-};
-var isAskInfo = (a) => {
-  const v = a;
-  return !!v && typeof v.id === "string" && Array.isArray(v.to) && v.to.every((n) => typeof n === "string") && (v.answers === "all" || v.answers === "one");
-};
-var placeOf = (addr, port) => isRelayAddr(addr) ? `${new URL(addr).host} (relay)` : `${hostForUrl(addr)}:${port}`;
-var whereIs = (p) => {
-  const addr = p.lastAddr ?? p.addrs[0];
-  return addr ? placeOf(addr, p.port) : undefined;
-};
-var detailOf = (e) => {
-  const err = e;
-  const name = err?.name === "TimeoutError" || err?.name === "AbortError" ? err.name : undefined;
-  return String(name ?? err?.code ?? err?.name ?? err?.message ?? e).slice(0, 120);
-};
-var isToken = (t) => typeof t === "string" && t.length > 0 && t.length <= 200;
-var linkErrorOf = (e) => {
-  const err = e;
-  if (err?.name === "TimeoutError")
-    return "timeout";
-  if (err?.code === "ECONNREFUSED" || err?.code === "ConnectionRefused")
-    return "refused";
-  if (err?.code === "ECONNRESET" || err?.code === "EPIPE" || err?.code === "ECONNABORTED" || err?.code === "ConnectionClosed")
-    return "cut";
-  return "no_route";
-};
-var isoOf = (ms) => ms ? new Date(ms).toISOString() : undefined;
-var MAX_USED = 500;
-var MAX_ENDED = 20;
-var savedPeer = (p) => ({
-  key: p.key,
-  name: p.name,
-  about: p.about,
-  can: p.can,
-  addrs: p.addrs,
-  port: p.port,
-  private: p.private || undefined,
-  outside: p.outside || undefined,
-  lastSeen: p.lastSeen,
-  token: p.token,
-  given: p.given
-});
-var TICK_MS = 5000;
-var PAUSE_MS = 30000;
-
-class Bridge {
-  keys;
-  about;
-  key;
-  route;
-  name;
-  outsideName;
-  projectDir;
-  outsideOnly = false;
-  port = 0;
-  peers = new Map;
-  threads = new Map;
-  server;
-  timer;
-  tokens = new Map;
-  used = new Map;
-  ended = [];
-  retryWakers = new Map;
-  log;
-  ticker;
-  stopReason;
-  rejoinTried = new Map;
-  down = new Map;
-  addedAt = new Map;
-  invites = new Map;
-  closedAsks = new Map;
-  seen = new Set;
-  refusedThreads = new Map;
-  replay;
-  clockOff = new Map;
-  outbox = [];
-  events = [];
-  waiters = [];
-  onEvent;
-  onMoved;
-  watchers = new Set;
-  viewerAddress;
-  asking = new Map;
-  lastWaitPing = 0;
-  onSlow;
-  waiting = 0;
-  flushing = false;
-  lastCode;
-  polling = new Set;
-  pollWaiters = new Map;
-  abort = new AbortController;
-  relaySecret;
-  relayBox;
-  keptRelaySecret;
-  relayState = "off";
-  relayWaiters = [];
-  saveTimer;
-  forget = false;
-  opts;
-  constructor(options) {
-    this.keys = options.keys ?? newKeyPair();
-    this.replay = new ReplayGuard(undefined, options.clock);
-    this.key = toB64(this.keys.publicKey);
-    this.route = routeId(this.key);
-    this.name = options.name;
-    this.outsideName = options.outsideName;
-    this.outsideOnly = !!options.outsideOnly;
-    this.projectDir = options.projectDir;
-    this.opts = {
-      ports: DEFAULT_PORTS,
-      addrs: localAddresses,
-      retryMs: 3000,
-      maxRetryMs: 30000,
-      tokenTtlMs: 60 * 60000,
-      connectTimeoutMs: 2000,
-      pollWaitMs: 20000,
-      relayTimeoutMs: 15000,
-      nudgeMs: 30 * 60000,
-      tickMs: TICK_MS,
-      ...options,
-      relay: options.relay?.trim().replace(/\/+$/, "") || undefined
-    };
-    const logsDir = this.opts.home ? pathInside(this.opts.home, "logs") : undefined;
-    this.log = new LinkLog(logsDir ? pathInside(logsDir, `${this.route}.log`) : undefined);
-  }
-  static restore(saved, options) {
-    const b = new Bridge({
-      ...options,
-      name: saved.name,
-      outsideName: saved.outsideName ?? options.outsideName,
-      outsideOnly: saved.outsideOnly ?? options.outsideOnly,
-      keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) }
-    });
-    b.about = cleanAbout(saved.about);
-    for (const p of saved.peers)
-      b.peers.set(p.key, {
-        key: p.key,
-        name: p.name,
-        about: cleanAbout(p.about),
-        can: cleanCan(p.can),
-        addrs: p.outside ? p.addrs.filter((a) => b.isOwnRelayBox(a)) : p.addrs,
-        port: p.port,
-        private: p.private || p.outside || undefined,
-        outside: p.outside || undefined,
-        directFailed: p.outside && !p.addrs.some((a) => b.isOwnRelayBox(a)) ? true : undefined,
-        lastSeen: typeof p.lastSeen === "number" ? p.lastSeen : undefined,
-        token: isToken(p.token) ? p.token : undefined,
-        given: isToken(p.given) ? p.given : undefined
-      });
-    for (const t of saved.threads)
-      if (t && isThreadId(t.id))
-        b.threads.set(t.id, t);
-    for (const t of b.threads.values())
-      for (const m of t.messages ?? [])
-        if (m.kind === "question" && !m.noAnswer && saysNoAnswer(m.text))
-          m.noAnswer = true;
-    b.outbox = saved.outbox.filter((o) => b.peers.has(o.peer));
-    for (const t of saved.tokens)
-      b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private || !!t.outside, outside: t.outside || undefined });
-    for (const u of saved.used ?? [])
-      if (typeof u?.token === "string" && typeof u.key === "string")
-        b.used.set(u.token, { key: u.key, private: !!u.private || !!u.outside, outside: u.outside || undefined });
-    b.ended = (saved.ended ?? []).filter((e) => typeof e?.name === "string" && typeof e.id === "string");
-    b.seen = new Set(saved.seen);
-    b.closedAsks = new Map(saved.closedAsks);
-    b.events = (saved.events ?? []).filter((e) => e.type !== "moved");
-    b.viewerAddress = saved.viewer;
-    if (isToken(saved.relaySecret))
-      b.keptRelaySecret = saved.relaySecret;
-    for (const q of saved.asking ?? [])
-      if (q && isThreadId(q.thread))
-        b.asking.set(q.thread, q);
-    try {
-      b.open(saved.port, { outsideOnly: b.outsideOnly });
-    } catch {
-      b.open(undefined, { outsideOnly: b.outsideOnly });
-    }
-    b.log.write("restored", { name: b.outsideOnly ? b.nameFor(true) : b.name, peers: b.peers.size, queued: b.outbox.length });
-    for (const peer of b.peers.values()) {
-      b.sayHello(peer, { back: true }).catch(() => {});
-      b.pollLoop(peer.key);
-    }
-    return b;
-  }
-  static async askToMove(saved) {
-    const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) };
-    try {
-      const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(seal({ type: "handover" }, keys.publicKey, keys)),
-        signal: AbortSignal.timeout(5000)
-      });
-      if (!res.ok)
-        return false;
-      return open2(await res.json(), keys)?.type === "handover_ok";
-    } catch {
-      return false;
-    }
-  }
-  persist() {
-    this.save();
-  }
-  snapshot() {
-    return {
-      v: 1,
-      name: this.name,
-      outsideName: this.outsideName,
-      outsideOnly: this.outsideOnly || undefined,
-      publicKey: toB64(this.keys.publicKey),
-      secretKey: toB64(this.keys.secretKey),
-      port: this.port,
-      about: this.about,
-      peers: [...this.peers.values()].map(savedPeer),
-      threads: [...this.threads.values()],
-      outbox: this.outbox,
-      tokens: [...this.tokens].filter(([, t]) => t.expires > Date.now()).map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private, outside: t.outside || undefined })),
-      used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private, outside: u.outside || undefined })),
-      ended: this.ended,
-      relaySecret: this.keptRelaySecret,
-      seen: [...this.seen].slice(-2000),
-      closedAsks: [...this.closedAsks],
-      events: this.events,
-      viewer: this.viewerAddress,
-      asking: [...this.asking.values()],
-      pid: process.pid,
-      savedAt: now()
-    };
-  }
-  get isOpen() {
-    return !!this.server;
-  }
-  get isOutsideOnly() {
-    return this.outsideOnly;
-  }
-  relayAddr() {
-    return this.opts.relay && this.relayBox ? `${this.opts.relay}/v1/box/${this.relayBox}` : undefined;
-  }
-  isOwnRelayBox(addr) {
-    if (!this.opts.relay)
-      return false;
-    const prefix = `${this.opts.relay}/v1/box/`;
-    return addr.startsWith(prefix) && /^[A-Za-z0-9_-]{22}$/.test(addr.slice(prefix.length));
-  }
-  nameFor(outsideOrPeer) {
-    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
-    if (!out)
-      return this.name;
-    if (this.outsideName)
-      return this.outsideName;
-    if (this.about?.app)
-      return this.about.app;
-    if (this.name.includes(" @ "))
-      return this.name.replace(/\s*@\s*.*$/, "").replace(/^.*\u00B7\s*/, "").trim() || "coworker";
-    return this.name;
-  }
-  addrsFor(outsideOrPeer) {
-    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
-    if (!out)
-      return this.addrs();
-    const box = this.relayAddr();
-    return box ? [box] : [];
-  }
-  portFor(outsideOrPeer) {
-    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
-    if (!out)
-      return this.port;
-    return this.opts.relay ? relayPortOf(this.opts.relay) : 443;
-  }
-  assertOutsideSafe(fields) {
-    assertNoComputerInfo(fields, [this.projectDir]);
-  }
-  addrs() {
-    const box = this.relayAddr();
-    const relay = box ? [box] : [];
-    if (this.outsideOnly)
-      return relay;
-    return [...this.opts.addrs(), ...relay];
-  }
-  open(port, options) {
-    if (this.server) {
-      if (port && port !== this.port)
-        throw new Error(`bridge is already open on port ${this.port}`);
-      if (options?.outsideOnly === false && this.outsideOnly) {
-        const prev = this.port;
-        this.server.stop(true);
-        this.server = undefined;
-        this.outsideOnly = false;
-        if (!this.listen(prev, "0.0.0.0")) {
-          const [min, max] = this.opts.ports;
-          for (let p = min;p <= max && !this.server; p++)
-            this.listen(p, "0.0.0.0");
-          if (!this.server)
-            throw new Error(`no free port between ${min} and ${max}`);
-        }
-        this.watchThisPc();
-        this.writeState();
-        this.changed();
-      }
-      return;
-    }
-    if (options?.outsideOnly !== undefined)
-      this.outsideOnly = options.outsideOnly;
-    const bindHost = this.outsideOnly ? "127.0.0.1" : "0.0.0.0";
-    if (port) {
-      if (!this.listen(port, bindHost))
-        throw new Error(`port ${port} is already in use; pick another port or leave it empty`);
-    } else {
-      const [min, max] = this.opts.ports;
-      for (let p = min;p <= max && !this.server; p++)
-        this.listen(p, bindHost);
-      if (!this.server)
-        throw new Error(`no free port between ${min} and ${max}`);
-    }
-    this.abort = new AbortController;
-    if (this.opts.relay) {
-      this.relaySecret = this.keptRelaySecret ?? randomToken();
-      this.keptRelaySecret = this.relaySecret;
-      this.relayBox = boxOf(this.relaySecret);
-      this.relayState = "connecting";
-      this.relayLoop();
-    }
-    this.timer = setInterval(() => {
-      this.flush();
-      this.tryInvites();
-    }, this.opts.retryMs);
-    this.timer.unref?.();
-    this.log.write("open", this.outsideOnly ? { name: this.nameFor(true), relay: this.opts.relay } : { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay });
-    this.watchThisPc();
-    this.writeState();
-    this.changed();
-    this.save();
-  }
-  newCode(options = {}) {
-    if (options.outside) {
-      if (!this.opts.relay)
-        throw new Error(outsideRelayError(undefined, "off"));
-      if (!this.server || this.relayState !== "ok" || !this.relayBox)
-        throw new Error(outsideRelayError(this.opts.relay, this.relayState));
-      const shownName = this.nameFor(true);
-      this.assertOutsideSafe({ name: shownName });
-      const token = randomToken();
-      const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs;
-      this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: true, outside: true });
-      this.lastCode = encodeCode({ v: 1, name: shownName, addrs: this.addrsFor(true), port: this.portFor(true), key: this.key, token });
-      this.writeState();
-      this.dirty();
-      return this.lastCode;
-    }
-    this.open(undefined, { outsideOnly: false });
-    const token = randomToken();
-    const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs;
-    this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: !!options.private });
-    this.lastCode = encodeCode({ v: 1, name: this.name, addrs: this.addrs(), port: this.port, key: this.key, token });
-    this.writeState();
-    this.dirty();
-    return this.lastCode;
-  }
-  async connect(codeText) {
-    const code = decodeCode(codeText);
-    if (code.key === this.key)
-      throw new Error("that is this session's own code; give it to your coworker instead");
-    if (!this.server)
-      this.open();
-    const known = this.peers.get(code.key);
-    if (known) {
-      known.addrs = [...new Set([...known.addrs, ...code.addrs])].slice(0, MAX_ADDRS);
-      known.token ??= code.token;
-      this.wakeRetry(known.key);
-      this.log.write("code_again", { id: peerId(known.key), peer: known.name });
-      await this.sayHello(known, { token: known.token }).catch(() => {});
-      this.dirty();
-      return known;
-    }
-    const peer = {
-      key: code.key,
-      name: code.name,
-      addrs: code.addrs,
-      port: code.port,
-      outside: this.outsideOnly && code.addrs.every(isRelayAddr) ? true : undefined,
-      token: code.token
-    };
-    let reply;
-    try {
-      reply = await this.sayHello(peer, { token: code.token });
-    } catch (e) {
-      this.forgetGiven(peer);
-      this.log.write("connect_failed", { id: peerId(peer.key), peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail, addrs: peer.addrs, port: peer.port });
-      if (e instanceof DeliveryError && e.reason === "rejected")
-        throw new Error("the other session refused this code; it was already used, expired, or that bridge was reopened. Ask for a new code");
-      if (this.clockOff.has(code.key))
-        throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`);
-      throw new Error(`cannot reach ${code.name} at ${code.addrs.join(", ")} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`);
-    }
-    if (reply.type !== "hello_ack") {
-      this.forgetGiven(peer);
-      throw new Error("unexpected answer from the other session");
-    }
-    peer.name = reply.name;
-    peer.private = !!reply.private;
-    peer.token ??= code.token;
-    if (peer.given)
-      this.used.set(peer.given, { key: peer.key, private: peer.private });
-    this.addPeer(peer, { how: "code" });
-    if (!peer.private)
-      for (const m of Array.isArray(reply.members) ? reply.members : [])
-        this.invite(m, peer.name);
-    return peer;
-  }
-  connecting() {
-    return [...this.invites.values()].map((i) => ({ name: i.name, introducedBy: i.by }));
-  }
-  links() {
-    return [...this.peers.values()].map((peer) => {
-      const pulling = this.isPulling(peer);
-      const down = pulling ? undefined : this.down.get(peer.key);
-      return {
-        key: peer.key,
-        id: peerId(peer.key),
-        name: peer.name,
-        about: peer.about,
-        state: down ? "reconnecting" : "connected",
-        since: isoOf(down?.since),
-        via: peer.lastAddr ? isRelayAddr(peer.lastAddr) ? "relay" : "direct" : pulling ? "pickup" : "direct"
-      };
-    });
-  }
-  async ask(to, question, context, files, reviewed = false) {
-    const peer = await this.resolvePeer(to);
-    if (peer.outside)
-      this.assertOutsideSafe({ question, context });
-    if (files?.length)
-      await this.assertTakesFiles([peer]);
-    return this.sendQuestion(peer, question, context, undefined, false, undefined, this.stage(files, reviewed, !!peer.outside));
-  }
-  async askMany(to, question, context, answers = "all", noAnswer = false, category, files, reviewed = false) {
-    const peers = await this.resolvePeers(to);
-    if (peers.some((p) => p.outside))
-      this.assertOutsideSafe({ question, context, category });
-    if (files?.length)
-      await this.assertTakesFiles(peers);
-    const staged = peers.map((p) => this.stage(files, reviewed, !!p.outside));
-    if (peers.length === 1)
-      return this.sendQuestion(peers[0], question, context, undefined, noAnswer, category, staged[0]);
-    const ask = { id: randomUUID().slice(0, 8), to: peers.map((p) => p.name), answers };
-    const sent = await Promise.all(peers.map((peer, i) => this.sendQuestion(peer, question, context, ask, noAnswer, category, staged[i]).catch((e) => ({
-      thread: undefined,
-      to: peer.name,
-      delivery: "refused",
-      error: e instanceof Error ? e.message : String(e)
-    }))));
-    return { ask: ask.id, answers, to: ask.to, sent };
-  }
-  async sendQuestion(peer, question, context, ask, noAnswer = false, category, files = []) {
-    assertNoSecrets({ question, context, category });
-    if (peer.outside)
-      this.assertOutsideSafe({ question, context, category });
-    const label = cleanCategory(category);
-    const thread = {
-      id: randomUUID().slice(0, 8),
-      peer: peer.key,
-      peerName: peer.name,
-      peerAddr: whereIs(peer),
-      subject: firstLine(question),
-      startedBy: "me",
-      status: "waiting_for_peer",
-      ask,
-      category: label,
-      messages: []
-    };
-    this.threads.set(thread.id, thread);
-    const notice = noAnswer || saysNoAnswer(question) ? { noAnswer: true } : {};
-    const wireAsk = peer.outside ? {} : { ask };
-    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ...wireAsk, ...notice, category: label, ...wireFiles(files), at: now() };
-    thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text: msg.text, context: msg.context, ...notice, ...files.length ? { files } : {}, at: msg.at });
-    this.changed();
-    try {
-      return { thread: thread.id, to: peer.name, delivery: await this.sendMessage(peer, msg, thread.id), ...sentFiles(files) };
-    } catch (e) {
-      this.outbox = this.outbox.filter((o) => o.thread !== thread.id);
-      this.unspool({ type: "msg", msg });
-      this.threads.delete(thread.id);
-      this.changed();
-      throw e;
-    }
-  }
-  async reply(threadId, text, opts = {}) {
-    const thread = this.threads.get(threadId);
-    if (!thread)
-      throw new Error(`no conversation with id ${threadId}`);
-    if (!(opts.human && thread.status === "agreed"))
-      this.assertOpen(thread);
-    assertNoSecrets({ answer: text });
-    const peer = this.peers.get(thread.peer);
-    if (!peer)
-      throw new Error(`${thread.peerName} is no longer connected`);
-    if (peer.outside)
-      this.assertOutsideSafe({ answer: text });
-    if (opts.files?.length)
-      await this.assertTakesFiles([peer]);
-    const files = this.stage(opts.files, opts.reviewed, !!peer.outside);
-    const human = opts.human ? { human: true } : {};
-    const msg = { id: randomUUID(), thread: thread.id, kind: "answer", text, ...human, ...wireFiles(files), at: now() };
-    thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text, ...human, ...files.length ? { files } : {}, at: msg.at });
-    if (thread.status !== "agreed" && !(thread.status === "peer_checking_with_their_human" && thread.humanSince))
-      thread.status = "waiting_for_peer";
-    this.changed();
-    const delivery = await this.sendMessage(peer, msg, thread.id);
-    return { thread: thread.id, to: peer.name, delivery, status: thread.status, ...sentFiles(files) };
-  }
-  async hold(threadId, note) {
-    const thread = this.threads.get(threadId);
-    if (!thread)
-      throw new Error(`no conversation with id ${threadId}`);
-    if (thread.status !== "agreed")
-      this.assertOpen(thread);
-    assertNoSecrets({ note });
-    const peer = this.peers.get(thread.peer);
-    if (!peer)
-      throw new Error(`${thread.peerName} is no longer connected`);
-    if (peer.outside)
-      this.assertOutsideSafe({ note });
-    const msg = { id: randomUUID(), thread: thread.id, kind: "note", text: note, at: now() };
-    thread.messages.push({ id: msg.id, from: "me", kind: "note", text: note, at: msg.at });
-    if (thread.status !== "agreed")
-      thread.status = "checking_with_your_human";
-    this.changed();
-    const delivery = await this.sendOrQueue(peer, { type: "msg", msg }, thread.id);
-    return { thread: thread.id, to: peer.name, delivery, status: thread.status };
-  }
-  async agree(threadId, input) {
-    const thread = this.threads.get(threadId);
-    if (!thread)
-      throw new Error(`no conversation with id ${threadId}`);
-    if (thread.status === "closed")
-      this.assertOpen(thread);
-    const facts = input.facts ?? [];
-    const fields = {
-      conclusion: input.conclusion,
-      facts: facts.map((f) => `${f.fact}
-${f.evidence}`).join(`
-`),
-      guesses: input.guesses?.join(`
-`),
-      disagreements: input.disagreements?.join(`
-`),
-      for_humans: input.forHumans?.join(`
-`)
-    };
-    assertNoSecrets(fields);
-    const peer = this.peers.get(thread.peer);
-    if (peer?.outside)
-      this.assertOutsideSafe(fields);
-    const me = this.nameFor(peer);
-    const agreement = {
-      by: me,
-      conclusion: input.conclusion,
-      facts: facts.map((f) => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy === "me" ? me : thread.peerName })),
-      guesses: input.guesses ?? [],
-      disagreements: input.disagreements ?? [],
-      forHumans: input.forHumans ?? []
-    };
-    if (!isAgreement(agreement))
-      throw new Error("the agreement is too long or has an empty item");
-    const msg = { id: randomUUID(), thread: thread.id, kind: "agreement", text: renderAgreement(agreement), agreement, at: now() };
-    thread.messages.push({ id: msg.id, from: "me", kind: "agreement", text: msg.text, agreement, at: msg.at });
-    thread.status = "agreed";
-    this.changed();
-    const file = this.saveAgreement(thread);
-    const delivery = peer ? await this.sendOrQueue(peer, { type: "msg", msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`;
-    return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file };
-  }
-  unread() {
-    return this.events;
-  }
-  unreadThreads() {
-    return [...new Set(this.events.flatMap((e) => e.type === "message" ? [e.thread] : []))];
-  }
-  async wait(timeoutMs, signal) {
-    if (timeoutMs <= 0)
-      return this.take();
-    const turn = ++this.waiting;
-    for (const wake of [...this.waiters])
-      wake();
-    const live = () => turn === this.waiting && !signal?.aborted;
-    const deadline = Date.now() + timeoutMs;
-    while (this.events.length === 0 && live() && Date.now() < deadline) {
-      await new Promise((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", done);
-          this.waiters = this.waiters.filter((w) => w !== done);
-          resolve();
-        };
-        const timer = Number.isFinite(deadline) ? setTimeout(done, deadline - Date.now()) : undefined;
-        signal?.addEventListener("abort", done);
-        this.waiters.push(done);
-      });
-    }
-    return live() ? this.take() : [];
-  }
-  take() {
-    const taken = this.events.splice(0);
-    if (taken.length)
-      this.changed();
-    return taken;
-  }
-  async connections() {
-    const peers = await Promise.all([...this.peers.values()].map(async (peer) => {
-      let direct = false;
-      try {
-        const pong = await this.deliver(peer, { type: "ping" });
-        direct = pong.type === "pong";
-        if (pong.type === "pong")
-          this.takeWaiting(peer, pong.waiting);
-      } catch {}
-      const deciding = [...this.threads.values()].filter((t) => t.peer === peer.key).flatMap((t) => {
-        const h = this.theirHuman(t);
-        return h ? [{ thread: t.id, subject: t.subject, ...h }] : [];
-      });
-      const pulling = this.isPulling(peer);
-      const reachable = direct || pulling;
-      const error = !reachable && peer.lastError;
-      return {
-        name: peer.name,
-        about: peer.about,
-        id: peerId(peer.key),
-        group: !peer.private,
-        reachable,
-        state: reachable ? "connected" : "reconnecting",
-        via: direct ? placeOf(peer.lastAddr, peer.port) : pulling ? "the other side cannot be reached directly, so it comes here to pick up messages" : undefined,
-        queued: this.outbox.filter((o) => o.peer === peer.key).length,
-        last_seen: isoOf(peer.lastSeen),
-        last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
-        next_try: reachable ? undefined : isoOf(peer.retryAt) ?? "now",
-        their_human_deciding: deciding.length ? deciding : undefined
-      };
-    }));
-    return { me: this.describe(), peers, connecting: this.connecting(), ended: this.ended.length ? this.ended : undefined, log: this.log.path };
-  }
-  threadSummaries() {
-    return [...this.threads.values()].map((t) => {
-      const last = t.messages.at(-1);
-      return {
-        id: t.id,
-        with: t.peerName,
-        subject: t.subject,
-        category: t.category,
-        status: t.status,
-        ask: t.ask && { id: t.ask.id, to: t.ask.to, answers: t.ask.answers },
-        messages: counted(t),
-        last: last && { from: last.from, kind: last.kind, text: last.text.slice(0, 200) },
-        no_answer_needed: openQuestion(t)?.noAnswer || undefined,
-        their_human: this.theirHuman(t)
-      };
-    });
-  }
-  describe() {
-    const relay = this.opts.relay ? { url: this.opts.relay, status: this.relayState } : undefined;
-    return { name: this.name, about: this.about, open: this.isOpen, port: this.port || undefined, addrs: this.isOpen ? this.addrs() : undefined, relay };
-  }
-  async relayReady(timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (this.relayState === "connecting" && Date.now() < deadline)
-      await new Promise((resolve) => {
-        const timer = setTimeout(resolve, Math.max(deadline - Date.now(), 0));
-        this.relayWaiters.push(() => (clearTimeout(timer), resolve()));
-      });
-    return this.relayState;
-  }
-  async close() {
-    if (!this.server)
-      return;
-    this.forget = true;
-    await Promise.all([...this.peers.values()].map(async (p) => {
-      try {
-        await this.deliver(p, { type: "bye" });
-      } catch {
-        if (this.isPulling(p))
-          await this.handOver(p, { type: "bye" }, 2000);
-      }
-    }));
-    this.shutdown();
-  }
-  shutdown() {
-    if (this.server)
-      this.log.write("closed", { by: this.forget ? "this side's human (close_bridge)" : this.stopReason ?? "the process stopped; it comes back on restart" });
-    this.stopReason = undefined;
-    clearInterval(this.ticker);
-    clearTimeout(this.saveTimer);
-    this.saveTimer = undefined;
-    if (this.opts.saveTo) {
-      if (this.forget)
-        rmSync2(this.opts.saveTo, { force: true });
-      else
-        this.save();
-    }
-    if (this.forget)
-      for (const kind of ["out", "partial"]) {
-        const dir = this.filesDir(kind);
-        if (dir)
-          rmSync2(dir, { recursive: true, force: true });
-      }
-    if (this.forget)
-      this.keptRelaySecret = undefined;
-    this.forget = false;
-    this.abort.abort();
-    for (const wakers of this.pollWaiters.values())
-      for (const wake of [...wakers])
-        wake();
-    clearInterval(this.timer);
-    this.server?.stop(true);
-    this.server = undefined;
-    this.relaySecret = undefined;
-    this.relayBox = undefined;
-    if (this.opts.relay)
-      this.relayState = "off";
-    this.removeState();
-    this.peers.clear();
-    this.tokens.clear();
-    this.used.clear();
-    this.ended = [];
-    this.retryWakers.clear();
-    this.invites.clear();
-    this.refusedThreads.clear();
-    this.outbox = [];
-    this.changed();
-  }
-  listen(port, hostname = "0.0.0.0") {
-    try {
-      this.server = Bun.serve({
-        port,
-        hostname,
-        maxRequestBodySize: 1 << 20,
-        idleTimeout: 60,
-        fetch: (req, server) => this.handle(req, server)
-      });
-      this.port = port;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  async handle(req, server) {
-    if (req.method !== "POST" || new URL(req.url).pathname !== `/v1/${this.route}`)
-      return new Response("not found", { status: 404 });
-    const sealed = await req.json().catch(() => null);
-    const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, "");
-    const { status, body } = await this.respond(sealed, seenAt);
-    return new Response(body, { status, headers: { "content-type": status === 200 ? "application/json" : "text/plain" } });
-  }
-  async respond(sealed, seenAt, relayed = false) {
-    try {
-      return await this.respondInner(sealed, seenAt, relayed);
-    } catch {
-      return { status: 500, body: "error" };
-    }
-  }
-  async respondInner(sealed, seenAt, relayed) {
-    const payload = open2(sealed, this.keys);
-    if (!payload)
-      return { status: 403, body: "forbidden" };
-    const fresh = this.replay.check(sealed, payload);
-    if (fresh === "stale")
-      this.clockDiffers(sealed.from);
-    if (fresh !== "ok")
-      return { status: 409, body: fresh === "stale" ? "stale: the two PCs clocks differ by more than two hours" : "already received" };
-    const from = sealed.from;
-    const answer = (p) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) });
-    const forbidden = { status: 403, body: "forbidden" };
-    if (from === this.key && payload.type === "handover" && this.server) {
-      this.emit({ type: "moved", at: now() });
-      this.stopReason = "another session on this PC took over this bridge";
-      this.save();
-      setTimeout(() => {
-        this.shutdown();
-        this.onMoved?.();
-      }, 50);
-      return answer({ type: "handover_ok" });
-    }
-    const peer = this.peers.get(from);
-    if (!peer) {
-      if (payload.type !== "hello" || !isHelloFields(payload))
-        return forbidden;
-      const invite = this.invites.get(from);
-      const invited = !!invite;
-      if (!invited && !relayed && typeof payload.token === "string" && (this.tokens.get(payload.token)?.outside || this.used.get(payload.token)?.outside))
-        return forbidden;
-      const why = invited ? undefined : this.whyRefused(payload.token, from);
-      const token = invited ? undefined : this.takeToken(payload.token, from);
-      if (!invited && !token) {
-        this.log.write("refused_stranger", { id: peerId(from), peer: payload.name.slice(0, MAX_NAME), from: seenAt ?? (relayed ? "relay" : undefined), reason: why });
-        return forbidden;
-      }
-      const outside = !!token?.outside;
-      const remote = relayed || !!seenAt && !isLoopback(seenAt);
-      const given = remote ? payload.addrs.filter((a) => !isLoopback(a)) : payload.addrs;
-      const addrs = outside ? payload.addrs.filter((a) => this.isOwnRelayBox(a)).slice(0, MAX_ADDRS) : [...new Set([...seenAt ? [seenAt] : [], ...given])];
-      const isPrivate = !!token?.private || outside;
-      const added = {
-        key: from,
-        name: payload.name.slice(0, MAX_NAME),
-        about: cleanAbout(payload.about),
-        can: cleanCan(payload.can),
-        addrs,
-        port: outside ? this.portFor(true) : payload.port,
-        directFailed: outside && addrs.length === 0 ? true : undefined,
-        private: isPrivate || undefined,
-        outside: outside || undefined,
-        token: isToken(payload.rejoin) ? payload.rejoin : undefined
-      };
-      const members = token && !isPrivate ? this.groupPeers().filter((p) => p.key !== from) : [];
-      for (const m of members)
-        this.sendOrQueue(m, { type: "introduce", member: memberOf(added) }).catch(() => {});
-      const rejoin = this.rejoinFor(added);
-      const again = !!token && "again" in token;
-      this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again, how: invited ? "introduced" : again ? "came back with its token" : "code" });
-      return answer({ type: "hello_ack", name: this.nameFor(added), members: members.map(memberOf), private: isPrivate || undefined, rejoin, about: this.about, can: CAN });
-    }
-    if (peer.outside && !relayed)
-      return forbidden;
-    peer.lastSeen = Date.now();
-    this.wakeRetry(peer.key);
-    if (payload.type === "hello")
-      return answer(this.welcomeBack(peer, payload, seenAt, relayed));
-    if (payload.type === "poll") {
-      peer.lastPollAt = Date.now();
-      const acked = new Set(Array.isArray(payload.ack) ? payload.ack : []);
-      if (acked.size) {
-        for (const o of this.outbox)
-          if (o.peer === peer.key && acked.has(o.id))
-            this.unspool(o.payload);
-        this.outbox = this.outbox.filter((o) => !(o.peer === peer.key && acked.has(o.id)));
-        this.dirty();
-      }
-      const items = await this.pending(peer.key, Math.min(Math.max(payload.wait, 0), 25000));
-      return answer({ type: "batch", items });
-    }
-    const reply = this.process(peer, payload);
-    return reply ? answer(reply) : { status: 400, body: "bad request" };
-  }
-  async relayLoop() {
-    const base = `${this.opts.relay}/v1`;
-    const box = this.relayBox;
-    const signal = this.abort.signal;
-    const headers = { authorization: `Bearer ${this.relaySecret}`, "content-type": "application/json", ...this.opts.relayKey ? { "x-relay-key": this.opts.relayKey } : {} };
-    const setState = (state) => {
-      if (JSON.stringify(state) !== JSON.stringify(this.relayState))
-        this.log.write("relay", { state });
-      this.relayState = state;
-      for (const wake of this.relayWaiters.splice(0))
-        wake();
-    };
-    let backoff = this.opts.retryMs;
-    let wait = 0;
-    while (!signal.aborted && this.relayBox === box) {
-      try {
-        const res = await fetch(`${base}/inbox/${box}`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ wait }),
-          signal: AbortSignal.any([AbortSignal.timeout(35000), signal])
-        });
-        if (res.status === 401) {
-          setState({ error: "the relay refused this session: wrong or missing relay key (COWORKER_RELAY_KEY)" });
-          return;
-        }
-        if (!res.ok)
-          throw new Error(`the relay answered ${res.status}`);
-        const data = await res.json().catch(() => null);
-        if (!Array.isArray(data?.items))
-          throw new Error("the server did not answer like a coworker relay");
-        const items = data.items;
-        setState("ok");
-        wait = 25000;
-        backoff = this.opts.retryMs;
-        for (const item of items)
-          this.answerRelayed(base, box, headers, item);
-      } catch (e) {
-        if (signal.aborted)
-          return;
-        setState({ error: `cannot reach the relay ${this.opts.relay}: ${e instanceof Error ? e.message : String(e)}` });
-        wait = 0;
-        await Bun.sleep(backoff);
-        backoff = Math.min(backoff * 2, 30000);
-      }
-    }
-  }
-  async answerRelayed(base, box, headers, item) {
-    let sealed = null;
-    try {
-      sealed = JSON.parse(item.body);
-    } catch {}
-    const { status, body } = await this.respond(sealed, undefined, true);
-    await fetch(`${base}/reply/${box}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ id: item.id, status, body }),
-      signal: AbortSignal.any([AbortSignal.timeout(1e4), this.abort.signal])
-    }).catch(() => {});
-  }
-  welcomeBack(peer, hello, seenAt, relayed) {
-    if (isHelloFields(hello)) {
-      const remote = relayed || !!seenAt && !isLoopback(seenAt);
-      const given = remote ? hello.addrs.filter((a) => !isLoopback(a)) : hello.addrs;
-      const addrs = peer.outside ? hello.addrs.filter((a) => this.isOwnRelayBox(a)).slice(0, MAX_ADDRS) : [...new Set([...seenAt ? [seenAt] : [], ...given])].slice(0, MAX_ADDRS);
-      const port = peer.outside ? this.portFor(true) : hello.port;
-      const moved = addrs.join() !== peer.addrs.join() || port !== peer.port;
-      this.log.write("hello_in", { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? "relay" : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? port : undefined });
-      peer.addrs = addrs;
-      peer.port = port;
-      peer.lastAddr = undefined;
-      peer.directFailed = peer.outside && addrs.length === 0;
-    }
-    if (isToken(hello.rejoin))
-      peer.token = hello.rejoin;
-    if (hello.back)
-      this.emit({ type: "connected", peer: peer.name, again: true, at: now() });
-    else
-      this.changed();
-    this.flush();
-    this.learn(peer, hello.about, hello.can);
-    return { type: "hello_ack", name: this.nameFor(peer), rejoin: this.rejoinFor(peer), about: this.about, can: CAN };
-  }
-  process(peer, payload) {
-    switch (payload.type) {
-      case "ping":
-        return { type: "pong", waiting: this.waitingFor(peer), can: CAN };
-      case "msg":
-        this.receive(peer, payload.msg);
-        return { type: "ok" };
-      case "bye":
-        this.dropPeer(peer);
-        return { type: "ok" };
-      case "hello":
-        if (!isHelloFields(payload))
-          return null;
-        peer.addrs = peer.outside ? payload.addrs.filter((a) => this.isOwnRelayBox(a)).slice(0, MAX_ADDRS) : payload.addrs;
-        peer.port = peer.outside ? this.portFor(true) : payload.port;
-        this.learn(peer, payload.about, payload.can);
-        return { type: "hello_ack", name: this.nameFor(peer), about: this.about, can: CAN };
-      case "introduce":
-        if (!peer.private)
-          this.invite(payload.member, peer.name);
-        return { type: "ok" };
-      case "file":
-        this.takeChunk(peer, payload);
-        return { type: "ok" };
-      case "receipt":
-        this.takeReceipt(peer, payload);
-        return { type: "ok" };
-      case "log_request": {
-        const lines = typeof payload.lines === "number" ? payload.lines : 100;
-        const id = peerId(peer.key);
-        if (peer.outside) {
-          const entries = this.log.read({ id, lines }).filter((e) => e.id === id).map((e) => ({
-            at: e.at,
-            event: e.event,
-            id,
-            ...typeof e.how === "string" ? { how: e.how } : {},
-            ...typeof e.kind === "string" ? { kind: e.kind } : {},
-            ...typeof e.tries === "number" ? { tries: e.tries } : {},
-            ...typeof e.down_for_s === "number" ? { down_for_s: e.down_for_s } : {},
-            ...typeof e.last_seen === "string" ? { last_seen: e.last_seen } : {}
-          }));
-          return { type: "log", entries };
-        }
-        return { type: "log", entries: this.log.read({ id, lines }) };
-      }
-      default:
-        return null;
-    }
-  }
-  groupPeers() {
-    return [...this.peers.values()].filter((p) => !p.private);
-  }
-  addPeer(peer, options = {}) {
-    if (this.peers.has(peer.key))
-      return false;
-    this.peers.set(peer.key, peer);
-    this.addedAt.set(peer.key, Date.now());
-    this.log.write("connected", { id: peerId(peer.key), peer: peer.name, how: options.how, via: options.via, addrs: peer.addrs, port: peer.port });
-    this.invites.delete(peer.key);
-    this.ended = this.ended.filter((e) => e.id !== peerId(peer.key));
-    this.save();
-    if (options.emit)
-      this.emit({ type: "connected", peer: peer.name, via: options.via, again: options.again || undefined, about: peer.about, at: now() });
-    else
-      this.changed();
-    this.pollLoop(peer.key);
-    return true;
-  }
-  invite(member, by) {
-    if (!isMember(member) || member.key === this.key || this.peers.has(member.key))
-      return;
-    const { key, name, addrs, port } = member;
-    this.invites.set(key, { key, name, addrs, port, by, nextTry: 0, backoff: this.opts.retryMs });
-    this.tryInvites();
-  }
-  async tryInvites() {
-    await Promise.all([...this.invites.values()].map(async (invite) => {
-      if (this.peers.has(invite.key))
-        return void this.invites.delete(invite.key);
-      if (invite.trying || invite.nextTry > Date.now() || !this.server)
-        return;
-      invite.trying = true;
-      const peer = { key: invite.key, name: invite.name, addrs: invite.addrs, port: invite.port };
-      try {
-        const reply = await this.sayHello(peer);
-        if (reply.type === "hello_ack" && this.invites.has(invite.key)) {
-          peer.name = reply.name;
-          this.addPeer(peer, { emit: true, via: invite.by, how: "introduced" });
-        } else
-          this.forgetGiven(peer);
-      } catch {
-        this.forgetGiven(peer);
-        invite.nextTry = Date.now() + invite.backoff;
-        invite.backoff = Math.min(invite.backoff * 2, this.opts.maxRetryMs);
-      } finally {
-        invite.trying = false;
-      }
-    }));
-  }
-  assertOpen(thread) {
-    if (thread.status === "closed") {
-      const notice = thread.messages.findLast((m) => m.kind === "closed");
-      throw new Error(notice?.text ?? "this question is closed. No answer is needed.");
-    }
-    if (thread.status === "agreed")
-      throw new Error("this conversation is finished: an agreement was written. If you disagree with it, write your own version with write_agreement; for anything new, send a new question");
-  }
-  closeSiblings(ask, answeredBy, except) {
-    this.closedAsks.set(ask.id, answeredBy);
-    for (const t of this.threads.values()) {
-      if (t.ask?.id !== ask.id || t.id === except || t.status === "closed")
-        continue;
-      const peer = this.peers.get(t.peer);
-      const text = peer?.outside ? "Another session answered first, so this question is closed. No answer is needed." : `${answeredBy} answered first, so this question is closed. No answer is needed.`;
-      const msg = { id: randomUUID(), thread: t.id, kind: "closed", text, at: now() };
-      t.messages.push({ id: msg.id, from: "me", kind: "closed", text, at: msg.at });
-      t.status = "closed";
-      if (peer)
-        this.sendOrQueue(peer, { type: "msg", msg }, t.id).catch(() => {});
-    }
-  }
-  askProgress(ask) {
-    const threads = [...this.threads.values()].filter((t) => t.ask?.id === ask.id);
-    const answered = threads.filter((t) => t.messages.some((m) => m.from === "peer" && m.kind === "answer")).map((t) => t.peerName);
-    return { id: ask.id, answers: ask.answers, asked: threads.map((t) => t.peerName), answered, closedBy: this.closedAsks.get(ask.id) };
-  }
-  dropPeer(peer) {
-    if (!this.peers.delete(peer.key))
-      return;
-    this.log.write("ended", { id: peerId(peer.key), peer: peer.name, by: "the other side's human (close_bridge)" });
-    for (const [token, u] of this.used)
-      if (u.key === peer.key)
-        this.used.delete(token);
-    for (const o of this.outbox)
-      if (o.peer === peer.key)
-        this.unspool(o.payload);
-    this.outbox = this.outbox.filter((o) => o.peer !== peer.key);
-    this.wakeRetry(peer.key);
-    const id = peerId(peer.key);
-    this.ended = [...this.ended.filter((e) => e.id !== id), { name: peer.name, id, at: now() }].slice(-MAX_ENDED);
-    this.emit({ type: "peer_closed", peer: peer.name, at: now() });
-  }
-  pause(peer, ms) {
-    const signal = this.abort.signal;
-    peer.retryAt = Date.now() + ms;
-    return new Promise((resolve) => {
-      const done = () => {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", done);
-        if (this.retryWakers.get(peer.key) === done)
-          this.retryWakers.delete(peer.key);
-        peer.retryAt = undefined;
-        resolve();
-      };
-      const timer = setTimeout(done, ms);
-      signal.addEventListener("abort", done);
-      this.retryWakers.set(peer.key, done);
-    });
-  }
-  wakeRetry(key) {
-    this.retryWakers.get(key)?.();
-  }
-  isPulling(peer) {
-    return !!peer.lastPollAt && Date.now() - peer.lastPollAt < POLL_FRESH_MS;
-  }
-  async handOver(peer, payload, waitMs, thread) {
-    const item = { id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() };
-    this.outbox.push(item);
-    this.dirty();
-    this.wakePoll(peer.key);
-    for (let waited = 0;waited < waitMs && this.outbox.includes(item); waited += 50)
-      await Bun.sleep(50);
-    return !this.outbox.includes(item);
-  }
-  wakePoll(key) {
-    for (const wake of [...this.pollWaiters.get(key) ?? []])
-      wake();
-  }
-  async pending(key, waitMs) {
-    const take = () => {
-      const out = [];
-      let bytes = 0;
-      for (const o of this.outbox) {
-        if (o.peer !== key)
-          continue;
-        const payload = this.withData(o.payload);
-        const size = JSON.stringify(payload).length;
-        if (out.length && bytes + size > BATCH_BYTES)
-          break;
-        out.push({ id: o.id, payload });
-        bytes += size;
-      }
-      return out;
-    };
-    const ready = take();
-    if (ready.length || waitMs === 0 || !this.server)
-      return ready;
-    await new Promise((resolve) => {
-      const done = () => {
-        clearTimeout(timer);
-        this.pollWaiters.get(key)?.delete(done);
-        resolve();
-      };
-      const timer = setTimeout(done, waitMs);
-      if (!this.pollWaiters.has(key))
-        this.pollWaiters.set(key, new Set);
-      this.pollWaiters.get(key).add(done);
-    });
-    return take();
-  }
-  async pollLoop(key) {
-    if (this.polling.has(key))
-      return;
-    this.polling.add(key);
-    let backoff = this.opts.retryMs;
-    let ack = [];
-    let lost = false;
-    try {
-      while (this.server && !this.abort.signal.aborted) {
-        const peer = this.peers.get(key);
-        if (!peer)
-          break;
-        if (peer.outside && peer.addrs.length === 0 && !peer.lastAddr) {
-          await this.pause(peer, backoff);
-          continue;
-        }
-        try {
-          if (!peer.lastAddr)
-            await this.deliver(peer, { type: "ping" });
-          const body = JSON.stringify(seal({ type: "poll", wait: this.opts.pollWaitMs, ack }, fromB64(peer.key), this.keys));
-          const reply = await this.deliverTo(peer, peer.lastAddr, body, this.opts.pollWaitMs + 5000);
-          if (reply === "refused")
-            throw new DeliveryError("rejected", "refused");
-          if (!reply)
-            throw new DeliveryError("unreachable", "no answer");
-          backoff = this.opts.retryMs;
-          ack = [];
-          if (lost) {
-            lost = false;
-            this.sayHello(peer).catch(() => {});
-            this.flush();
-            this.changed();
-          }
-          if (reply.type === "batch")
-            for (const item of reply.items) {
-              this.process(peer, item.payload);
-              ack.push(item.id);
-            }
-        } catch (e) {
-          if (this.abort.signal.aborted)
-            break;
-          this.noteDown(peer);
-          if (e instanceof DeliveryError && e.reason === "rejected")
-            await this.rejoin(peer);
-          peer.lastAddr = undefined;
-          if (!lost)
-            this.changed();
-          lost = true;
-          await this.pause(peer, backoff);
-          backoff = Math.min(backoff * 2, this.opts.maxRetryMs);
-        }
-      }
-    } finally {
-      this.polling.delete(key);
-    }
-  }
-  receive(peer, msg) {
-    if (!msg || typeof msg !== "object")
-      return;
-    if (!isThreadId(msg.thread)) {
-      const count = (this.refusedThreads.get(peer.key) ?? 0) + 1;
-      this.refusedThreads.set(peer.key, count);
-      this.log.write("refused_thread_id", { id: peerId(peer.key), count });
-      this.dropStagedChunks(peer, msg.files);
-      return;
-    }
-    if (typeof msg.id !== "string" || typeof msg.text !== "string")
-      return;
-    if (!KINDS.includes(msg.kind))
-      return;
-    if (this.seen.has(msg.id))
-      return;
-    this.seen.add(msg.id);
-    let thread = this.threads.get(msg.thread);
-    if (!thread) {
-      thread = {
-        id: msg.thread,
-        peer: peer.key,
-        peerName: peer.name,
-        peerAddr: whereIs(peer),
-        subject: msg.subject ?? firstLine(msg.text),
-        startedBy: "peer",
-        status: "your_turn",
-        ask: isAskInfo(msg.ask) ? { id: msg.ask.id, to: msg.ask.to, answers: msg.ask.answers } : undefined,
-        category: cleanCategory(msg.category),
-        messages: []
-      };
-      this.threads.set(thread.id, thread);
-    } else if (thread.peer !== peer.key) {
-      return;
-    }
-    const context = typeof msg.context === "string" ? msg.context : undefined;
-    const got = msg.kind === "agreement" && isAgreement(msg.agreement) ? msg.agreement : undefined;
-    const agreement = got && {
-      by: peer.name,
-      conclusion: got.conclusion,
-      facts: got.facts.map((f) => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy })),
-      guesses: got.guesses,
-      disagreements: got.disagreements,
-      forHumans: got.forHumans
-    };
-    if (msg.kind === "agreement" && !agreement)
-      return;
-    const text = agreement ? renderAgreement(agreement) : msg.text;
-    const human = msg.human === true ? { human: true } : {};
-    const notice = msg.kind === "question" && (msg.noAnswer === true || saysNoAnswer(msg.text));
-    const files = this.collect(peer, thread, msg.files);
-    thread.messages.push({ id: msg.id, from: "peer", kind: msg.kind, text, context, agreement, ...human, ...notice ? { noAnswer: true } : {}, ...files ? { files } : {}, at: now() });
-    if (files)
-      this.sendOrQueue(peer, { type: "receipt", thread: thread.id, msg: msg.id, files: files.map((f) => ({ id: f.id, ok: f.ok === true, problem: f.problem })) }, thread.id).catch(() => {});
-    if (thread.status === "closed" || msg.kind === "closed")
-      thread.status = "closed";
-    else if (agreement)
-      thread.status = "agreed";
-    else if (thread.status === "agreed") {} else if (msg.kind === "note")
-      this.peerAsksHuman(thread, false);
-    else if (msg.kind === "answer" && !msg.human && defersToHuman(text))
-      this.peerAsksHuman(thread, true);
-    else {
-      thread.status = "your_turn";
-      this.peerAnswered(thread);
-    }
-    if (agreement || thread.status === "closed")
-      this.peerAnswered(thread);
-    const file = agreement ? this.saveAgreement(thread) : undefined;
-    let ask = thread.ask;
-    if (thread.ask && thread.startedBy === "me") {
-      if (msg.kind === "answer" && thread.ask.answers === "one" && !this.closedAsks.has(thread.ask.id))
-        this.closeSiblings(thread.ask, peer.name, thread.id);
-      ask = this.askProgress(thread.ask);
-    }
-    this.emit({ type: "message", thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...files ? { files: files.map(seenFile) } : {}, ...human, ...notice ? { no_answer_needed: true } : {}, ...thread.category ? { category: thread.category } : {}, at: now() });
-  }
-  peerAsksHuman(thread, inText) {
-    if (thread.status !== "peer_checking_with_their_human" || !thread.humanSince) {
-      thread.humanSince = now();
-      thread.nudges = 0;
-      thread.peerWait = undefined;
-    }
-    thread.status = "peer_checking_with_their_human";
-    thread.saidInText = inText || undefined;
-  }
-  peerAnswered(thread) {
-    thread.humanSince = undefined;
-    thread.saidInText = undefined;
-    thread.nudges = undefined;
-    thread.peerWait = undefined;
-  }
-  waitingFor(peer) {
-    const out = [];
-    for (const q of this.asking.values()) {
-      if (this.threads.get(q.thread)?.peer !== peer.key)
-        continue;
-      out.push({
-        thread: q.thread,
-        since: q.at,
-        window: q.text ? "text" : q.closedAt ? "closed_without_answer" : "shown",
-        reminders: q.reminders ?? 0,
-        last_reminder: q.lastReminder,
-        closed_at: q.closedAt
-      });
-    }
-    return out.length ? out : undefined;
-  }
-  takeWaiting(peer, waiting) {
-    if (!Array.isArray(waiting))
-      return;
-    for (const w of waiting) {
-      if (!w || !isThreadId(w.thread) || typeof w.since !== "string")
-        continue;
-      const t = this.threads.get(w.thread);
-      if (!t || t.peer !== peer.key || t.status !== "peer_checking_with_their_human")
-        continue;
-      const window = ["shown", "closed_without_answer", "text"].includes(w.window) ? w.window : "shown";
-      const str = (v) => typeof v === "string" ? v.slice(0, 40) : undefined;
-      t.peerWait = { thread: t.id, since: str(w.since), window, reminders: Number.isInteger(w.reminders) ? w.reminders : 0, last_reminder: str(w.last_reminder), closed_at: str(w.closed_at) };
-    }
-  }
-  theirHuman(t) {
-    if (t.status !== "peer_checking_with_their_human" || !t.humanSince)
-      return;
-    const w = t.peerWait;
-    return {
-      since: t.humanSince,
-      minutes: Math.floor((Date.now() - Date.parse(t.humanSince)) / 60000),
-      window: w ? w.window === "shown" ? "a question window is on their human's screen" : w.window === "closed_without_answer" ? `their human saw the question window and closed it without answering at ${w.closed_at}; it opens again with the next reminder` : "their app cannot open a question window, so their AI asked their human in text" : t.saidInText ? "they only wrote that they passed it to their human (an older coworker version); whether a question window is open is unknown" : "unknown (the other side runs an older coworker version)",
-      reminders: w ? w.reminders : undefined,
-      last_reminder: w?.last_reminder
-    };
-  }
-  checkWaits() {
-    const t0 = Date.now();
-    const asking = [...this.threads.values()].filter((t) => t.status === "peer_checking_with_their_human" && t.humanSince);
-    if (!asking.length)
-      return;
-    if (t0 - this.lastWaitPing >= Math.min(60000, this.opts.nudgeMs)) {
-      this.lastWaitPing = t0;
-      for (const key of new Set(asking.map((t) => t.peer))) {
-        const peer = this.peers.get(key);
-        if (peer)
-          this.deliver(peer, { type: "ping" }).then((r) => r.type === "pong" && this.takeWaiting(peer, r.waiting)).catch(() => {});
-      }
-    }
-    for (const t of asking) {
-      const waited = t0 - Date.parse(t.humanSince);
-      const due = Math.floor(waited / this.opts.nudgeMs);
-      if (due <= (t.nudges ?? 0))
-        continue;
-      t.nudges = due;
-      const slow = {
-        type: "peer_human_slow",
-        thread: t.id,
-        peer: t.peerName,
-        subject: t.subject,
-        since: t.humanSince,
-        minutes: Math.floor(waited / 60000),
-        their_window: t.peerWait,
-        said_in_text: t.saidInText,
-        at: now()
-      };
-      this.emit(slow);
-      this.onSlow?.(slow);
-    }
-  }
-  emit(event) {
-    this.events.push(event);
-    for (const wake of [...this.waiters])
-      wake();
-    this.onEvent?.();
-    this.changed();
-  }
-  watch(onChange) {
-    this.watchers.add(onChange);
-    return () => void this.watchers.delete(onChange);
-  }
-  waitForHuman(question) {
-    this.asking.set(question.thread, question);
-    this.dirty();
-  }
-  humanQuestions() {
-    return [...this.asking.values()];
-  }
-  humanDone(thread) {
-    if (this.asking.delete(thread))
-      this.dirty();
-  }
-  remindedHuman(thread) {
-    const q = this.asking.get(thread);
-    if (!q)
-      return;
-    q.reminders = (q.reminders ?? 0) + 1;
-    q.lastReminder = now();
-    this.dirty();
-    return q;
-  }
-  humanClosedWindow(thread, closed) {
-    const q = this.asking.get(thread);
-    if (!q)
-      return;
-    q.closedAt = closed ? now() : undefined;
-    this.dirty();
-  }
-  tell(event) {
-    this.emit(event);
-  }
-  get viewerAt() {
-    return this.viewerAddress;
-  }
-  set viewerAt(at) {
-    if (at?.port === this.viewerAddress?.port && at?.token === this.viewerAddress?.token)
-      return;
-    this.viewerAddress = at;
-    this.dirty();
-  }
-  changed() {
-    this.dirty();
-    for (const onChange of [...this.watchers])
-      onChange();
-  }
-  dirty() {
-    if (!this.opts.saveTo || this.saveTimer || !this.server)
-      return;
-    this.saveTimer = setTimeout(() => {
-      this.saveTimer = undefined;
-      this.save();
-    }, 100);
-    this.saveTimer.unref?.();
-  }
-  save() {
-    const path = this.opts.saveTo;
-    if (!path || !this.server)
-      return;
-    try {
-      mkdirSync3(dirname2(path), { recursive: true, mode: 448 });
-      const tmp = `${path}.${process.pid}.tmp`;
-      writeFileSync2(tmp, JSON.stringify(this.snapshot()), { mode: 384 });
-      renameSync2(tmp, path);
-    } catch {}
-  }
-  takeToken(token, from) {
-    if (typeof token !== "string")
-      return;
-    const used = this.used.get(token);
-    if (used)
-      return used.key === from ? { expires: Infinity, private: used.private, outside: used.outside, again: true } : undefined;
-    const entry = this.tokens.get(token);
-    this.tokens.delete(token);
-    this.dirty();
-    if (!entry || entry.expires <= Date.now())
-      return;
-    this.used.set(token, { key: from, private: entry.private, outside: entry.outside });
-    this.trimUsed();
-    return entry;
-  }
-  trimUsed() {
-    for (const [token, u] of this.used) {
-      if (this.used.size <= MAX_USED)
-        return;
-      if (!this.peers.has(u.key))
-        this.used.delete(token);
-    }
-  }
-  whyRefused(token, from) {
-    if (!isToken(token))
-      return "it brought no code: this side does not know it (it may have lost its saved state, or joined before 0.7.0)";
-    const used = this.used.get(token);
-    if (used)
-      return used.key === from ? undefined : "that code was already used by another session";
-    const entry = this.tokens.get(token);
-    if (entry)
-      return entry.expires <= Date.now() ? "the code has expired" : undefined;
-    return "unknown code: it was never issued here, or this side was closed by its human and forgot it";
-  }
-  rejoinFor(peer) {
-    if (peer.given && this.used.get(peer.given)?.key === peer.key)
-      return peer.given;
-    const token = randomToken();
-    this.used.set(token, { key: peer.key, private: !!peer.private, outside: peer.outside || undefined });
-    peer.given = token;
-    this.trimUsed();
-    this.dirty();
-    return token;
-  }
-  forgetGiven(peer) {
-    if (peer.given && !this.peers.has(peer.key))
-      this.used.delete(peer.given);
-    peer.given = undefined;
-  }
-  noteDown(peer) {
-    const err = peer.lastError;
-    if (err?.kind === "not_recognized" && Date.now() - (this.addedAt.get(peer.key) ?? 0) < 5000)
-      return;
-    const what = `${err?.kind}|${err?.detail}`;
-    const down = this.down.get(peer.key);
-    if (!down || down.what !== what)
-      this.log.write(down ? "still_down" : "link_down", {
-        id: peerId(peer.key),
-        peer: peer.name,
-        kind: err?.kind,
-        detail: err?.detail,
-        addr: err?.addr,
-        tried: [...new Set([...peer.lastAddr ? [peer.lastAddr] : [], ...peer.addrs])],
-        port: peer.port,
-        tries: down?.tries,
-        last_seen: isoOf(peer.lastSeen)
-      });
-    this.down.set(peer.key, { since: down?.since ?? Date.now(), tries: (down?.tries ?? 0) + 1, what });
-  }
-  noteUp(peer, addr) {
-    const down = this.down.get(peer.key);
-    if (!down)
-      return;
-    this.down.delete(peer.key);
-    this.log.write("link_up", { id: peerId(peer.key), peer: peer.name, down_for_s: Math.round((Date.now() - down.since) / 1000), tries: down.tries, addr: isRelayAddr(addr) ? "relay" : addr });
-  }
-  async rejoin(peer) {
-    const last = this.rejoinTried.get(peer.key) ?? 0;
-    if (Date.now() - last < this.opts.retryMs)
-      return;
-    this.rejoinTried.set(peer.key, Date.now());
-    const id = peerId(peer.key);
-    if (!peer.token) {
-      if (!last)
-        this.log.write("cannot_rejoin", { id, peer: peer.name, why: "the other side forgot this session, and this side holds no token for it (connected before 0.7.0). The other side can put in this side's code again, or use a new code" });
-      return;
-    }
-    try {
-      const reply = await this.sayHello(peer, { token: peer.token });
-      if (reply.type === "hello_ack") {
-        if (Date.now() - (this.addedAt.get(peer.key) ?? 0) >= 5000)
-          this.log.write("rejoined", { id, peer: peer.name });
-        this.flush();
-      }
-    } catch {
-      if (!last)
-        this.log.write("rejoin_failed", { id, peer: peer.name, kind: peer.lastError?.kind, detail: peer.lastError?.detail });
-    }
-  }
-  async sayHello(peer, extra = {}) {
-    const reply = await this.deliver(peer, {
-      type: "hello",
-      name: this.nameFor(peer),
-      addrs: this.addrsFor(peer),
-      port: this.portFor(peer),
-      rejoin: this.rejoinFor(peer),
-      about: this.about,
-      can: CAN,
-      ...extra
-    });
-    if (reply.type === "hello_ack")
-      this.learn(peer, reply.about, reply.can);
-    if (reply.type === "hello_ack" && isToken(reply.rejoin)) {
-      peer.token = reply.rejoin;
-      if (this.peers.has(peer.key))
-        this.dirty();
-    }
-    return reply;
-  }
-  learn(peer, about, can) {
-    const next = cleanAbout(about), skills = cleanCan(can);
-    if (JSON.stringify(next) === JSON.stringify(peer.about) && JSON.stringify(skills) === JSON.stringify(peer.can))
-      return;
-    peer.about = next;
-    peer.can = skills;
-    if (this.peers.has(peer.key))
-      this.changed();
-  }
-  setAbout(about) {
-    const next = cleanAbout({ ...this.about, ...about });
-    if (JSON.stringify(next) === JSON.stringify(this.about))
-      return;
-    this.about = next;
-    this.changed();
-    for (const peer of this.peers.values())
-      this.sayHello(peer).catch(() => {});
-  }
-  pin(ids, pinned) {
-    let changed = 0;
-    for (const id of new Set(ids)) {
-      const t = this.threads.get(id);
-      if (!t || !!t.pinned === pinned)
-        continue;
-      if (pinned)
-        t.pinned = true;
-      else
-        delete t.pinned;
-      changed++;
-    }
-    if (changed)
-      this.changed();
-    return changed;
-  }
-  filesDir(kind) {
-    if (!this.opts.home)
-      return;
-    const root = pathInside(this.opts.home, "files");
-    const mine = root ? pathInside(root, this.route) : undefined;
-    return mine ? pathInside(mine, kind) : undefined;
-  }
-  async assertTakesFiles(peers) {
-    for (const peer of peers) {
-      if (peer.can?.includes("files"))
-        continue;
-      try {
-        const pong = await this.deliver(peer, { type: "ping" });
-        if (pong.type === "pong")
-          this.learn(peer, peer.about, pong.can);
-      } catch {}
-      if (!peer.can?.includes("files"))
-        throw new Error(`nothing was sent: ${peer.name} cannot receive files. It runs a coworker version older than 0.12.0, or it has not answered since it was updated. Ask its human to update coworker and try again, or send the content another way`);
-    }
-  }
-  stage(paths, reviewed = false, outside = false) {
-    if (!paths?.length)
-      return [];
-    const dir = this.filesDir("out");
-    if (!dir)
-      throw new Error("nothing was sent: this session has no folder to keep files in");
-    const unique = [...new Set(paths)];
-    if (unique.length > MAX_FILES)
-      throw new Error(`nothing was sent: one message takes at most ${MAX_FILES} files`);
-    const read = unique.map((path) => {
-      const name = basename2(path);
-      if (SECRET_FILE.test(name))
-        throw new Error(`nothing was sent: ${name} looks like a file that holds keys or passwords. Humans share secrets their own way, never through coworker`);
-      let bytes;
-      try {
-        const stat = statSync2(path);
-        if (!stat.isFile())
-          throw new Error("not a file");
-        if (stat.size > MAX_FILE_BYTES)
-          throw new RangeError;
-        bytes = readFileSync2(path);
-      } catch (e) {
-        if (e instanceof RangeError)
-          throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`);
-        throw new Error(`nothing was sent: cannot read the file ${path}. Give the full path of a file on this PC`);
-      }
-      if (bytes.length > MAX_FILE_BYTES)
-        throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`);
-      return { path, name: safeFileName(name), bytes };
-    });
-    if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES)
-      throw new Error(`nothing was sent: the files are larger than ${MAX_FILES_BYTES >> 20} MiB together, the most one message can carry`);
-    if (outside) {
-      const outsideTexts = {};
-      for (const f of read) {
-        outsideTexts[`the file name "${f.name}"`] = f.name;
-        outsideTexts[`the file ${f.name}`] = f.bytes.toString("utf8");
-      }
-      this.assertOutsideSafe(outsideTexts);
-    }
-    const texts = {};
-    for (const f of read)
-      if (f.bytes.length <= 2 * 1024 * 1024 && !f.bytes.subarray(0, 8192).includes(0))
-        texts[`the file ${f.name}`] = f.bytes.toString("utf8");
-    const found = findSecrets(texts);
-    const list = (items) => [...new Set(items.map((f) => `${f.kind} in ${f.field} ("${f.preview}")`))].slice(0, 12).join(", ");
-    const sure = found.filter((f) => f.kind !== "password or secret");
-    if (sure.length)
-      throw new Error(`nothing was sent: a file contains a secret (${list(sure)}). Humans share secrets their own way, never through coworker`);
-    const maybe = found.filter((f) => f.kind === "password or secret");
-    if (maybe.length && !reviewed)
-      throw new Error(`nothing was sent: a file may contain a password or secret (${list(maybe)}). Scripts and settings files often look like this without holding a real secret. Show these places to your human. If your human says none of them is a real secret, send again with files_reviewed_by_human: true`);
-    mkdirSync3(dir, { recursive: true, mode: 448 });
-    return read.map((f) => {
-      const id = randomUUID();
-      const file = pathInside(dir, id);
-      if (!file)
-        throw new Error("nothing was sent: this session has no folder to keep files in");
-      writeFileSync2(file, f.bytes, { mode: 384 });
-      return { id, name: f.name, size: f.bytes.length, sha256: createHash4("sha256").update(f.bytes).digest("hex"), path: f.path };
-    });
-  }
-  async sendMessage(peer, msg, thread) {
-    let queued = false;
-    for (const f of msg.files ?? []) {
-      const of = Math.max(1, Math.ceil(f.size / FILE_CHUNK));
-      for (let seq = 0;seq < of; seq++)
-        if (await this.sendOrQueue(peer, { type: "file", id: f.id, seq, of, size: f.size }, thread, !queued) === "queued")
-          queued = true;
-    }
-    return this.sendOrQueue(peer, { type: "msg", msg }, thread, !queued);
-  }
-  withData(payload) {
-    if (payload.type !== "file" || payload.data !== undefined)
-      return payload;
-    const dir = this.filesDir("out");
-    const file = dir && typeof payload.id === "string" && FILE_ID.test(payload.id) ? pathInside(dir, payload.id) : undefined;
-    let data = "";
-    if (file)
-      try {
-        const fd = openSync(file, "r");
-        try {
-          const buf = Buffer.alloc(FILE_CHUNK);
-          data = buf.subarray(0, readSync(fd, buf, 0, FILE_CHUNK, payload.seq * FILE_CHUNK)).toString("base64");
-        } finally {
-          closeSync(fd);
-        }
-      } catch {}
-    return { ...payload, data };
-  }
-  unspool(payload) {
-    if (payload.type !== "msg" || !payload.msg.files?.length)
-      return;
-    const dir = this.filesDir("out");
-    if (!dir)
-      return;
-    for (const f of payload.msg.files) {
-      if (typeof f?.id !== "string" || !FILE_ID.test(f.id))
-        continue;
-      const file = pathInside(dir, f.id);
-      if (file)
-        rmSync2(file, { force: true });
-    }
-  }
-  dropStagedChunks(peer, sent) {
-    if (!Array.isArray(sent) || !sent.length)
-      return;
-    const partial = this.filesDir("partial");
-    if (!partial)
-      return;
-    for (const f of sent.slice(0, MAX_FILES)) {
-      if (!f || typeof f.id !== "string" || !FILE_ID.test(f.id))
-        continue;
-      const file = pathInside(partial, `${peerId(peer.key)}-${f.id}`);
-      if (file)
-        rmSync2(file, { force: true });
-    }
-  }
-  takeChunk(peer, p) {
-    const dir = this.filesDir("partial");
-    if (!dir || typeof p.id !== "string" || !FILE_ID.test(p.id) || typeof p.data !== "string")
-      return;
-    if (!Number.isInteger(p.size) || p.size < 0 || p.size > MAX_FILE_BYTES)
-      return;
-    const of = Math.max(1, Math.ceil(p.size / FILE_CHUNK));
-    if (!Number.isInteger(p.seq) || p.seq < 0 || p.seq >= of || p.of !== of)
-      return;
-    const bytes = Buffer.from(p.data, "base64");
-    if (bytes.length !== (p.seq < of - 1 ? FILE_CHUNK : p.size - FILE_CHUNK * (of - 1)))
-      return;
-    const prefix = `${peerId(peer.key)}-`, path = pathInside(dir, prefix + p.id);
-    if (!path)
-      return;
-    try {
-      if (p.seq === 0) {
-        mkdirSync3(dir, { recursive: true, mode: 448 });
-        const mine = readdirSync(dir).filter((n) => n.startsWith(prefix));
-        for (const n of mine) {
-          const old = pathInside(dir, n);
-          if (old && Date.now() - statSync2(old).mtimeMs > 24 * 60 * 60000)
-            rmSync2(old, { force: true });
-        }
-        if (!existsSync3(path) && readdirSync(dir).filter((n) => n.startsWith(prefix)).length >= MAX_FILES * 2)
-          return;
-        writeFileSync2(path, bytes, { mode: 384 });
-      } else if (existsSync3(path) && statSync2(path).size === p.seq * FILE_CHUNK)
-        appendFileSync2(path, bytes);
-    } catch {}
-  }
-  collect(peer, thread, sent) {
-    if (!Array.isArray(sent) || !sent.length)
-      return;
-    const partial = this.filesDir("partial"), received = this.filesDir("received");
-    let total = 0;
-    const notes = sent.slice(0, MAX_FILES).flatMap((f) => {
-      if (!f || typeof f.id !== "string" || !FILE_ID.test(f.id) || typeof f.name !== "string" || !Number.isInteger(f.size) || f.size < 0 || typeof f.sha256 !== "string" || !SHA256.test(f.sha256))
-        return [];
-      const note = { id: f.id, name: safeFileName(f.name), size: f.size, sha256: f.sha256 };
-      const from = partial ? pathInside(partial, `${peerId(peer.key)}-${f.id}`) : undefined;
-      const fail = (problem) => {
-        if (from)
-          rmSync2(from, { force: true });
-        return [{ ...note, ok: false, problem }];
-      };
-      if (!from || !received || !isThreadId(thread.id))
-        return fail("no_folder");
-      total += note.size;
-      if (note.size > MAX_FILE_BYTES || total > MAX_FILES_BYTES)
-        return fail("limit");
-      let size = -1;
-      try {
-        size = statSync2(from).size;
-      } catch {}
-      if (size < note.size)
-        return fail("incomplete");
-      if (size > note.size)
-        return fail("size");
-      try {
-        if (createHash4("sha256").update(readFileSync2(from)).digest("hex") !== note.sha256)
-          return fail("sha256");
-        const folder = pathInside(received, thread.id);
-        if (!folder)
-          return fail("no_folder");
-        mkdirSync3(folder, { recursive: true, mode: 448 });
-        const to = freePath(folder, note.name);
-        if (!to)
-          return fail("no_folder");
-        renameSync2(from, to);
-        chmodSync(to, 384);
-        return [{ ...note, name: basename2(to), path: to, ok: true }];
-      } catch {
-        return fail("no_folder");
-      }
-    });
-    return notes.length ? notes : undefined;
-  }
-  takeReceipt(peer, r) {
-    const thread = isThreadId(r.thread) ? this.threads.get(r.thread) : undefined;
-    if (!thread || thread.peer !== peer.key || !Array.isArray(r.files))
-      return;
-    const message = thread.messages.find((m) => m.id === r.msg && m.from === "me");
-    if (!message?.files)
-      return;
-    const failed = [];
-    for (const got of r.files) {
-      const note = message.files.find((f) => f.id === got?.id);
-      if (!note || note.ok !== undefined)
-        continue;
-      note.ok = got.ok === true;
-      if (note.ok)
-        continue;
-      note.problem = typeof got.problem === "string" && got.problem in FILE_PROBLEM ? got.problem : "incomplete";
-      failed.push(`${note.name} (${FILE_PROBLEM[note.problem]})`);
-    }
-    this.changed();
-    if (failed.length)
-      this.emit({ type: "undelivered", to: peer.name, thread: thread.id, reason: `the message arrived, but these files did not arrive intact: ${failed.join(", ")}. Send them again`, at: now() });
-  }
-  watchThisPc() {
-    clearInterval(this.ticker);
-    let last = Date.now();
-    let addrs = this.outsideOnly ? "" : this.opts.addrs().join();
-    let n = 0;
-    this.ticker = setInterval(() => {
-      this.checkWaits();
-      const t = Date.now();
-      if (t - last > PAUSE_MS)
-        this.log.write("this_pc_paused", { for_s: Math.round((t - last) / 1000), what: "this computer was asleep or stopped; nothing could get through meanwhile" });
-      last = t;
-      if (!this.outsideOnly && ++n % 6 === 0) {
-        const now = this.opts.addrs().join();
-        if (now !== addrs)
-          this.log.write("this_pc_moved", { from: addrs.split(","), to: now.split(",") });
-        addrs = now;
-      }
-    }, this.opts.tickMs);
-    this.ticker.unref?.();
-  }
-  async logs(options = {}) {
-    const lines = Math.min(Math.max(options.lines ?? 100, 1), MAX_LOG_LINES);
-    const peer = options.peer ? await this.resolvePeer(options.peer) : undefined;
-    const mine = this.log.read({ id: peer && peerId(peer.key), lines });
-    if (!options.other)
-      return { file: this.log.path, mine };
-    const targets = peer ? [peer] : [...this.peers.values()];
-    const theirs = await Promise.all(targets.map(async (p) => {
-      try {
-        const reply = await this.deliver(p, { type: "log_request", lines });
-        if (reply.type === "log" && Array.isArray(reply.entries))
-          return { peer: labelOf(p), entries: reply.entries.slice(-lines) };
-        return { peer: labelOf(p), error: "its answer could not be read" };
-      } catch {
-        return { peer: labelOf(p), error: "could not get its log: it cannot be reached now, or it runs a coworker older than 0.7.0. Its human can open its log file instead (list_connections there shows the path)" };
-      }
-    }));
-    return { file: this.log.path, mine, theirs };
-  }
-  async resolvePeers(to) {
-    const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map((n) => n.trim()).filter(Boolean);
-    if (names.some((n) => EVERYONE.includes(n.toLowerCase()))) {
-      if (this.peers.size === 0)
-        throw new Error(NO_PEERS);
-      return this.withoutLeftBehind([...this.peers.values()]);
-    }
-    if (names.length === 0)
-      return [await this.resolvePeer(undefined)];
-    return [...new Set(await Promise.all(names.map((n) => this.resolvePeer(n))))];
-  }
-  async resolvePeer(to) {
-    const peers = [...this.peers.values()];
-    if (peers.length === 0)
-      throw new Error(NO_PEERS);
-    if (!to) {
-      if (peers.length === 1)
-        return peers[0];
-      throw new Error(`several sessions are connected; say which one, several, or "everyone": ${peers.map(labelOf).join(", ")}`);
-    }
-    const wanted = to.trim();
-    const byId = peers.find((p) => wanted === peerId(p.key) || wanted.endsWith(`[${peerId(p.key)}]`));
-    if (byId)
-      return byId;
-    const needle = wanted.toLowerCase();
-    const exact = peers.filter((p) => p.name.toLowerCase() === needle);
-    const matches = exact.length ? exact : peers.filter((p) => p.name.toLowerCase().includes(needle));
-    if (matches.length === 1)
-      return matches[0];
-    if (matches.length === 0)
-      throw new Error(`no connected session matches "${to}". Connected: ${peers.map(labelOf).join(", ")}`);
-    if (new Set(matches.map((p) => p.name)).size > 1)
-      throw new Error(`"${to}" matches more than one session: ${matches.map(labelOf).join(", ")}`);
-    const live = await this.likelyLive(matches);
-    if (live.length === 1)
-      return live[0];
-    throw new Error(`"${to}" matches more than one session that can be reached now: ${live.map(labelOf).join(", ")}. Say which one by the id in brackets`);
-  }
-  async withoutLeftBehind(peers) {
-    const byName = new Map;
-    for (const p of peers)
-      byName.set(p.name, [...byName.get(p.name) ?? [], p]);
-    const keep = new Set;
-    for (const same of byName.values())
-      for (const p of same.length === 1 ? same : await this.likelyLive(same))
-        keep.add(p);
-    return peers.filter((p) => keep.has(p));
-  }
-  async likelyLive(same) {
-    const scores = await Promise.all(same.map(async (p) => {
-      try {
-        if ((await this.deliver(p, { type: "ping" })).type === "pong")
-          return 2;
-      } catch {}
-      return this.isPulling(p) ? 1 : 0;
-    }));
-    const best = Math.max(...scores);
-    const top = same.filter((_, i) => scores[i] === best);
-    return best === 2 ? top : [top.at(-1)];
-  }
-  async deliver(peer, payload) {
-    const body = JSON.stringify(seal(this.withData(payload), fromB64(peer.key), this.keys));
-    const addrs = [...new Set([...peer.lastAddr ? [peer.lastAddr] : [], ...peer.addrs])];
-    let refused = false;
-    for (const addr of addrs) {
-      const reply = await this.deliverTo(peer, addr, body, this.opts.connectTimeoutMs);
-      if (reply === "refused")
-        refused = true;
-      if (!reply || reply === "refused")
-        continue;
-      peer.lastAddr = addr;
-      return reply;
-    }
-    if (refused)
-      throw new DeliveryError("rejected", `${peer.name} refused the message`);
-    throw new DeliveryError("unreachable", `${peer.name} is not reachable right now`);
-  }
-  async deliverTo(peer, addr, body, timeoutMs) {
-    const relayed = isRelayAddr(addr);
-    const url = relayed ? addr : `http://${hostForUrl(addr)}:${peer.port}/v1/${routeId(peer.key)}`;
-    const failed = (kind, detail) => {
-      if (!this.abort.signal.aborted)
-        peer.lastError = { kind, at: Date.now(), detail, addr: relayed ? "relay" : addr };
-      return null;
-    };
-    let res;
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-        signal: AbortSignal.any([AbortSignal.timeout(relayed ? Math.max(timeoutMs, this.opts.relayTimeoutMs) : timeoutMs), this.abort.signal])
-      });
-    } catch (e) {
-      return failed(linkErrorOf(e), detailOf(e));
-    }
-    if (res.status === 403)
-      return failed("not_recognized", "HTTP 403"), "refused";
-    if (res.status === 409) {
-      const stale = (await res.text().catch(() => "")).startsWith("stale");
-      if (stale)
-        this.clockDiffers(peer.key);
-      return failed(stale ? "clock" : "bad_answer", stale ? "HTTP 409 stale" : "HTTP 409");
-    }
-    if (!res.ok)
-      return failed("bad_answer", `HTTP ${res.status}`);
-    const sealed = await res.json().catch(() => null);
-    if (sealed?.from !== peer.key)
-      return failed("bad_answer");
-    const reply = open2(sealed, this.keys);
-    if (!reply)
-      return failed("bad_answer");
-    const fresh = this.replay.check(sealed, reply);
-    if (fresh === "stale")
-      this.clockDiffers(peer.key);
-    if (fresh !== "ok")
-      return failed(fresh === "stale" ? "clock" : "bad_answer");
-    peer.lastSeen = Date.now();
-    peer.lastError = undefined;
-    this.noteUp(peer, addr);
-    this.wakeRetry(peer.key);
-    return reply;
-  }
-  clockDiffers(key) {
-    const last = this.clockOff.get(key);
-    this.clockOff.set(key, Date.now());
-    const peer = this.peers.get(key);
-    if (peer && (!last || Date.now() - last > 60 * 60000)) {
-      this.log.write("clock_differs", { id: peerId(key), peer: peer.name, what: "the two clocks differ by more than two hours, so envelopes are refused" });
-      this.emit({ type: "clock", peer: peer.name, fix: CLOCK_FIX, at: now() });
-    }
-  }
-  async sendOrQueue(peer, payload, thread, patient = true) {
-    const skipDirect = peer.directFailed && this.isPulling(peer);
-    if (!skipDirect && !this.outbox.some((o) => o.peer === peer.key)) {
-      try {
-        await this.deliver(peer, payload);
-        peer.directFailed = false;
-        this.unspool(payload);
-        return "delivered";
-      } catch (e) {
-        peer.directFailed = true;
-        if (e instanceof DeliveryError && e.reason === "rejected")
-          this.rejoin(peer);
-      }
-    }
-    if (this.isPulling(peer) && patient)
-      return await this.handOver(peer, payload, 3000, thread) ? "delivered" : "queued";
-    this.outbox.push({ id: randomUUID(), peer: peer.key, payload, thread, since: Date.now() });
-    this.dirty();
-    this.wakePoll(peer.key);
-    return "queued";
-  }
-  async flush() {
-    if (this.flushing || this.outbox.length === 0)
-      return;
-    this.flushing = true;
-    try {
-      const blocked = new Set;
-      for (const item of [...this.outbox]) {
-        if (blocked.has(item.peer))
-          continue;
-        const peer = this.peers.get(item.peer);
-        const drop = (reason) => {
-          this.log.write("undelivered", { id: peerId(item.peer), reason });
-          this.unspool(item.payload);
-          this.outbox = this.outbox.filter((o) => o !== item);
-          this.emit({ type: "undelivered", to: peer?.name ?? "disconnected session", thread: item.thread, reason, at: now() });
-        };
-        if (!peer) {
-          drop("the other side's human closed the connection");
-          continue;
-        }
-        if (peer.retryAt && peer.retryAt > Date.now()) {
-          blocked.add(item.peer);
-          continue;
-        }
-        try {
-          await this.deliver(peer, item.payload);
-          this.unspool(item.payload);
-          this.outbox = this.outbox.filter((o) => o !== item);
-          this.dirty();
-        } catch (e) {
-          blocked.add(item.peer);
-          if (e instanceof DeliveryError && e.reason === "rejected")
-            this.rejoin(peer);
-        }
-      }
-    } finally {
-      this.flushing = false;
-    }
-  }
-  saveAgreement(thread) {
-    if (!this.opts.home || !isThreadId(thread.id))
-      return;
-    const dir = pathInside(this.opts.home, "agreements");
-    if (!dir)
-      return;
-    const started = thread.messages[0]?.at ?? now();
-    const name = agreementFileName(started, thread.id, this.key, thread.peer);
-    const path = name ? pathInside(dir, name) : undefined;
-    if (!path)
-      return;
-    const latest = new Map;
-    for (const m of thread.messages)
-      if (m.agreement)
-        latest.set(m.agreement.by, m);
-    const who = (m) => m.from === "me" ? `${this.name} \u2192 ${thread.peerName}` : `${thread.peerName} \u2192 ${this.name}`;
-    const label = { question: "\uC9C8\uBB38", answer: "\uB2F5", note: "\uC54C\uB9BC", closed: "\uB9C8\uAC10", agreement: "\uD569\uC758\uBB38" };
-    const versions = [...latest.values()].map((m) => `# \uD569\uC758\uBB38 \xB7 ${m.agreement.by} \uC791\uC131 (${m.at})
-
-${m.text}`);
-    const log = thread.messages.filter((m) => m.kind !== "agreement").map((m) => `### ${label[m.kind]} \xB7 ${who(m)} \xB7 ${m.at}
-
-${m.text}${m.context ? `
-
-\uBC30\uACBD:
-
-${m.context}` : ""}`);
-    const text = [
-      `# \uD569\uC758\uBB38: ${thread.subject}`,
-      `- \uB300\uD654: ${thread.id}
-- \uC0AC\uC774: ${this.name} \u2194 ${thread.peerName}${thread.peerAddr ? ` (${thread.peerAddr})` : ""}
-- \uC2DC\uC791: ${started}`,
-      ...versions,
-      `# \uB300\uD654 \uAE30\uB85D
-
-${log.join(`
-
-`)}`
-    ].join(`
-
-`);
-    try {
-      mkdirSync3(dir, { recursive: true, mode: 448 });
-      writeFileSync2(path, `${text}
-`, { mode: 384 });
-      return path;
-    } catch {
-      return;
-    }
-  }
-  statePath() {
-    if (!this.opts.home || !Number.isInteger(this.port) || this.port <= 0)
-      return;
-    const dir = pathInside(this.opts.home, "bridges");
-    return dir ? pathInside(dir, `${this.port}.json`) : undefined;
-  }
-  writeState() {
-    const path = this.statePath();
-    if (!path)
-      return;
-    try {
-      mkdirSync3(dirname2(path), { recursive: true, mode: 448 });
-      const state = { name: this.name, port: this.port, pid: process.pid, addrs: this.addrs(), code: this.lastCode, updatedAt: now() };
-      writeFileSync2(path, JSON.stringify(state, null, 2), { mode: 384 });
-    } catch {}
-  }
-  removeState() {
-    const path = this.statePath();
-    if (path)
-      rmSync2(path, { force: true });
-  }
-}
-
-// src/resume.ts
 function savedPath(home, id) {
   const dir = join3(resolve3(home), "sessions");
   const stem = String(id ?? "").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(0, 120) || "session";
@@ -28123,6 +28404,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 90px; transition: o
 .peers:empty { display: none; }
 .nopeer { grid-column: 2 / 4; margin: 0; padding-left: 24px; font-size: 13px; color: var(--muted); text-wrap: pretty; }
 .nopeer[hidden] { display: none; }
+#keykinds[hidden], #keycode[hidden], #keycopy[hidden], #keyagain[hidden] { display: none; }
 .sess { position: relative; display: flex; align-items: center; gap: 11px; min-width: 0; padding: 7px 10px; border-radius: 12px; border: 1px solid transparent; background: none; text-align: left; }
 .sess.me { grid-column: 1; padding: 0; gap: 13px; max-width: 280px; }
 button.sess { width: 100%; cursor: pointer; }
@@ -28413,6 +28695,10 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
 <dialog id="keybox" aria-labelledby="keytitle">
   <h2 id="keytitle">\uC811\uADFC\uD0A4 (\uC5F0\uACB0 \uCF54\uB4DC)</h2>
   <p id="keyhelp"></p>
+  <div class="row" id="keykinds" hidden>
+    <button class="chip main" id="keygroup" type="button">\uB3D9\uB8CC\uC6A9 \uC811\uADFC\uD0A4 \uB9CC\uB4E4\uAE30</button>
+    <button class="chip main" id="keyoutside" type="button">\uC678\uBD80\uC6A9 \uC811\uADFC\uD0A4 \uB9CC\uB4E4\uAE30</button>
+  </div>
   <div class="code" id="keycode" tabindex="0"></div>
   <p id="keyinfo" role="status"></p>
   <div class="row">
@@ -28649,7 +28935,7 @@ const net = (() => {
         else if (WAIT[ph] && !toward.has(c.peer)) toward.set(c.peer, 'back')
       }
       const who = about => (about ? [about.app, about.model, about.effort].filter(Boolean).join(' \xB7 ') : '')
-      fill(me, data.me.name, data.me.open ? '\uC774 \uC138\uC158 \xB7 \uD3EC\uD2B8 ' + data.me.port : '\uC774 \uC138\uC158 \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798', who(data.me.about))
+      fill(me, data.me.name, data.me.open ? (data.me.outside_only ? '\uC774 \uC138\uC158 \xB7 \uC678\uBD80\uC6A9 \uC804\uC6A9' : '\uC774 \uC138\uC158 \xB7 \uD3EC\uD2B8 ' + data.me.port) : '\uC774 \uC138\uC158 \xB7 \uBE0C\uB9BF\uC9C0 \uB2EB\uD798', who(data.me.about))
       me.node.classList.toggle('closed', !data.me.open)
       for (const l of (data.links || []).slice(0, 16)) {
         const t = tile(l.key, 'peer'), down = l.state !== 'connected'
@@ -29246,29 +29532,67 @@ function syncCats(groups) {
 // \uC811\uADFC\uD0A4(\uC5F0\uACB0 \uCF54\uB4DC)\uB97C \uD654\uBA74\uC5D0\uC11C \uB9CC\uB4E0\uB2E4. \uC0AC\uB78C\uC744 \uB354\uD560 \uB54C, \uADF8\uB9AC\uACE0 \uB04A\uAE34 \uC0C1\uB300\uAC00 \uB2E4\uC2DC \uB4E4\uC5B4\uC624\uAC8C \uD560 \uB54C \uC4F4\uB2E4.
 const keybox = byId('keybox'), keycode = byId('keycode'), keycopy = byId('keycopy'), issueButton = byId('issue')
 let keyFor = ''
+let keyKind = ''
 let hasKey = false
-async function issueKey(name) {
+// \uC811\uADFC\uD0A4\uB294 \uB450 \uAC00\uC9C0\uB2E4. \uC5B4\uB290 \uAC83\uC744 \uB9CC\uB4E4\uC5C8\uB294\uC9C0 \uC0AC\uB78C\uC774 \uC54C \uC218 \uC788\uAC8C \uC81C\uBAA9\uACFC \uC124\uBA85\uC5D0 \uC801\uB294\uB2E4.
+// \uB3D9\uB8CC\uC6A9(\uADF8\uB8F9 \uCF54\uB4DC)\uC5D0\uB294 \uC774 \uCEF4\uD4E8\uD130\uC758 \uC8FC\uC18C\uC640 \uC774\uB984\uC774 \uB4E4\uC5B4 \uC788\uB2E4. \uC678\uBD80\uC6A9 \uCF54\uB4DC\uB294 \uC911\uACC4 \uC11C\uBC84\uB85C\uB9CC \uC774\uC5B4\uC9C0\uACE0 \uC774 \uCEF4\uD4E8\uD130\uC5D0 \uAD00\uD55C \uAC83\uC744 \uB2F4\uC9C0 \uC54A\uB294\uB2E4.
+const KEY_KIND = {
+  group: {
+    title: '\uB3D9\uB8CC\uC6A9 \uC811\uADFC\uD0A4 (\uADF8\uB8F9 \uCF54\uB4DC)',
+    help: '\uD568\uAED8 \uC77C\uD558\uB294 \uB3D9\uB8CC\uC5D0\uAC8C\uB9CC \uBCF4\uB0B4\uC138\uC694. \uC774 \uCF54\uB4DC\uC5D0\uB294 \uC774 \uCEF4\uD4E8\uD130\uC758 \uC0AC\uB0B4\xB7VPN \uC8FC\uC18C\uC640 \uCEF4\uD4E8\uD130 \uC774\uB984\uC774 \uB4E4\uC5B4 \uC788\uACE0, \uC774 \uCF54\uB4DC\uB85C \uB4E4\uC5B4\uC628 \uC138\uC158\uC740 \uC774 \uADF8\uB8F9\uC758 \uB2E4\uB978 \uC138\uC158\uACFC\uB3C4 \uC774\uC5B4\uC9D1\uB2C8\uB2E4. \uB3D9\uB8CC\uAC00 \uC790\uAE30 AI\uC5D0\uAC8C \u300C\uC774 \uCF54\uB4DC\uB85C \uC5F0\uACB0\uD574\uC918\u300D\uB77C\uACE0 \uD558\uBA74 \uC774\uC5B4\uC9D1\uB2C8\uB2E4.',
+  },
+  outside: {
+    title: '\uC678\uBD80\uC6A9 \uC811\uADFC\uD0A4 (\uC678\uBD80\uC6A9 \uCF54\uB4DC)',
+    help: '\uD300 \uBC16\uC758 \uC0AC\uB78C\uC5D0\uAC8C \uBCF4\uB0B4\uB294 \uCF54\uB4DC\uC785\uB2C8\uB2E4. \uC911\uACC4 \uC11C\uBC84\uB85C\uB9CC \uC774\uC5B4\uC9C0\uACE0, \uC774 \uCEF4\uD4E8\uD130\uC758 \uC8FC\uC18C\xB7\uD3EC\uD2B8\xB7\uC774\uB984\uC740 \uB4E4\uC5B4 \uC788\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC774 \uCF54\uB4DC\uB85C \uB4E4\uC5B4\uC628 \uC138\uC158\uC740 \uC774 \uC138\uC158\uD558\uACE0\uB9CC \uC774\uC5B4\uC9D1\uB2C8\uB2E4. \uBC1B\uC740 \uC0AC\uB78C\uC774 \uC790\uAE30 AI\uC5D0\uAC8C \u300C\uC774 \uCF54\uB4DC\uB85C \uC5F0\uACB0\uD574\uC918\u300D\uB77C\uACE0 \uD558\uBA74 \uC774\uC5B4\uC9D1\uB2C8\uB2E4.',
+  },
+}
+const KEY_ERROR = {
+  closed: '\uBE0C\uB9BF\uC9C0\uAC00 \uB2EB\uD600 \uC788\uC5B4\uC11C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. AI\uC5D0\uAC8C \u300C\uBE0C\uB9BF\uC9C0 \uC5F4\uC5B4\uC918\u300D\uB77C\uACE0 \uD558\uC138\uC694.',
+  wait: '\uC7A0\uC2DC \uB4A4\uC5D0 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.',
+  relay: '\uC911\uACC4 \uC11C\uBC84\uC5D0 \uB2FF\uC9C0 \uC54A\uC544 \uC678\uBD80\uC6A9 \uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC911\uACC4 \uC11C\uBC84\uAC00 \uCF1C\uC838 \uC788\uB294\uC9C0, \uC124\uC815\uD55C \uC8FC\uC18C\uC640 \uD0A4\uAC00 \uB9DE\uB294\uC9C0 \uD655\uC778\uD55C \uB4A4 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694. \uC774 \uCEF4\uD4E8\uD130\uC758 \uC8FC\uC18C\uAC00 \uB4E0 \uB2E4\uB978 \uCF54\uB4DC\uB85C \uBC14\uAFB8\uC5B4 \uB9CC\uB4E4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.',
+  outside_only: '\uC774 \uBE0C\uB9BF\uC9C0\uB294 \uC678\uBD80\uC6A9\uC73C\uB85C\uB9CC \uC5F4\uB824 \uC788\uC5B4\uC11C \uB3D9\uB8CC\uC6A9 \uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uB3D9\uB8CC\uC6A9 \uC811\uADFC\uD0A4\uB294 \uB2E4\uB978 \uC138\uC158\uC5D0\uC11C \uB9CC\uB4DC\uC138\uC694.',
+  unsafe: '\uC774 \uC138\uC158\uC758 \uC774\uB984\uC774\uB098 \uBAA8\uB378 \uC18C\uAC1C\uC5D0 \uC774 \uCEF4\uD4E8\uD130\uC5D0 \uAD00\uD55C \uC815\uBCF4\uAC00 \uB4E4\uC5B4 \uC788\uC5B4\uC11C \uC678\uBD80\uC6A9 \uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. AI\uC5D0\uAC8C \uC774\uB984\uC744 \uBC14\uAFD4 \uB2EC\uB77C\uACE0 \uD558\uC138\uC694.',
+  failed: '\uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.',
+}
+// kind \uB97C \uC8FC\uC9C0 \uC54A\uC73C\uBA74: \uC774 \uBE0C\uB9BF\uC9C0\uAC00 \uD55C \uAC00\uC9C0\uB9CC \uB9CC\uB4E4 \uC218 \uC788\uC73C\uBA74 \uADF8\uAC83\uC744 \uB9CC\uB4E4\uACE0, \uB458 \uB2E4 \uB9CC\uB4E4 \uC218 \uC788\uC73C\uBA74 \uC0AC\uB78C\uC774 \uACE0\uB97C \uB54C\uAE4C\uC9C0 \uC544\uBB34\uAC83\uB3C4 \uB9CC\uB4E4\uC9C0 \uC54A\uB294\uB2E4.
+async function issueKey(name, kind) {
   keyFor = name
   hasKey = false
-  put(byId('keyhelp'), name ? name + ' \uCABD\uC5D0 \uC774 \uC811\uADFC\uD0A4\uB97C \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694. \uADF8\uCABD AI\uAC00 \uC774 \uCF54\uB4DC\uB85C \uB2E4\uC2DC \uC5F0\uACB0\uD558\uBA74 \uC774\uC5B4\uC9D1\uB2C8\uB2E4.' : '\uD568\uAED8\uD560 \uB3D9\uB8CC\uC5D0\uAC8C \uC774 \uC811\uADFC\uD0A4\uB97C \uBCF4\uB0B4\uC138\uC694. \uB3D9\uB8CC\uAC00 \uC790\uAE30 AI\uC5D0\uAC8C \u300C\uC774 \uCF54\uB4DC\uB85C \uC5F0\uACB0\uD574\uC918\u300D\uB77C\uACE0 \uD558\uBA74 \uC774\uC5B4\uC9D1\uB2C8\uB2E4.')
-  put(keycode, '\uB9CC\uB4DC\uB294 \uC911\u2026')
+  const kinds = (lastData && lastData.me && lastData.me.codes) || ['group']
+  if (!kind && kinds.length === 1) kind = kinds[0]
+  keyKind = kind || ''
+  byId('keykinds').hidden = !!kind
+  byId('keycopy').hidden = byId('keyagain').hidden = keycode.hidden = !kind
   put(byId('keyinfo'), '')
+  if (!kind) {
+    put(byId('keytitle'), '\uC811\uADFC\uD0A4 (\uC5F0\uACB0 \uCF54\uB4DC)')
+    put(byId('keyhelp'), '\uC5B4\uB5A4 \uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uACE0\uB974\uC138\uC694. \uB3D9\uB8CC\uC6A9\uC5D0\uB294 \uC774 \uCEF4\uD4E8\uD130\uC758 \uC0AC\uB0B4\xB7VPN \uC8FC\uC18C\uC640 \uC774\uB984\uC774 \uB4E4\uC5B4\uAC00\uACE0, \uC678\uBD80\uC6A9\uC740 \uC911\uACC4 \uC11C\uBC84\uB85C\uB9CC \uC774\uC5B4\uC9C0\uBA70 \uC774 \uCEF4\uD4E8\uD130\uC5D0 \uAD00\uD55C \uAC83\uC744 \uB2F4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uACE0\uB974\uAE30 \uC804\uC5D0\uB294 \uC544\uBB34 \uCF54\uB4DC\uB3C4 \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.')
+    if (!keybox.open) keybox.showModal()
+    return
+  }
+  put(byId('keytitle'), KEY_KIND[kind].title)
+  put(byId('keyhelp'), (name ? name + ' \uCABD\uC5D0 \uC774 \uC811\uADFC\uD0A4\uB97C \uB2E4\uC2DC \uBCF4\uB0B4\uC138\uC694. ' : '') + KEY_KIND[kind].help)
+  put(keycode, '\uB9CC\uB4DC\uB294 \uC911\u2026')
   if (!keybox.open) keybox.showModal()
   try {
-    const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1' } })
-    if (!res.ok) throw new Error(String(res.status))
-    const made = await res.json()
+    const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ kind }) })
+    const made = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(res.status === 409 ? 'closed' : res.status === 429 ? 'wait' : made.error || 'failed')
+    // \uB9CC\uB4E0 \uCF54\uB4DC\uC758 \uC885\uB958\uAC00 \uACE0\uB978 \uAC83\uACFC \uB2E4\uB974\uBA74 \uBCF4\uC5EC \uC8FC\uC9C0 \uC54A\uB294\uB2E4.
+    if (made.kind !== kind) throw new Error('failed')
     hasKey = true
     put(keycode, made.code)
     put(byId('keyinfo'), '\uD55C \uC0AC\uB78C\uB9CC, \uD55C \uBC88\uB9CC \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4. ' + shortTime(made.expires) + '\uAE4C\uC9C0 \uC4F8 \uC218 \uC788\uC2B5\uB2C8\uB2E4.')
     fx(keycode, [{ opacity: .2 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' })
   } catch (e) {
     put(keycode, '')
-    put(byId('keyinfo'), e.message === '409' ? '\uBE0C\uB9BF\uC9C0\uAC00 \uB2EB\uD600 \uC788\uC5B4\uC11C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. AI\uC5D0\uAC8C \u300C\uBE0C\uB9BF\uC9C0 \uC5F4\uC5B4\uC918\u300D\uB77C\uACE0 \uD558\uC138\uC694.' : e.message === '429' ? '\uC7A0\uC2DC \uB4A4\uC5D0 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.' : '\uC811\uADFC\uD0A4\uB97C \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC774 \uCF1C\uC838 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.')
+    put(byId('keyinfo'), KEY_ERROR[e.message] || KEY_ERROR.failed)
   }
 }
+byId('keygroup').addEventListener('click', () => issueKey(keyFor, 'group'))
+byId('keyoutside').addEventListener('click', () => issueKey(keyFor, 'outside'))
 issueButton.addEventListener('click', () => issueKey(''))
-byId('keyagain').addEventListener('click', () => issueKey(keyFor))
+byId('keyagain').addEventListener('click', () => issueKey(keyFor, keyKind))
 byId('keyclose').addEventListener('click', () => keybox.close())
 keybox.addEventListener('click', e => {
   if (e.target === keybox) keybox.close()
@@ -29299,7 +29623,7 @@ function syncDowns(links) {
       put(timer, l.since ? clock(Date.now() - Date.parse(l.since)) : '')
       text.append(l.name + '\uC5D0 \uB2FF\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC2A4\uC2A4\uB85C \uB2E4\uC2DC \uBD99\uB294 \uC911 \xB7 ', timer)
       again.type = 'button'
-      again.addEventListener('click', () => issueKey(l.name))
+      again.addEventListener('click', () => issueKey(l.name, l.outside ? 'outside' : 'group'))
       row.append(text, again)
       return row
     }),
@@ -29575,19 +29899,35 @@ class Viewer {
     if (!this.mine(req))
       return new Response("forbidden", { status: 403 });
     const body = await req.json().catch(() => null);
-    this.bridge.setAbout({ ...typeof body?.model === "string" ? { model: body.model } : {}, ...typeof body?.effort === "string" ? { effort: body.effort } : {} });
+    try {
+      this.bridge.setAbout({ ...typeof body?.model === "string" ? { model: body.model } : {}, ...typeof body?.effort === "string" ? { effort: body.effort } : {} });
+    } catch (e) {
+      return Response.json({ error: "unsafe", message: e instanceof Error ? e.message : String(e), about: this.bridge.describe().about ?? {} }, { status: 400, headers });
+    }
     return Response.json({ about: this.bridge.describe().about ?? {} }, { headers });
   }
-  issue(req, headers) {
+  async issue(req, headers) {
     if (!this.mine(req))
       return new Response("forbidden", { status: 403 });
+    const asked = (await req.json().catch(() => null))?.kind;
+    const only = this.bridge.isOutsideOnly;
+    const kind = asked === "outside" || asked === "group" ? asked : only ? "outside" : "group";
     if (!this.bridge.isOpen)
       return Response.json({ error: "the bridge is closed" }, { status: 409, headers });
     const now = Date.now();
     if (now - this.issuedAt < ISSUE_GAP_MS)
       return Response.json({ error: "too many requests" }, { status: 429, headers });
+    if (kind === "group" && only)
+      return Response.json({ error: "outside_only", kind, message: OUTSIDE_ONLY }, { status: 400, headers });
     this.issuedAt = now;
-    return Response.json({ code: this.bridge.newCode({ outside: this.bridge.isOutsideOnly || undefined, ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers });
+    try {
+      const code = this.bridge.newCode({ outside: kind === "outside" || undefined, ttlMs: ISSUE_TTL_MS });
+      return Response.json({ code, kind, expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      const error = /^cannot open a bridge for outsiders/.test(message) ? "relay" : /^nothing was sent/.test(message) ? "unsafe" : "failed";
+      return Response.json({ error, kind, message }, { status: 503, headers });
+    }
   }
   async pin(req, headers) {
     if (!this.mine(req))
@@ -29834,7 +30174,9 @@ function createSession(opts) {
 
   Groups and codes
   - A connection code from open_bridge is a group code by default: whoever joins with it is also connected, automatically, with every session already in this session's group. You get a "connected" event for each, with "via" naming who introduced them. A private code (open_bridge with private: true) links only the two sessions.
-  - An outside code (open_bridge with outside: true, for example when your human asks for an outside code / \uC678\uBD80\uC6A9 \uCF54\uB4DC for someone they do not know, such as an outside contributor) requires a working relay and never falls back to direct addresses. It is always private (links only the two sessions and tells neither side about other sessions), uses "<tool>" as the default session name with no computer name, puts only the relay mailbox in the code, and blocks this computer's name, account name, home or project folder paths, and internal or VPN addresses from leaving towards that peer. When talking to an outside session, refer to files by paths relative to the project (for example src/index.ts:10), never full paths on this PC.
+  - An outside code (open_bridge with outside: true, for example when your human asks for an outside code / \uC678\uBD80\uC6A9 \uCF54\uB4DC for someone they do not know, such as an outside contributor) requires a working relay and never falls back to direct addresses. It is always private (links only the two sessions and tells neither side about other sessions), uses "<tool>" as the default session name with no computer name, puts only the relay mailbox in the code, and blocks this computer's name, account name, home or project folder paths, and internal or VPN addresses from leaving towards that peer, also in your name, model and effort. When talking to an outside session, refer to files by paths relative to the project (for example src/index.ts:10), never full paths on this PC. A file goes to an outside session only when it is UTF-8 text that passes the same check.
+  - A bridge first opened with outside: true is for outside sessions only until it is closed: call open_bridge with outside: true again for each further outside session; it refuses to make a group or private code. A bridge opened for colleagues can also make outside codes and stays as it is.
+  - An outside session is not part of "everyone": ask it by name. It may connect only while fewer than the allowed number of outside sessions are connected (5 by default), and what it may send is limited (conversations, messages, size); beyond that its messages are refused and it is told why. Its files are refused unless the bridge was opened with outside_files: true. list_connections marks such sessions with outside: true. To end one of them, call close_bridge with peer when your human says so.
   - send_question can go to one session, to several (a list of names), or to "everyone". With several, set answers: "all" (default) to get everyone's answer, or "one" when the first answer is enough; the others are then told the question is closed.
   - Each recipient answers in its own conversation; recipients do not see each other's answers. Events for a question to several sessions carry "ask" with who was asked and who has answered.
   - When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
@@ -29925,7 +30267,7 @@ ${text}` : "";
       folderDir = await opts.folderPath?.(server);
     } catch {}
   };
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, projectDir: folderDir, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS2 });
+  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, projectDir: folderDir, outsideLimits: opts.outsideLimits, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS2 });
   const notify = opts.notify ?? osNotify;
   const normalDefaultName = () => `${folder ? `${folder} \xB7 ` : ""}${clientLabel()} @ ${shortHostname()}`;
   function getBridge(outsideOnly = false) {
@@ -30219,6 +30561,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       name: string2().min(1).max(80).optional().describe('Name the other side will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>", or "<tool>" when outside is true.'),
       private: boolean2().optional().describe("true: the code links only this session and the one who joins; they are not connected with the rest of the group. Always true when outside is true."),
       outside: boolean2().optional().describe("true: make an outside code (\uC678\uBD80\uC6A9 \uCF54\uB4DC) for someone you do not know, such as an outside open-source contributor. Requires a working relay and never falls back to direct addresses. Carries only the relay mailbox, hides this computer's name, account, folder paths, port and internal or VPN addresses from that peer, and is always private."),
+      outside_files: boolean2().optional().describe("With outside: true only: also take files that outside sessions send. Off by default: their files are refused. Set it only when your human asks for it; each outside session then has a quota for its files. It stays on until this bridge closes."),
       model: string2().min(1).max(60).optional().describe("The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess."),
       effort: string2().min(1).max(60).optional().describe("Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess."),
       expires_minutes: number2().int().min(0).max(MAX_CODE_MINUTES).optional().describe(`How many minutes the code can be used. Default ${DEFAULT_CODE_MINUTES}. 0: no time limit; the code works until this bridge closes. Either way the code works only once.`),
@@ -30229,6 +30572,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     name,
     private: only,
     outside,
+    outside_files: outsideFiles,
     expires_minutes: minutes = DEFAULT_CODE_MINUTES,
     resume,
     model,
@@ -30261,29 +30605,42 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       if (!relay)
         throw new Error(outsideRelayError(undefined, "off"));
       const b = getBridge(true);
-      const chosenName = name ?? clientLabel();
-      b.assertOutsideSafe({ name: chosenName });
       const wasOpen = b.isOpen;
-      b.outsideName = chosenName;
-      if (!wasOpen)
+      const chosenName = name ?? (wasOpen ? b.outsideName : undefined) ?? clientLabel();
+      b.assertOutsideSafe({ name: chosenName, model, effort, tool: clientLabel() });
+      if (!wasOpen) {
+        b.outsideName = chosenName;
         b.name = chosenName;
-      introduce(b, model, effort);
-      b.open(port, { outsideOnly: !wasOpen });
+        introduce(b, model, effort);
+        b.open(port, { outsideOnly: true });
+      }
       const status = await b.relayReady(5000);
       if (status !== "ok") {
         if (!wasOpen)
           b.shutdown();
         throw new Error(outsideRelayError(relay, status));
       }
+      if (wasOpen) {
+        introduce(b, model, effort);
+        b.outsideName = chosenName;
+      }
+      if (outsideFiles)
+        b.allowOutsideFiles();
       const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60000).toISOString();
+      const code = b.newCode({ outside: true, private: true, ttlMs: minutes === 0 ? null : minutes * 60000 });
+      const joined = [...b.peers.values()].filter((p) => p.outside && !p.host).length;
+      const most = b.limits.sessions;
       return {
-        code: b.newCode({ outside: true, private: true, ttlMs: minutes === 0 ? null : minutes * 60000 }),
+        code,
         session_id: identity,
         expires: expires ?? "never: works until this bridge closes",
         kind: "outside: relay only, hides this computer, and links only this session and the one who joins",
         name: b.nameFor(true),
         addresses: b.addrsFor(true),
         relay: { url: relay, status },
+        outside_sessions: `${joined} of at most ${most} connected`,
+        files_from_outside: b.takesOutsideFiles ? "taken, up to a quota for each outside session" : "refused (open_bridge with outside_files: true takes them)",
+        full: joined >= most ? `This bridge already has ${most} outside sessions connected, the most it takes. Whoever uses this code is refused, without using the code up, until one of them leaves or your human ends one with close_bridge and its name. Tell your human.` : undefined,
         group: [],
         viewer: viewerUrl(),
         listen_command: listenCommand(),
@@ -30291,6 +30648,8 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       };
     }
     const b = getBridge();
+    if (b.isOpen && b.isOutsideOnly)
+      throw new Error(OUTSIDE_ONLY);
     if (b.isOutsideOnly && !name && b.name === b.outsideName)
       b.name = normalDefaultName();
     if (name)
@@ -30327,17 +30686,21 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   }, tool(async ({ code, name, model, effort }) => {
     await resolveFolder();
     freshIfMoved();
-    const relayOnlyCode = decodeCode(code).addrs.every(isRelayAddr);
-    const b = getBridge(relayOnlyCode && !name);
-    if (!b.isOpen && relayOnlyCode && !name) {
-      b.name = clientLabel();
-      b.outsideName = clientLabel();
-    }
-    if (name)
+    const outsideCode = isOutsideCode(decodeCode(code));
+    const b = getBridge(outsideCode);
+    if (b.isOpen && b.isOutsideOnly && !outsideCode)
+      throw new Error(OUTSIDE_ONLY);
+    if (outsideCode) {
+      const shown = name ?? b.outsideName ?? clientLabel();
+      b.assertOutsideSafe({ name: shown, model, effort, tool: clientLabel() });
+      b.outsideName = shown;
+      if (!b.isOpen)
+        b.name = shown;
+    } else if (name)
       b.name = name;
     introduce(b, model, effort);
     if (!b.isOpen)
-      b.open(undefined, { outsideOnly: relayOnlyCode && !name });
+      b.open(undefined, { outsideOnly: outsideCode });
     const { relay: relayInfo, warn = "" } = await relayStatus(b);
     const before = new Set(b.peers.keys());
     const peer = await b.connect(code);
@@ -30348,7 +30711,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       already_connected: again || undefined,
       joining,
       session_id: identity,
-      myName: b.name,
+      myName: outsideCode ? b.nameFor(true) : b.name,
       myPort: b.port,
       relay: relayInfo,
       viewer: viewerUrl(),
@@ -30539,9 +30902,15 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("close_bridge", {
     title: "Close bridge",
     annotations: { readOnlyHint: false, openWorldHint: true },
-    description: "Tell the connected sessions this session is leaving, and stop listening.",
-    inputSchema: {}
-  }, tool(async () => {
+    description: "Tell the connected sessions this session is leaving, and stop listening. With peer, end only the connection with that one session and keep the bridge open for the others (for example to free a place among the outside sessions).",
+    inputSchema: {
+      peer: string2().min(1).max(200).optional().describe("End only the connection with this session (name or [id]). Leave it out to close the whole bridge. Only when your human says so.")
+    }
+  }, tool(async ({ peer }) => {
+    if (peer) {
+      const ended = await getBridge().endPeer(peer);
+      return { ended: `${ended.name} [${ended.id}]`, bridge: "still open", next: "Tell your human in one line that this connection is ended and the others go on. That session needs a new code to connect again." };
+    }
     closeWindows(true);
     await getBridge().close();
     return { closed: true };
@@ -30670,6 +31039,7 @@ async function serve({ home }) {
       portsText: process.env.COWORKER_PORTS,
       relay: process.env.COWORKER_RELAY || undefined,
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+      outsideLimits: outsideLimitsFrom(process.env),
       folder: rootsFolder,
       folderPath: rootsFolderPath,
       app: updating ? { downloaded: () => downloaded, restartCommand } : undefined
@@ -30820,6 +31190,7 @@ async function stdio() {
     portsText: process.env.COWORKER_PORTS,
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+    outsideLimits: outsideLimitsFrom(process.env),
     folder: projectFolder,
     folderPath: projectFolderPath,
     sessionId,

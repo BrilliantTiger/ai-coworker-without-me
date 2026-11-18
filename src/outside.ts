@@ -157,11 +157,24 @@ export function findComputerInfo(fields: Record<string, string | undefined>, ext
   const found: { kind: string; field: string }[] = []
   for (const [field, text] of Object.entries(fields)) {
     if (!text) continue
+    // 모양만 다른 글자(전각 글자, 합쳐 쓴 글자)로 적어도 같은 것으로 본다.
+    const plain = text.normalize('NFKC')
     for (const m of marks) {
-      if (m.test(text)) found.push({ kind: m.kind, field })
+      if (m.test(text) || (plain !== text && m.test(plain))) found.push({ kind: m.kind, field })
     }
   }
   return found
+}
+
+// 파일 내용이 UTF-8 글이면 그 글을, 아니면 undefined 를 돌려준다. 0 바이트가 있으면 글로 보지 않는다.
+// UTF-16 이나 UTF-32 로 쓴 글은 영문자와 경로 구분자마다 0 바이트가 끼므로 여기서 걸린다. 그 밖의 인코딩은 UTF-8 로 읽히지 않아 걸린다.
+export function utf8Text(bytes: Uint8Array): string | undefined {
+  if (bytes.includes(0)) return undefined
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return undefined
+  }
 }
 
 export function assertNoComputerInfo(fields: Record<string, string | undefined>, extraDirs: (string | undefined)[] = []) {

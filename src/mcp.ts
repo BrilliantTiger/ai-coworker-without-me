@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { outsideLimitsFrom } from './bridge'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -42,6 +43,7 @@ async function stdio() {
     portsText: process.env.COWORKER_PORTS,
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+    outsideLimits: outsideLimitsFrom(process.env),
     folder: projectFolder,
     folderPath: projectFolderPath,
     sessionId,

@@ -231,7 +231,8 @@ test('an outside bridge exchanges a question, an answer, a notice, a file and an
   const first = await rawSession('claude-code', { COWORKER_RELAY: relayUrl }, { client: window })
   const second = await rawSession('codex-mcp-client', { COWORKER_RELAY: relayUrl })
 
-  const opened = await first.call('open_bridge', { outside: true, model: 'Fable 5.2', effort: 'high' })
+  // 외부 세션이 보내는 파일은 받기로 하고 열었을 때만 받는다.
+  const opened = await first.call('open_bridge', { outside: true, outside_files: true, model: 'Fable 5.2', effort: 'high' })
   const decoded = decodeCode(opened.code)
 
   const joined = await second.call('connect', { code: opened.code, model: 'GPT-5.5' })
@@ -433,8 +434,8 @@ test('an outside code is always private: the outsider connects only with the ses
   expect(c2Conns.peers.map((p: { name: string }) => p.name)).not.toContain('Outside Contributor')
   expect((await host.call('list_connections')).peers.find((p: { name: string }) => p.name === 'Outside Contributor').group).toBe(false)
 
-  // 전체에게 묻고 한 명만 답을 받아도 외부 세션에는 다른 세션 이름이 가지 않는다.
-  await host.call('send_question', { question: 'Status check?', to: 'everyone', answers: 'one' })
+  // 이름으로 여럿에게 묻고 한 명만 답을 받아도 외부 세션에는 다른 세션 이름이 가지 않는다.
+  await host.call('send_question', { question: 'Status check?', to: [c1.myName, c2.myName, 'Outside Contributor'], answers: 'one' })
   const c1Q = await waitEvent(colleague1.call, e => e.type === 'message' && e.kind === 'question')
   const oQ = await waitEvent(outsider.call, e => e.type === 'message' && e.kind === 'question')
   expect(oQ.ask).toBeUndefined()
@@ -532,6 +533,16 @@ test('tool descriptions, AI instructions, README and PRIVACY explain outside cod
   expect(readme).toContain('외부용 코드')
   expect(privacy).toContain('outside')
   expect(privacy).toContain('외부용 코드')
+  // 확인이 무엇을 막는지, 파일의 규칙, 만든 쪽이 알게 되는 것, 한도와 그 기본값을 문서가 말한다.
+  for (const doc of [readme, privacy]) {
+    expect(doc).toContain('100.64')
+    expect(doc).toContain('UTF-8')
+    expect(doc).toContain('COWORKER_OUTSIDE_MAX_SESSIONS')
+    expect(doc).toContain('8 MiB')
+  }
+  expect(privacy).toContain('What the maker of an outside code learns about the session that joins')
+  expect(privacy).toContain('외부용 코드를 만든 쪽이, 그 코드로 들어온 세션에 관해 알게 되는 것')
+  expect(readme).toContain('외부용 전용')
 })
 
 // 이 컴퓨터의 루프백이 아닌 IPv4 주소 하나. 없으면 그 확인은 건너뛴다.
@@ -588,8 +599,11 @@ test('a bridge opened for outside sessions stays that way: a second and a tenth 
   }
   await stays(deskSession)
 
-  // 화면의 버튼도 외부용 코드만 만든다.
+  // 화면의 버튼도 외부용 코드만 만든다. 동료용 코드를 달라고 하면 까닭과 함께 거절한다.
   await Bun.sleep(1100)
+  const askedGroup = await fetch(`${first.viewer}/code`, { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: '{"kind":"group"}' })
+  expect(askedGroup.status).toBe(400)
+  expect(await askedGroup.json()).toMatchObject({ error: 'outside_only' })
   const pressed = (await (await pressButton(first.viewer)).json()) as { code: string; kind?: string }
   expect(onlyRelay(pressed.code, relay.url)).toBe(true)
   expect(pressed.kind).toBe('outside')
@@ -606,6 +620,7 @@ test('a bridge opened for outside sessions stays that way: a second and a tenth 
 
   // 중계 서버가 사라져 외부용 코드를 만들지 못해도 브릿지는 바뀌지 않는다.
   relay.stop()
+  for (let i = 0; i < 100 && (await back.call('list_connections')).me.relay.status === 'ok'; i++) await Bun.sleep(100)
   for (let i = 0; i < 2; i++) {
     const failed = await back.callRaw('open_bridge', { outside: true })
     expect(failed.isError).toBe(true)
@@ -617,9 +632,14 @@ test('a bridge opened for outside sessions stays that way: a second and a tenth 
   expect(await answersOnLan(me.port)).toBe(false)
   expect((await back.callRaw('open_bridge', {})).isError).toBe(true)
   await Bun.sleep(1100)
+  // 버튼은 맨 오류가 아니라 까닭을 답한다. 화면은 그것을 사람이 읽을 말로 보여 준다.
   const dead = await pressButton(after.viewer)
   const body = await dead.text()
   expect(body).not.toContain('cw1.')
+  expect(dead.status).toBe(503)
+  expect(JSON.parse(body)).toMatchObject({ error: 'relay', kind: 'outside' })
+  expect(JSON.parse(body).message).toMatch(/relay/)
+  expect(await (await fetch(after.viewer)).text()).toContain('중계 서버에 닿지 않아 외부용 접근키를 만들지 못했습니다')
   expect(await answersOnLan(me.port)).toBe(false)
 }, 60_000)
 
@@ -696,4 +716,64 @@ test('a file goes to an outside session only when it is UTF-8 text that passes t
   const sent = await host.call('send_question', { question: 'A sample.', files: [fine] })
   const arrived = await waitEvent(guest.call, e => e.type === 'message' && e.thread === sent.thread)
   expect(arrived.files[0]).toMatchObject({ name: 'fine.txt', verified: true })
+}, 30_000)
+
+test('the button in the conversation view says which kind of code it made, and on a bridge that can make both it makes the kind that was asked for', async () => {
+  const relay = recordingRelay()
+  const host = await rawSession('claude-code', { COWORKER_RELAY: relay.url })
+  const opened = await host.call('open_bridge', {})
+  const press = (kind?: string) =>
+    fetch(`${opened.viewer}/code`, { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify(kind ? { kind } : {}) })
+  for (let i = 0; i < 60 && (await host.call('list_connections')).me.relay.status !== 'ok'; i++) await Bun.sleep(50)
+  expect(((await (await fetch(`${opened.viewer}/data`)).json()) as { me: { codes: string[] } }).me.codes).toEqual(['group', 'outside'])
+
+  await Bun.sleep(1100)
+  const group = (await (await press('group')).json()) as { code: string; kind: string }
+  expect(group.kind).toBe('group')
+  expect(decodeCode(group.code).addrs).toContain('127.0.0.1')
+  await Bun.sleep(1100)
+  const outside = (await (await press('outside')).json()) as { code: string; kind: string }
+  expect(outside.kind).toBe('outside')
+  expect(onlyRelay(outside.code, relay.url)).toBe(true)
+
+  // 화면은 두 가지를 사람의 말로 구별해 적고, 둘 다 만들 수 있으면 고르기 전에는 만들지 않는다.
+  const page = await (await fetch(opened.viewer)).text()
+  for (const words of ['동료용 접근키 (그룹 코드)', '외부용 접근키 (외부용 코드)', '고르기 전에는 아무 코드도 만들지 않습니다', '이 컴퓨터의 사내·VPN 주소와 컴퓨터 이름이 들어 있고']) expect(page).toContain(words)
+
+  // 중계 서버가 없는 세션은 동료용 코드만 만든다.
+  const plain = await rawSession('claude-code')
+  const plainOpen = await plain.call('open_bridge', {})
+  expect(((await (await fetch(`${plainOpen.viewer}/data`)).json()) as { me: { codes: string[] } }).me.codes).toEqual(['group'])
+  const refused = await fetch(`${plainOpen.viewer}/code`, { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: '{"kind":"outside"}' })
+  expect(refused.status).toBe(503)
+  expect(await refused.json()).toMatchObject({ error: 'relay', kind: 'outside' })
+}, 30_000)
+
+test('a session that already has a bridge for colleagues joins an outside code under the tool name only, and its colleagues still see its usual name', async () => {
+  const { url: relayUrl } = recordingRelay()
+  const host = await rawSession('claude-code', { COWORKER_RELAY: relayUrl })
+  const opened = await host.call('open_bridge', { outside: true })
+  const joiner = await rawSession('codex-mcp-client', { COWORKER_RELAY: relayUrl })
+  const own = await joiner.call('open_bridge', {})
+  expect(own.name.includes(' @ ')).toBe(true)
+
+  const joined = await joiner.call('connect', { code: opened.code })
+  expect(joined.myName).toBe('Codex')
+  await waitEvent(host.call, e => e.type === 'connected')
+  const seen = (await host.call('list_connections')).peers[0]
+  expect(seen).toMatchObject({ name: 'Codex', outside: true, group: false })
+  expect((await joiner.call('list_connections')).me.name).toBe(own.name)
+
+  // 그 세션이 묻고, 만든 쪽이 답한다. 만든 쪽은 그 세션이 가져가게 둔다.
+  const asked = await joiner.call('send_question', { question: 'Is the desk open?' })
+  const got = await waitEvent(host.call, e => e.type === 'message' && e.thread === asked.thread)
+  await host.call('reply', { thread: got.thread, text: 'Yes.' })
+  expect(await waitEvent(joiner.call, e => e.type === 'message' && e.kind === 'answer')).toMatchObject({ text: 'Yes.' })
+
+  // 한 세션과의 연결만 끝낸다. 브릿지는 열려 있다.
+  const ended = await host.call('close_bridge', { peer: 'Codex' })
+  expect(ended.bridge).toBe('still open')
+  const after = await host.call('list_connections')
+  expect(after.peers).toEqual([])
+  expect(after.me.open).toBe(true)
 }, 30_000)

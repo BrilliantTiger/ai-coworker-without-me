@@ -11,6 +11,9 @@ export type ConnectionCode = {
   port: number
   key: string
   token: string
+  // 외부용 코드라는 표시. 이 코드로 들어가는 쪽은 자기 컴퓨터에 관한 것(주소, 포트, 컴퓨터 이름)을 보내지 않는다.
+  // 이 표시를 모르는 옛 판(0.12 이하)은 그냥 지나친다.
+  outside?: true
 }
 
 const PREFIX = 'cw1.'
@@ -45,7 +48,8 @@ export function decodeCode(text: string): ConnectionCode {
     code.port > 0 &&
     code.port < 65536 &&
     typeof code.key === 'string' &&
-    typeof code.token === 'string'
+    typeof code.token === 'string' &&
+    (code.outside === undefined || code.outside === true)
   if (!valid) throw new Error('connection code is damaged; copy the whole line again')
   return code
 }

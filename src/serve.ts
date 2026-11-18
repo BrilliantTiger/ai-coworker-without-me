@@ -1,4 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { outsideLimitsFrom } from './bridge'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -90,6 +91,7 @@ export async function serve({ home }: { home: string }) {
       portsText: process.env.COWORKER_PORTS,
       relay: process.env.COWORKER_RELAY || undefined,
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+    outsideLimits: outsideLimitsFrom(process.env),
       folder: rootsFolder,
       folderPath: rootsFolderPath,
       app: updating ? { downloaded: () => downloaded, restartCommand } : undefined,
