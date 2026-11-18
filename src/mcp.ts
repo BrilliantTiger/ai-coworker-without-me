@@ -43,6 +43,7 @@ async function stdio() {
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
     folder: projectFolder,
+    folderPath: projectFolderPath,
     sessionId,
     restore,
     autoUpdate: installedAsPlugin(),
@@ -74,13 +75,18 @@ function installedAsPlugin() {
 
 // 세션 이름에 붙일 프로젝트 폴더. 플러그인으로 설치하면 MCP가 플러그인 폴더에서 뜬다.
 // 그때는 Claude Code 가 알려 준 프로젝트 폴더나, Codex 가 넘겨 준 PWD 를 쓴다. 둘 다 없으면 폴더 이름을 붙이지 않는다.
-function projectFolder() {
+function projectFolderPath() {
   const given = process.env.COWORKER_PROJECT_DIR
-  if (given && !given.includes('${')) return basename(given)
+  if (given && !given.includes('${')) return given
   const cwd = workingDir()
-  if (cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(cwd)) return basename(cwd)
+  if (cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(cwd)) return cwd
   const pwd = process.env.PWD
-  return pwd && pwd !== cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(pwd) ? basename(pwd) : undefined
+  return pwd && pwd !== cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(pwd) ? pwd : undefined
+}
+
+function projectFolder() {
+  const path = projectFolderPath()
+  return path ? basename(path) : undefined
 }
 
 // Codex 는 플러그인을 깐 뒤 첫 세션을 켤 때, 이미 띄운 MCP 의 플러그인 폴더를 같은 경로의 새 폴더로 바꾼다

@@ -8,8 +8,9 @@ AI Co-worker Without Me has no server run by its authors and collects nothing. I
 
 Only when you open a bridge or connect with a code, and only to the sessions you connected (and, with a group code, the rest of that group):
 
-- What your AI sends: questions, the background it attaches, answers, notes that it is asking you, agreements, and your decisions from a question window (the option you picked and anything you wrote there).
-- Your session's name (project folder, Claude Code or Codex, computer name) and the addresses and port in your connection code.
+- What your AI sends: questions, the background it attaches, answers, notices, notes that it is asking you, attached files, agreements, and your decisions from a question window (the option you picked and anything you wrote there).
+- With a group code or a private code: your session's name (project folder, Claude Code or Codex, computer name) and the addresses and port in your connection code.
+- With an outside code (`open_bridge` with `outside: true`): only the relay mailbox URL, public key, one-time token and checksum in the code, and by default only the AI tool name (`Claude Code` or `Codex`) as your session's name. None of this computer's internal or VPN addresses, `.local` name, `127.0.0.1`, or port is put in the code or sent later. An outside code is always private (the session that joins is neither connected with nor told about any other session, and no other session is told about it or its address), travels only through your configured relay, and blocks this computer's name, account name, home folder or paths under it, project folder path, and internal or VPN addresses from leaving in messages, files, agreements or logs towards that peer.
 - Which AI tool your session is (Claude Code or Codex), and its model and reasoning effort when known. The sessions you connect to see them.
 
 Messages go straight to the other computer over your office network or VPN. If you set a relay server, they can also pass through that relay, which whoever runs it sets up. Everything is encrypted end to end (NaCl box), so the relay cannot read or change it. The relay sees only a mailbox number, when something passed and how large it was. It holds a request in memory for up to 40 seconds until the other session picks it up and writes nothing to disk.
@@ -45,8 +46,9 @@ AI Co-worker Without Me는 만든 사람이 운영하는 서버가 없고, 아�
 
 브릿지를 열거나 코드로 연결했을 때만, 연결한 세션(그룹 코드면 그 그룹)에만 간다.
 
-- AI가 보내는 것: 질문, 질문에 붙인 배경, 답, 사람에게 확인 중이라는 알림, 합의문, 질문 창에서 내가 정한 것(고른 보기와 거기에 쓴 말).
-- 세션 이름(프로젝트 폴더, Claude Code나 Codex, 컴퓨터 이름)과 연결 코드에 든 주소와 포트.
+- AI가 보내는 것: 질문, 질문에 붙인 배경, 답, 알림, 사람에게 확인 중이라는 알림, 붙여 보낸 파일, 합의문, 질문 창에서 내가 정한 것(고른 보기와 거기에 쓴 말).
+- 그룹 코드·개인용 코드로 이었을 때: 세션 이름(프로젝트 폴더, Claude Code나 Codex, 컴퓨터 이름)과 연결 코드에 든 주소와 포트.
+- 외부용 코드(`open_bridge`의 `outside: true`)로 이었을 때: 코드에는 중계 서버의 우편함 주소, 공개키, 일회용 토큰, 확인용 글자만 들어가고, 세션 이름은 기본으로 AI 도구 이름(`Claude Code`나 `Codex`)만 나간다. 이 PC의 사내·VPN 주소, `.local` 이름, `127.0.0.1`, 포트는 코드에도 그 뒤의 통신에도 들어가지 않는다. 외부용 코드는 언제나 개인용 코드라서 다른 세션과는 이어지지도 서로 알려 주지도 않으며, 설정한 중계 서버로만 오가고, 글·파일·합의문·연결 기록에 이 컴퓨터의 이름, 계정 이름, 홈 폴더와 그 아래 경로, 프로젝트 폴더 경로, 사내·VPN 주소가 들어 있으면 보내기 전에 막는다.
 - 이 세션이 어느 AI 도구인지(Claude Code나 Codex), 그리고 알 수 있으면 모델과 effort. 연결한 세션이 본다.
 
 메시지는 사내망이나 VPN으로 상대 PC에 바로 간다. 중계 서버를 설정했으면 그 서버를 거칠 수도 있다. 중계 서버는 띄운 사람이 마련한다. 모든 내용은 양 끝에서 암호화(NaCl box)하므로 중계 서버는 읽거나 고치지 못한다. 중계 서버가 아는 것은 우편함 번호, 언제 얼마만큼 오갔는지뿐이다. 요청은 상대 세션이 가져갈 때까지 메모리에 최대 40초 두고, 디스크에는 아무것도 쓰지 않는다.

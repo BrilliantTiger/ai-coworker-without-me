@@ -128,7 +128,10 @@ export class Viewer {
     const now = Date.now()
     if (now - this.issuedAt < ISSUE_GAP_MS) return Response.json({ error: 'too many requests' }, { status: 429, headers })
     this.issuedAt = now
-    return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers })
+    return Response.json(
+      { code: this.bridge.newCode({ outside: this.bridge.isOutsideOnly || undefined, ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() },
+      { headers },
+    )
   }
 
   // 사람이 화면에서 대화를 맨 위에 고정하거나 푼다(2026-11-17, 사람이 정함: 「질답 정렬을 고정, 최신 질답, 순으로」).

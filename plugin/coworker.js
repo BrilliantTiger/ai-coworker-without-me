@@ -16410,8 +16410,8 @@ class StdioServerTransport {
 }
 
 // src/mcp.ts
-import { homedir as homedir3 } from "os";
-import { basename as basename3, join as join7, resolve as resolve3 } from "path";
+import { homedir as homedir4 } from "os";
+import { basename as basename4, join as join7, resolve as resolve3 } from "path";
 
 // src/autostart.ts
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
@@ -16579,7 +16579,7 @@ import { join as join3 } from "path";
 // src/bridge.ts
 import { createHash as createHash3, randomUUID } from "crypto";
 import { appendFileSync as appendFileSync2, chmodSync, closeSync, existsSync as existsSync3, mkdirSync as mkdirSync3, openSync, readdirSync, readFileSync as readFileSync2, readSync, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
-import { basename, dirname as dirname2, extname, join as join2 } from "path";
+import { basename as basename2, dirname as dirname2, extname, join as join2 } from "path";
 
 // src/agreement.ts
 var isText = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
@@ -16855,6 +16855,195 @@ class LinkLog {
   }
 }
 
+// src/outside.ts
+import { realpathSync } from "fs";
+import { homedir as homedir2, hostname as hostname2, networkInterfaces as networkInterfaces2, platform as platform4, userInfo } from "os";
+import { basename } from "path";
+var PRIVATE_OR_VPN_IPV4 = /(?<![\d.])(?:10(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}|192\.168(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){2})(?![\d.])/;
+var COMMON_SHORT_WORDS = new Set(["user", "root", "test", "main", "code", "node", "work", "home", "info", "admin", "dev"]);
+var escapeRegex2 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function scutilGet(key) {
+  if (platform4() !== "darwin")
+    return;
+  try {
+    const out = Bun.spawnSync(["scutil", "--get", key]);
+    if (out.exitCode !== 0)
+      return;
+    return out.stdout.toString().trim() || undefined;
+  } catch {
+    return;
+  }
+}
+function pathVariants(dir) {
+  const raw = dir?.trim();
+  if (!raw || raw.includes("${"))
+    return [];
+  const candidates = new Set([raw]);
+  try {
+    candidates.add(realpathSync(raw));
+  } catch {}
+  const out = [];
+  for (const c of candidates) {
+    const clean = c.replace(/[\\/]+$/, "");
+    if (clean.length < 4 || clean === "/" || /^[A-Za-z]:$/.test(clean))
+      continue;
+    out.push(clean);
+    if (clean.includes("\\"))
+      out.push(clean.replace(/\\/g, "/"));
+  }
+  return [...new Set(out)];
+}
+var cachedHostMarks;
+function baseMarks() {
+  if (cachedHostMarks)
+    return cachedHostMarks;
+  const marks = [];
+  const seen = new Set;
+  const addSubstring = (kind, value) => {
+    const v = value?.trim();
+    if (!v || v.length < 2)
+      return;
+    const lower = v.toLowerCase();
+    const key = `${kind}:${lower}`;
+    if (seen.has(key))
+      return;
+    seen.add(key);
+    marks.push({ kind, test: (text) => text.toLowerCase().includes(lower) });
+  };
+  const names = new Set;
+  const addName = (n) => {
+    const v = n?.trim();
+    if (!v || v.toLowerCase() === "localhost")
+      return;
+    names.add(v);
+    if (v.includes("\u2019"))
+      names.add(v.replace(/\u2019/g, "'"));
+  };
+  const host = hostname2();
+  const short = shortHostname();
+  addName(host);
+  addName(short);
+  if (short && short.toLowerCase() !== "localhost")
+    names.add(`${short}.local`);
+  for (const key of ["LocalHostName", "ComputerName", "HostName"]) {
+    const v = scutilGet(key);
+    addName(v);
+    if (v && key === "LocalHostName")
+      names.add(`${v}.local`);
+  }
+  if (platform4() === "linux" && host && host.toLowerCase() !== "localhost")
+    names.add(`${host}.local`);
+  if (platform4() === "win32")
+    addName(process.env.COMPUTERNAME);
+  for (const n of names) {
+    if (n.length <= 3) {
+      const re = new RegExp(`(?<![A-Za-z0-9])${escapeRegex2(n)}(?![A-Za-z0-9])`, "i");
+      marks.push({ kind: "computer name", test: (text) => re.test(text) });
+    } else {
+      addSubstring("computer name", n);
+    }
+  }
+  for (const p of pathVariants(homedir2()))
+    addSubstring("home folder path", p);
+  const accounts = new Set;
+  try {
+    if (userInfo().username)
+      accounts.add(userInfo().username.trim());
+  } catch {}
+  for (const envUser of [process.env.USER, process.env.USERNAME, basename(homedir2())]) {
+    if (envUser?.trim())
+      accounts.add(envUser.trim());
+  }
+  for (const u of accounts) {
+    if (!u || u.length < 2)
+      continue;
+    const lower = u.toLowerCase();
+    const pathRe = new RegExp(`(?:[/\\\\](?:Users|home)[/\\\\]|~)${escapeRegex2(u)}(?=$|[/\\\\\\s"'\`:,;)])`, "i");
+    marks.push({ kind: "account name", test: (text) => pathRe.test(text) });
+    if (COMMON_SHORT_WORDS.has(lower))
+      continue;
+    if (u.length >= 5) {
+      addSubstring("account name", u);
+    } else {
+      const tokenRe = new RegExp(`(?<![A-Za-z0-9])${escapeRegex2(u)}(?![A-Za-z0-9])`, "i");
+      marks.push({ kind: "account name", test: (text) => tokenRe.test(text) });
+    }
+  }
+  for (const list of Object.values(networkInterfaces2())) {
+    for (const nic of list ?? []) {
+      if (nic.internal)
+        continue;
+      const addr = nic.address.trim();
+      if (!addr)
+        continue;
+      const bare = addr.split("%")[0];
+      if (bare.includes(":")) {
+        addSubstring("internal or VPN address", addr);
+        addSubstring("internal or VPN address", bare);
+      } else {
+        const re = new RegExp(`(?<![\\d.])${escapeRegex2(bare)}(?![\\d.])`);
+        marks.push({ kind: "internal or VPN address", test: (text) => re.test(text) });
+      }
+    }
+  }
+  marks.push({ kind: "internal or VPN address", test: (text) => PRIVATE_OR_VPN_IPV4.test(text) });
+  cachedHostMarks = marks;
+  return marks;
+}
+function workingDirSafe() {
+  try {
+    return process.cwd();
+  } catch {
+    return;
+  }
+}
+function findComputerInfo(fields, extraDirs = []) {
+  const dirs = new Set;
+  for (const d of [workingDirSafe(), process.env.PWD, process.env.COWORKER_PROJECT_DIR, ...extraDirs]) {
+    for (const v of pathVariants(d))
+      dirs.add(v.toLowerCase());
+  }
+  const dirList = [...dirs];
+  const marks = [
+    ...baseMarks(),
+    ...dirList.map((d) => ({ kind: "project folder path", test: (text) => text.toLowerCase().includes(d) }))
+  ];
+  const found = [];
+  for (const [field, text] of Object.entries(fields)) {
+    if (!text)
+      continue;
+    for (const m of marks) {
+      if (m.test(text))
+        found.push({ kind: m.kind, field });
+    }
+  }
+  return found;
+}
+function assertNoComputerInfo(fields, extraDirs = []) {
+  const found = findComputerInfo(fields, extraDirs);
+  if (!found.length)
+    return;
+  const what = [...new Set(found.map((f) => `${f.kind} in ${f.field}`))].slice(0, 8).join(", ");
+  throw new Error(`nothing was sent: this session is connected through an outside code, and the content holds information about this computer (${what}). Remove it, and write file references as paths relative to the project instead of full paths on this PC.`);
+}
+function relayPortOf(relayUrl) {
+  try {
+    const u = new URL(relayUrl);
+    const port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+    return Number.isInteger(port) && port > 0 && port < 65536 ? port : 443;
+  } catch {
+    return 443;
+  }
+}
+function outsideRelayError(relay, state) {
+  if (!relay)
+    return "cannot open a bridge for outsiders without a relay: set a relay server URL first (in Claude Code: /plugin configure coworker@ai-coworker-without-me -> Relay server, or set COWORKER_RELAY=https://relay.example.com, and Relay key / COWORKER_RELAY_KEY if the relay uses a key), then restart this session";
+  if (typeof state === "object" && /relay key/i.test(state.error))
+    return `cannot open a bridge for outsiders: ${state.error}. Set Relay key in /plugin configure coworker@ai-coworker-without-me or COWORKER_RELAY_KEY to the key from whoever runs the relay, then restart this session`;
+  const detail = typeof state === "object" ? state.error : "the relay did not answer in time";
+  return `cannot open a bridge for outsiders: the relay ${relay} is not answering as a coworker relay (${detail}). Check that COWORKER_RELAY (or Relay server in /plugin configure coworker@ai-coworker-without-me) points to a running coworker relay (${relay}/healthz should answer "coworker relay") and set COWORKER_RELAY_KEY if it uses a key`;
+}
+
 // src/bridge.ts
 var DEFAULT_PORTS = [7700, 7799];
 function parsePorts(text) {
@@ -16978,7 +17167,7 @@ class DeliveryError extends Error {
 }
 function isSavedBridge(v) {
   const s = v;
-  return !!s && s.v === 1 && typeof s.name === "string" && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && (s.used === undefined || Array.isArray(s.used)) && (s.ended === undefined || Array.isArray(s.ended)) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && (s.viewer === undefined || !!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === "string") && (s.asking === undefined || Array.isArray(s.asking) && s.asking.every(isHumanQuestion)) && typeof s.savedAt === "string";
+  return !!s && s.v === 1 && typeof s.name === "string" && (s.outsideName === undefined || typeof s.outsideName === "string") && (s.outsideOnly === undefined || typeof s.outsideOnly === "boolean") && typeof s.publicKey === "string" && typeof s.secretKey === "string" && Number.isInteger(s.port) && Array.isArray(s.peers) && s.peers.every(isMember) && Array.isArray(s.threads) && Array.isArray(s.outbox) && Array.isArray(s.tokens) && (s.used === undefined || Array.isArray(s.used)) && (s.ended === undefined || Array.isArray(s.ended)) && Array.isArray(s.seen) && Array.isArray(s.closedAsks) && (s.events === undefined || Array.isArray(s.events)) && (s.viewer === undefined || !!s.viewer && Number.isInteger(s.viewer.port) && typeof s.viewer.token === "string") && (s.asking === undefined || Array.isArray(s.asking) && s.asking.every(isHumanQuestion)) && typeof s.savedAt === "string";
 }
 function isHumanQuestion(v) {
   const q = v;
@@ -17026,7 +17215,19 @@ var linkErrorOf = (e) => {
 var isoOf = (ms) => ms ? new Date(ms).toISOString() : undefined;
 var MAX_USED = 500;
 var MAX_ENDED = 20;
-var savedPeer = (p) => ({ key: p.key, name: p.name, about: p.about, can: p.can, addrs: p.addrs, port: p.port, private: p.private || undefined, lastSeen: p.lastSeen, token: p.token, given: p.given });
+var savedPeer = (p) => ({
+  key: p.key,
+  name: p.name,
+  about: p.about,
+  can: p.can,
+  addrs: p.addrs,
+  port: p.port,
+  private: p.private || undefined,
+  outside: p.outside || undefined,
+  lastSeen: p.lastSeen,
+  token: p.token,
+  given: p.given
+});
 var TICK_MS = 5000;
 var PAUSE_MS = 30000;
 
@@ -17036,6 +17237,9 @@ class Bridge {
   key;
   route;
   name;
+  outsideName;
+  projectDir;
+  outsideOnly = false;
   port = 0;
   peers = new Map;
   threads = new Map;
@@ -17086,6 +17290,9 @@ class Bridge {
     this.key = toB64(this.keys.publicKey);
     this.route = routeId(this.key);
     this.name = options.name;
+    this.outsideName = options.outsideName;
+    this.outsideOnly = !!options.outsideOnly;
+    this.projectDir = options.projectDir;
     this.opts = {
       ports: DEFAULT_PORTS,
       addrs: localAddresses,
@@ -17103,7 +17310,13 @@ class Bridge {
     this.log = new LinkLog(this.opts.home ? join2(this.opts.home, "logs", `${this.route}.log`) : undefined);
   }
   static restore(saved, options) {
-    const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } });
+    const b = new Bridge({
+      ...options,
+      name: saved.name,
+      outsideName: saved.outsideName ?? options.outsideName,
+      outsideOnly: saved.outsideOnly ?? options.outsideOnly,
+      keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) }
+    });
     b.about = cleanAbout(saved.about);
     for (const p of saved.peers)
       b.peers.set(p.key, {
@@ -17111,9 +17324,11 @@ class Bridge {
         name: p.name,
         about: cleanAbout(p.about),
         can: cleanCan(p.can),
-        addrs: p.addrs,
+        addrs: p.outside ? p.addrs.filter((a) => b.isOwnRelayBox(a)) : p.addrs,
         port: p.port,
-        private: p.private || undefined,
+        private: p.private || p.outside || undefined,
+        outside: p.outside || undefined,
+        directFailed: p.outside && !p.addrs.some((a) => b.isOwnRelayBox(a)) ? true : undefined,
         lastSeen: typeof p.lastSeen === "number" ? p.lastSeen : undefined,
         token: isToken(p.token) ? p.token : undefined,
         given: isToken(p.given) ? p.given : undefined
@@ -17126,10 +17341,10 @@ class Bridge {
           m.noAnswer = true;
     b.outbox = saved.outbox.filter((o) => b.peers.has(o.peer));
     for (const t of saved.tokens)
-      b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private });
+      b.tokens.set(t.token, { expires: t.expires ?? Infinity, private: !!t.private || !!t.outside, outside: t.outside || undefined });
     for (const u of saved.used ?? [])
       if (typeof u?.token === "string" && typeof u.key === "string")
-        b.used.set(u.token, { key: u.key, private: !!u.private });
+        b.used.set(u.token, { key: u.key, private: !!u.private || !!u.outside, outside: u.outside || undefined });
     b.ended = (saved.ended ?? []).filter((e) => typeof e?.name === "string" && typeof e.id === "string");
     b.seen = new Set(saved.seen);
     b.closedAsks = new Map(saved.closedAsks);
@@ -17140,11 +17355,11 @@ class Bridge {
     for (const q of saved.asking ?? [])
       b.asking.set(q.thread, q);
     try {
-      b.open(saved.port);
+      b.open(saved.port, { outsideOnly: b.outsideOnly });
     } catch {
-      b.open();
+      b.open(undefined, { outsideOnly: b.outsideOnly });
     }
-    b.log.write("restored", { name: b.name, peers: b.peers.size, queued: b.outbox.length });
+    b.log.write("restored", { name: b.outsideOnly ? b.nameFor(true) : b.name, peers: b.peers.size, queued: b.outbox.length });
     for (const peer of b.peers.values()) {
       b.sayHello(peer, { back: true }).catch(() => {});
       b.pollLoop(peer.key);
@@ -17174,6 +17389,8 @@ class Bridge {
     return {
       v: 1,
       name: this.name,
+      outsideName: this.outsideName,
+      outsideOnly: this.outsideOnly || undefined,
       publicKey: toB64(this.keys.publicKey),
       secretKey: toB64(this.keys.secretKey),
       port: this.port,
@@ -17181,8 +17398,8 @@ class Bridge {
       peers: [...this.peers.values()].map(savedPeer),
       threads: [...this.threads.values()],
       outbox: this.outbox,
-      tokens: [...this.tokens].filter(([, t]) => t.expires > Date.now()).map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private })),
-      used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private })),
+      tokens: [...this.tokens].filter(([, t]) => t.expires > Date.now()).map(([token, t]) => ({ token, expires: Number.isFinite(t.expires) ? t.expires : null, private: t.private, outside: t.outside || undefined })),
+      used: [...this.used].map(([token, u]) => ({ token, key: u.key, private: u.private, outside: u.outside || undefined })),
       ended: this.ended,
       relaySecret: this.keptRelaySecret,
       seen: [...this.seen].slice(-2000),
@@ -17197,23 +17414,85 @@ class Bridge {
   get isOpen() {
     return !!this.server;
   }
+  get isOutsideOnly() {
+    return this.outsideOnly;
+  }
+  relayAddr() {
+    return this.opts.relay && this.relayBox ? `${this.opts.relay}/v1/box/${this.relayBox}` : undefined;
+  }
+  isOwnRelayBox(addr) {
+    if (!this.opts.relay)
+      return false;
+    const prefix = `${this.opts.relay}/v1/box/`;
+    return addr.startsWith(prefix) && /^[A-Za-z0-9_-]{22}$/.test(addr.slice(prefix.length));
+  }
+  nameFor(outsideOrPeer) {
+    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
+    if (!out)
+      return this.name;
+    if (this.outsideName)
+      return this.outsideName;
+    if (this.about?.app)
+      return this.about.app;
+    if (this.name.includes(" @ "))
+      return this.name.replace(/\s*@\s*.*$/, "").replace(/^.*\u00B7\s*/, "").trim() || "coworker";
+    return this.name;
+  }
+  addrsFor(outsideOrPeer) {
+    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
+    if (!out)
+      return this.addrs();
+    const box = this.relayAddr();
+    return box ? [box] : [];
+  }
+  portFor(outsideOrPeer) {
+    const out = typeof outsideOrPeer === "boolean" ? outsideOrPeer : !!outsideOrPeer?.outside;
+    if (!out)
+      return this.port;
+    return this.opts.relay ? relayPortOf(this.opts.relay) : 443;
+  }
+  assertOutsideSafe(fields) {
+    assertNoComputerInfo(fields, [this.projectDir]);
+  }
   addrs() {
-    const relay = this.relayBox ? [`${this.opts.relay}/v1/box/${this.relayBox}`] : [];
+    const box = this.relayAddr();
+    const relay = box ? [box] : [];
+    if (this.outsideOnly)
+      return relay;
     return [...this.opts.addrs(), ...relay];
   }
-  open(port) {
+  open(port, options) {
     if (this.server) {
       if (port && port !== this.port)
         throw new Error(`bridge is already open on port ${this.port}`);
+      if (options?.outsideOnly === false && this.outsideOnly) {
+        const prev = this.port;
+        this.server.stop(true);
+        this.server = undefined;
+        this.outsideOnly = false;
+        if (!this.listen(prev, "0.0.0.0")) {
+          const [min, max] = this.opts.ports;
+          for (let p = min;p <= max && !this.server; p++)
+            this.listen(p, "0.0.0.0");
+          if (!this.server)
+            throw new Error(`no free port between ${min} and ${max}`);
+        }
+        this.watchThisPc();
+        this.writeState();
+        this.changed();
+      }
       return;
     }
+    if (options?.outsideOnly !== undefined)
+      this.outsideOnly = options.outsideOnly;
+    const bindHost = this.outsideOnly ? "127.0.0.1" : "0.0.0.0";
     if (port) {
-      if (!this.listen(port))
+      if (!this.listen(port, bindHost))
         throw new Error(`port ${port} is already in use; pick another port or leave it empty`);
     } else {
       const [min, max] = this.opts.ports;
       for (let p = min;p <= max && !this.server; p++)
-        this.listen(p);
+        this.listen(p, bindHost);
       if (!this.server)
         throw new Error(`no free port between ${min} and ${max}`);
     }
@@ -17230,15 +17509,29 @@ class Bridge {
       this.tryInvites();
     }, this.opts.retryMs);
     this.timer.unref?.();
-    this.log.write("open", { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay });
+    this.log.write("open", this.outsideOnly ? { name: this.nameFor(true), relay: this.opts.relay } : { name: this.name, port: this.port, addrs: this.addrs(), relay: this.opts.relay });
     this.watchThisPc();
     this.writeState();
     this.changed();
     this.save();
   }
   newCode(options = {}) {
-    if (!this.server)
-      this.open();
+    if (options.outside) {
+      if (!this.opts.relay)
+        throw new Error(outsideRelayError(undefined, "off"));
+      if (!this.server || this.relayState !== "ok" || !this.relayBox)
+        throw new Error(outsideRelayError(this.opts.relay, this.relayState));
+      const shownName = this.nameFor(true);
+      this.assertOutsideSafe({ name: shownName });
+      const token = randomToken();
+      const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs;
+      this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: true, outside: true });
+      this.lastCode = encodeCode({ v: 1, name: shownName, addrs: this.addrsFor(true), port: this.portFor(true), key: this.key, token });
+      this.writeState();
+      this.dirty();
+      return this.lastCode;
+    }
+    this.open(undefined, { outsideOnly: false });
     const token = randomToken();
     const ttlMs = options.ttlMs === undefined ? this.opts.tokenTtlMs : options.ttlMs;
     this.tokens.set(token, { expires: ttlMs === null ? Infinity : Date.now() + ttlMs, private: !!options.private });
@@ -17263,7 +17556,14 @@ class Bridge {
       this.dirty();
       return known;
     }
-    const peer = { key: code.key, name: code.name, addrs: code.addrs, port: code.port, token: code.token };
+    const peer = {
+      key: code.key,
+      name: code.name,
+      addrs: code.addrs,
+      port: code.port,
+      outside: this.outsideOnly && code.addrs.every(isRelayAddr) ? true : undefined,
+      token: code.token
+    };
     let reply;
     try {
       reply = await this.sayHello(peer, { token: code.token });
@@ -17311,15 +17611,19 @@ class Bridge {
   }
   async ask(to, question, context, files, reviewed = false) {
     const peer = await this.resolvePeer(to);
+    if (peer.outside)
+      this.assertOutsideSafe({ question, context });
     if (files?.length)
       await this.assertTakesFiles([peer]);
-    return this.sendQuestion(peer, question, context, undefined, false, undefined, this.stage(files, reviewed));
+    return this.sendQuestion(peer, question, context, undefined, false, undefined, this.stage(files, reviewed, !!peer.outside));
   }
   async askMany(to, question, context, answers = "all", noAnswer = false, category, files, reviewed = false) {
     const peers = await this.resolvePeers(to);
+    if (peers.some((p) => p.outside))
+      this.assertOutsideSafe({ question, context, category });
     if (files?.length)
       await this.assertTakesFiles(peers);
-    const staged = peers.map(() => this.stage(files, reviewed));
+    const staged = peers.map((p) => this.stage(files, reviewed, !!p.outside));
     if (peers.length === 1)
       return this.sendQuestion(peers[0], question, context, undefined, noAnswer, category, staged[0]);
     const ask = { id: randomUUID().slice(0, 8), to: peers.map((p) => p.name), answers };
@@ -17333,6 +17637,8 @@ class Bridge {
   }
   async sendQuestion(peer, question, context, ask, noAnswer = false, category, files = []) {
     assertNoSecrets({ question, context, category });
+    if (peer.outside)
+      this.assertOutsideSafe({ question, context, category });
     const label = cleanCategory(category);
     const thread = {
       id: randomUUID().slice(0, 8),
@@ -17348,7 +17654,8 @@ class Bridge {
     };
     this.threads.set(thread.id, thread);
     const notice = noAnswer || saysNoAnswer(question) ? { noAnswer: true } : {};
-    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ask, ...notice, category: label, ...wireFiles(files), at: now() };
+    const wireAsk = peer.outside ? {} : { ask };
+    const msg = { id: randomUUID(), thread: thread.id, subject: thread.subject, kind: "question", text: question, context, ...wireAsk, ...notice, category: label, ...wireFiles(files), at: now() };
     thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text: msg.text, context: msg.context, ...notice, ...files.length ? { files } : {}, at: msg.at });
     this.changed();
     try {
@@ -17371,9 +17678,11 @@ class Bridge {
     const peer = this.peers.get(thread.peer);
     if (!peer)
       throw new Error(`${thread.peerName} is no longer connected`);
+    if (peer.outside)
+      this.assertOutsideSafe({ answer: text });
     if (opts.files?.length)
       await this.assertTakesFiles([peer]);
-    const files = this.stage(opts.files, opts.reviewed);
+    const files = this.stage(opts.files, opts.reviewed, !!peer.outside);
     const human = opts.human ? { human: true } : {};
     const msg = { id: randomUUID(), thread: thread.id, kind: "answer", text, ...human, ...wireFiles(files), at: now() };
     thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text, ...human, ...files.length ? { files } : {}, at: msg.at });
@@ -17393,6 +17702,8 @@ class Bridge {
     const peer = this.peers.get(thread.peer);
     if (!peer)
       throw new Error(`${thread.peerName} is no longer connected`);
+    if (peer.outside)
+      this.assertOutsideSafe({ note });
     const msg = { id: randomUUID(), thread: thread.id, kind: "note", text: note, at: now() };
     thread.messages.push({ id: msg.id, from: "me", kind: "note", text: note, at: msg.at });
     if (thread.status !== "agreed")
@@ -17408,7 +17719,7 @@ class Bridge {
     if (thread.status === "closed")
       this.assertOpen(thread);
     const facts = input.facts ?? [];
-    assertNoSecrets({
+    const fields = {
       conclusion: input.conclusion,
       facts: facts.map((f) => `${f.fact}
 ${f.evidence}`).join(`
@@ -17419,11 +17730,16 @@ ${f.evidence}`).join(`
 `),
       for_humans: input.forHumans?.join(`
 `)
-    });
+    };
+    assertNoSecrets(fields);
+    const peer = this.peers.get(thread.peer);
+    if (peer?.outside)
+      this.assertOutsideSafe(fields);
+    const me = this.nameFor(peer);
     const agreement = {
-      by: this.name,
+      by: me,
       conclusion: input.conclusion,
-      facts: facts.map((f) => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy === "me" ? this.name : thread.peerName })),
+      facts: facts.map((f) => ({ fact: f.fact, evidence: f.evidence, checkedBy: f.checkedBy === "me" ? me : thread.peerName })),
       guesses: input.guesses ?? [],
       disagreements: input.disagreements ?? [],
       forHumans: input.forHumans ?? []
@@ -17435,7 +17751,6 @@ ${f.evidence}`).join(`
     thread.status = "agreed";
     this.changed();
     const file = this.saveAgreement(thread);
-    const peer = this.peers.get(thread.peer);
     const delivery = peer ? await this.sendOrQueue(peer, { type: "msg", msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`;
     return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file };
   }
@@ -17594,11 +17909,11 @@ ${f.evidence}`).join(`
     this.outbox = [];
     this.changed();
   }
-  listen(port) {
+  listen(port, hostname = "0.0.0.0") {
     try {
       this.server = Bun.serve({
         port,
-        hostname: "0.0.0.0",
+        hostname,
         maxRequestBodySize: 1 << 20,
         idleTimeout: 60,
         fetch: (req, server) => this.handle(req, server)
@@ -17618,6 +17933,13 @@ ${f.evidence}`).join(`
     return new Response(body, { status, headers: { "content-type": status === 200 ? "application/json" : "text/plain" } });
   }
   async respond(sealed, seenAt, relayed = false) {
+    try {
+      return await this.respondInner(sealed, seenAt, relayed);
+    } catch {
+      return { status: 500, body: "error" };
+    }
+  }
+  async respondInner(sealed, seenAt, relayed) {
     const payload = open2(sealed, this.keys);
     if (!payload)
       return { status: 403, body: "forbidden" };
@@ -17645,24 +17967,41 @@ ${f.evidence}`).join(`
         return forbidden;
       const invite = this.invites.get(from);
       const invited = !!invite;
+      if (!invited && !relayed && typeof payload.token === "string" && (this.tokens.get(payload.token)?.outside || this.used.get(payload.token)?.outside))
+        return forbidden;
       const why = invited ? undefined : this.whyRefused(payload.token, from);
       const token = invited ? undefined : this.takeToken(payload.token, from);
       if (!invited && !token) {
         this.log.write("refused_stranger", { id: peerId(from), peer: payload.name.slice(0, MAX_NAME), from: seenAt ?? (relayed ? "relay" : undefined), reason: why });
         return forbidden;
       }
+      const outside = !!token?.outside;
       const remote = relayed || !!seenAt && !isLoopback(seenAt);
       const given = remote ? payload.addrs.filter((a) => !isLoopback(a)) : payload.addrs;
-      const addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])];
-      const added = { key: from, name: payload.name.slice(0, MAX_NAME), about: cleanAbout(payload.about), can: cleanCan(payload.can), addrs, port: payload.port, private: token?.private, token: isToken(payload.rejoin) ? payload.rejoin : undefined };
-      const members = token && !token.private ? this.groupPeers().filter((p) => p.key !== from) : [];
+      const addrs = outside ? payload.addrs.filter((a) => this.isOwnRelayBox(a)).slice(0, MAX_ADDRS) : [...new Set([...seenAt ? [seenAt] : [], ...given])];
+      const isPrivate = !!token?.private || outside;
+      const added = {
+        key: from,
+        name: payload.name.slice(0, MAX_NAME),
+        about: cleanAbout(payload.about),
+        can: cleanCan(payload.can),
+        addrs,
+        port: outside ? this.portFor(true) : payload.port,
+        directFailed: outside && addrs.length === 0 ? true : undefined,
+        private: isPrivate || undefined,
+        outside: outside || undefined,
+        token: isToken(payload.rejoin) ? payload.rejoin : undefined
+      };
+      const members = token && !isPrivate ? this.groupPeers().filter((p) => p.key !== from) : [];
       for (const m of members)
         this.sendOrQueue(m, { type: "introduce", member: memberOf(added) }).catch(() => {});
       const rejoin = this.rejoinFor(added);
       const again = !!token && "again" in token;
       this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again, how: invited ? "introduced" : again ? "came back with its token" : "code" });
-      return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about, can: CAN });
+      return answer({ type: "hello_ack", name: this.nameFor(added), members: members.map(memberOf), private: isPrivate || undefined, rejoin, about: this.about, can: CAN });
     }
+    if (peer.outside && !relayed)
+      return forbidden;
     peer.lastSeen = Date.now();
     this.wakeRetry(peer.key);
     if (payload.type === "hello")
@@ -17711,7 +18050,10 @@ ${f.evidence}`).join(`
         }
         if (!res.ok)
           throw new Error(`the relay answered ${res.status}`);
-        const { items } = await res.json();
+        const data = await res.json().catch(() => null);
+        if (!Array.isArray(data?.items))
+          throw new Error("the server did not answer like a coworker relay");
+        const items = data.items;
         setState("ok");
         wait = 25000;
         backoff = this.opts.retryMs;
@@ -17744,13 +18086,14 @@ ${f.evidence}`).join(`
     if (isHelloFields(hello)) {
       const remote = relayed || !!seenAt && !isLoopback(seenAt);
       const given = remote ? hello.addrs.filter((a) => !isLoopback(a)) : hello.addrs;
-      const addrs = [...new Set([...seenAt ? [seenAt] : [], ...given])].slice(0, MAX_ADDRS);
-      const moved = addrs.join() !== peer.addrs.join() || hello.port !== peer.port;
-      this.log.write("hello_in", { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? "relay" : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? hello.port : undefined });
+      const addrs = peer.outside ? hello.addrs.filter((a) => this.isOwnRelayBox(a)).slice(0, MAX_ADDRS) : [...new Set([...seenAt ? [seenAt] : [], ...given])].slice(0, MAX_ADDRS);
+      const port = peer.outside ? this.portFor(true) : hello.port;
+      const moved = addrs.join() !== peer.addrs.join() || port !== peer.port;
+      this.log.write("hello_in", { id: peerId(peer.key), peer: peer.name, back: hello.back || undefined, from: seenAt ?? (relayed ? "relay" : undefined), moved: moved || undefined, addrs: moved ? addrs : undefined, port: moved ? port : undefined });
       peer.addrs = addrs;
-      peer.port = hello.port;
+      peer.port = port;
       peer.lastAddr = undefined;
-      peer.directFailed = false;
+      peer.directFailed = peer.outside && addrs.length === 0;
     }
     if (isToken(hello.rejoin))
       peer.token = hello.rejoin;
@@ -17760,7 +18103,7 @@ ${f.evidence}`).join(`
       this.changed();
     this.flush();
     this.learn(peer, hello.about, hello.can);
-    return { type: "hello_ack", name: this.name, rejoin: this.rejoinFor(peer), about: this.about, can: CAN };
+    return { type: "hello_ack", name: this.nameFor(peer), rejoin: this.rejoinFor(peer), about: this.about, can: CAN };
   }
   process(peer, payload) {
     switch (payload.type) {
@@ -17775,10 +18118,10 @@ ${f.evidence}`).join(`
       case "hello":
         if (!isHelloFields(payload))
           return null;
-        peer.addrs = payload.addrs;
-        peer.port = payload.port;
+        peer.addrs = peer.outside ? payload.addrs.filter((a) => this.isOwnRelayBox(a)).slice(0, MAX_ADDRS) : payload.addrs;
+        peer.port = peer.outside ? this.portFor(true) : payload.port;
         this.learn(peer, payload.about, payload.can);
-        return { type: "hello_ack", name: this.name, about: this.about, can: CAN };
+        return { type: "hello_ack", name: this.nameFor(peer), about: this.about, can: CAN };
       case "introduce":
         if (!peer.private)
           this.invite(payload.member, peer.name);
@@ -17789,8 +18132,24 @@ ${f.evidence}`).join(`
       case "receipt":
         this.takeReceipt(peer, payload);
         return { type: "ok" };
-      case "log_request":
-        return { type: "log", entries: this.log.read({ id: peerId(peer.key), lines: typeof payload.lines === "number" ? payload.lines : 100 }) };
+      case "log_request": {
+        const lines = typeof payload.lines === "number" ? payload.lines : 100;
+        const id = peerId(peer.key);
+        if (peer.outside) {
+          const entries = this.log.read({ id, lines }).filter((e) => e.id === id).map((e) => ({
+            at: e.at,
+            event: e.event,
+            id,
+            ...typeof e.how === "string" ? { how: e.how } : {},
+            ...typeof e.kind === "string" ? { kind: e.kind } : {},
+            ...typeof e.tries === "number" ? { tries: e.tries } : {},
+            ...typeof e.down_for_s === "number" ? { down_for_s: e.down_for_s } : {},
+            ...typeof e.last_seen === "string" ? { last_seen: e.last_seen } : {}
+          }));
+          return { type: "log", entries };
+        }
+        return { type: "log", entries: this.log.read({ id, lines }) };
+      }
       default:
         return null;
     }
@@ -17858,11 +18217,11 @@ ${f.evidence}`).join(`
     for (const t of this.threads.values()) {
       if (t.ask?.id !== ask.id || t.id === except || t.status === "closed")
         continue;
-      const text = `${answeredBy} answered first, so this question is closed. No answer is needed.`;
+      const peer = this.peers.get(t.peer);
+      const text = peer?.outside ? "Another session answered first, so this question is closed. No answer is needed." : `${answeredBy} answered first, so this question is closed. No answer is needed.`;
       const msg = { id: randomUUID(), thread: t.id, kind: "closed", text, at: now() };
       t.messages.push({ id: msg.id, from: "me", kind: "closed", text, at: msg.at });
       t.status = "closed";
-      const peer = this.peers.get(t.peer);
       if (peer)
         this.sendOrQueue(peer, { type: "msg", msg }, t.id).catch(() => {});
     }
@@ -17968,6 +18327,10 @@ ${f.evidence}`).join(`
         const peer = this.peers.get(key);
         if (!peer)
           break;
+        if (peer.outside && peer.addrs.length === 0 && !peer.lastAddr) {
+          await this.pause(peer, backoff);
+          continue;
+        }
         try {
           if (!peer.lastAddr)
             await this.deliver(peer, { type: "ping" });
@@ -18247,13 +18610,13 @@ ${f.evidence}`).join(`
       return;
     const used = this.used.get(token);
     if (used)
-      return used.key === from ? { expires: Infinity, private: used.private, again: true } : undefined;
+      return used.key === from ? { expires: Infinity, private: used.private, outside: used.outside, again: true } : undefined;
     const entry = this.tokens.get(token);
     this.tokens.delete(token);
     this.dirty();
     if (!entry || entry.expires <= Date.now())
       return;
-    this.used.set(token, { key: from, private: entry.private });
+    this.used.set(token, { key: from, private: entry.private, outside: entry.outside });
     this.trimUsed();
     return entry;
   }
@@ -18280,7 +18643,7 @@ ${f.evidence}`).join(`
     if (peer.given && this.used.get(peer.given)?.key === peer.key)
       return peer.given;
     const token = randomToken();
-    this.used.set(token, { key: peer.key, private: !!peer.private });
+    this.used.set(token, { key: peer.key, private: !!peer.private, outside: peer.outside || undefined });
     peer.given = token;
     this.trimUsed();
     this.dirty();
@@ -18342,7 +18705,16 @@ ${f.evidence}`).join(`
     }
   }
   async sayHello(peer, extra = {}) {
-    const reply = await this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, can: CAN, ...extra });
+    const reply = await this.deliver(peer, {
+      type: "hello",
+      name: this.nameFor(peer),
+      addrs: this.addrsFor(peer),
+      port: this.portFor(peer),
+      rejoin: this.rejoinFor(peer),
+      about: this.about,
+      can: CAN,
+      ...extra
+    });
     if (reply.type === "hello_ack")
       this.learn(peer, reply.about, reply.can);
     if (reply.type === "hello_ack" && isToken(reply.rejoin)) {
@@ -18402,7 +18774,7 @@ ${f.evidence}`).join(`
         throw new Error(`nothing was sent: ${peer.name} cannot receive files. It runs a coworker version older than 0.12.0, or it has not answered since it was updated. Ask its human to update coworker and try again, or send the content another way`);
     }
   }
-  stage(paths, reviewed = false) {
+  stage(paths, reviewed = false, outside = false) {
     if (!paths?.length)
       return [];
     const dir = this.filesDir("out");
@@ -18412,7 +18784,7 @@ ${f.evidence}`).join(`
     if (unique.length > MAX_FILES)
       throw new Error(`nothing was sent: one message takes at most ${MAX_FILES} files`);
     const read = unique.map((path) => {
-      const name = basename(path);
+      const name = basename2(path);
       if (SECRET_FILE.test(name))
         throw new Error(`nothing was sent: ${name} looks like a file that holds keys or passwords. Humans share secrets their own way, never through coworker`);
       let bytes;
@@ -18434,6 +18806,14 @@ ${f.evidence}`).join(`
     });
     if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES)
       throw new Error(`nothing was sent: the files are larger than ${MAX_FILES_BYTES >> 20} MiB together, the most one message can carry`);
+    if (outside) {
+      const outsideTexts = {};
+      for (const f of read) {
+        outsideTexts[`the file name "${f.name}"`] = f.name;
+        outsideTexts[`the file ${f.name}`] = f.bytes.toString("utf8");
+      }
+      this.assertOutsideSafe(outsideTexts);
+    }
     const texts = {};
     for (const f of read)
       if (f.bytes.length <= 2 * 1024 * 1024 && !f.bytes.subarray(0, 8192).includes(0))
@@ -18550,7 +18930,7 @@ ${f.evidence}`).join(`
         const to = freePath(folder, note.name);
         renameSync2(from, to);
         chmodSync(to, 384);
-        return [{ ...note, name: basename(to), path: to, ok: true }];
+        return [{ ...note, name: basename2(to), path: to, ok: true }];
       } catch {
         return fail("no_folder");
       }
@@ -18582,7 +18962,7 @@ ${f.evidence}`).join(`
   watchThisPc() {
     clearInterval(this.ticker);
     let last = Date.now();
-    let addrs = this.opts.addrs().join();
+    let addrs = this.outsideOnly ? "" : this.opts.addrs().join();
     let n = 0;
     this.ticker = setInterval(() => {
       this.checkWaits();
@@ -18590,7 +18970,7 @@ ${f.evidence}`).join(`
       if (t - last > PAUSE_MS)
         this.log.write("this_pc_paused", { for_s: Math.round((t - last) / 1000), what: "this computer was asleep or stopped; nothing could get through meanwhile" });
       last = t;
-      if (++n % 6 === 0) {
+      if (!this.outsideOnly && ++n % 6 === 0) {
         const now = this.opts.addrs().join();
         if (now !== addrs)
           this.log.write("this_pc_moved", { from: addrs.split(","), to: now.split(",") });
@@ -19776,8 +20156,8 @@ data:
 // src/serve.ts
 import { spawn as spawn2 } from "child_process";
 import { randomUUID as randomUUID3 } from "crypto";
-import { platform as platform4 } from "os";
-import { basename as basename2, resolve as resolve2 } from "path";
+import { platform as platform5 } from "os";
+import { basename as basename3, resolve as resolve2 } from "path";
 import { fileURLToPath } from "url";
 // package.json
 var version2 = "0.12.1";
@@ -27391,7 +27771,7 @@ function run2(command, args, env) {
 
 // src/session.ts
 import { rmSync as rmSync5 } from "fs";
-import { homedir as homedir2 } from "os";
+import { homedir as homedir3 } from "os";
 import { isAbsolute, join as join6 } from "path";
 
 // src/update.ts
@@ -29098,7 +29478,7 @@ class Viewer {
     if (now - this.issuedAt < ISSUE_GAP_MS)
       return Response.json({ error: "too many requests" }, { status: 429, headers });
     this.issuedAt = now;
-    return Response.json({ code: this.bridge.newCode({ ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers });
+    return Response.json({ code: this.bridge.newCode({ outside: this.bridge.isOutsideOnly || undefined, ttlMs: ISSUE_TTL_MS }), expires: new Date(now + ISSUE_TTL_MS).toISOString() }, { headers });
   }
   async pin(req, headers) {
     if (!this.mine(req))
@@ -29298,7 +29678,7 @@ function fullPaths(files) {
   if (!files?.length)
     return;
   return files.map((f) => {
-    const path = f === "~" || f.startsWith("~/") || f.startsWith("~\\") ? join6(homedir2(), f.slice(1)) : f;
+    const path = f === "~" || f.startsWith("~/") || f.startsWith("~\\") ? join6(homedir3(), f.slice(1)) : f;
     if (!isAbsolute(path))
       throw new Error(`nothing was sent: give the full path of each file (got ${f})`);
     return path;
@@ -29343,8 +29723,9 @@ function createSession(opts) {
   - When nothing new arrived, say nothing to your human. No "still listening" or "nothing new" lines; just keep listening.`;
   const INSTRUCTIONS = `${RESTORED}Coworker links this AI session to coworkers' AI sessions (Claude Code or Codex, on other PCs or this one). The AIs ask and answer each other directly; the humans watch and make the decisions.
 
-  Groups
+  Groups and codes
   - A connection code from open_bridge is a group code by default: whoever joins with it is also connected, automatically, with every session already in this session's group. You get a "connected" event for each, with "via" naming who introduced them. A private code (open_bridge with private: true) links only the two sessions.
+  - An outside code (open_bridge with outside: true, for example when your human asks for an outside code / \uC678\uBD80\uC6A9 \uCF54\uB4DC for someone they do not know, such as an outside contributor) requires a working relay and never falls back to direct addresses. It is always private (links only the two sessions and tells neither side about other sessions), uses "<tool>" as the default session name with no computer name, puts only the relay mailbox in the code, and blocks this computer's name, account name, home or project folder paths, and internal or VPN addresses from leaving towards that peer. When talking to an outside session, refer to files by paths relative to the project (for example src/index.ts:10), never full paths on this PC.
   - send_question can go to one session, to several (a list of names), or to "everyone". With several, set answers: "all" (default) to get everyone's answer, or "one" when the first answer is enough; the others are then told the question is closed.
   - Each recipient answers in its own conversation; recipients do not see each other's answers. Events for a question to several sessions carry "ask" with who was asked and who has answered.
   - When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
@@ -29374,7 +29755,7 @@ function createSession(opts) {
 
   Write an agreement when a conversation is done
   - When a conversation has what it needed, the side that asked writes the agreement with write_agreement. It goes to the other side and is saved as a file on both PCs, for the humans to discuss.
-  - Under facts, put only what was checked, each with its evidence (a file path and line, a command and its result, a document) and who checked it: you (me) or only the other side (them).
+  - Under facts, put only what was checked, each with its evidence (a file path and line \u2014 relative to the project, never a full path on this PC, when connected through an outside code \u2014 a command and its result, a document) and who checked it: you (me) or only the other side (them).
   - Anything nobody checked goes under guesses. The other AI sounding sure is not evidence, and two AIs agreeing is not evidence either.
   - Points the two sides still see differently go under disagreements. Anything that needs a decision goes under for_humans.
   - When an agreement arrives, check it against what you know, then tell your human the conclusion. For each point under for_humans, ask your human with check_with_human on that conversation, so they answer in a question window and the other side gets their decision. If something in it is wrong or missing, write your own version with write_agreement for the same conversation; otherwise do not write another.
@@ -29422,6 +29803,7 @@ ${text}` : "";
     return `Keep listening in the background, so your human can keep talking to you: run \`${listenCommand()}\` with Bash in the background (run_in_background: true), then end your turn. Do not wait for it and do not call wait_for_message. When it ends, Claude Code tells you: call inbox, handle what it shows, and run the command in the background again. If you cannot run it, call wait_for_message instead.`;
   }
   let folder;
+  let folderDir;
   let folderKnown = false;
   const resolveFolder = async () => {
     if (folderKnown)
@@ -29430,13 +29812,19 @@ ${text}` : "";
     try {
       folder = await opts.folder(server);
     } catch {}
+    try {
+      folderDir = await opts.folderPath?.(server);
+    } catch {}
   };
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS2 });
+  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, projectDir: folderDir, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS2 });
   const notify = opts.notify ?? osNotify;
-  function getBridge() {
+  const normalDefaultName = () => `${folder ? `${folder} \xB7 ` : ""}${clientLabel()} @ ${shortHostname()}`;
+  function getBridge(outsideOnly = false) {
     if (!bridge) {
-      const name = `${folder ? `${folder} \xB7 ` : ""}${clientLabel()} @ ${shortHostname()}`;
-      adopt(new Bridge({ name, ...bridgeOptions() }));
+      const name = outsideOnly ? clientLabel() : normalDefaultName();
+      adopt(new Bridge({ name, outsideName: outsideOnly ? clientLabel() : undefined, outsideOnly, ...bridgeOptions() }));
+    } else if (folderDir && !bridge.projectDir) {
+      bridge.projectDir = folderDir;
     }
     return bridge;
   }
@@ -29716,17 +30104,27 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("open_bridge", {
     title: "Open bridge",
     annotations: { readOnlyHint: false, openWorldHint: true },
-    description: "Open this session to coworkers' AI sessions and get a one-time connection code. The human sends the code to a coworker (for example over a messenger), and the coworker's AI calls connect with it. By default whoever joins is also connected with everyone already in this session's group. The code expires after 60 minutes unless expires_minutes says otherwise. Call again to get a fresh code for each further session.",
+    description: "Open this session to other AI sessions and get a one-time connection code. The human sends the code to the other person (for example over a messenger or an issue), and their AI calls connect with it. By default it makes a group code (whoever joins is also connected with everyone already in this session's group); set private: true for a 1-on-1 code with a colleague, or outside: true for someone outside your team (uses only the relay and hides this computer). The code expires after 60 minutes unless expires_minutes says otherwise. Call again to get a fresh code for each further session.",
     inputSchema: {
-      port: number2().int().min(1024).max(65535).optional().describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range).`),
-      name: string2().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>".'),
-      private: boolean2().optional().describe("true: the code links only this session and the one who joins; they are not connected with the rest of the group."),
+      port: number2().int().min(1024).max(65535).optional().describe(`Port to listen on. Leave empty to use a free port in ${portRange()} (set COWORKER_PORTS to change this range). Never placed in an outside code.`),
+      name: string2().min(1).max(80).optional().describe('Name the other side will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>", or "<tool>" when outside is true.'),
+      private: boolean2().optional().describe("true: the code links only this session and the one who joins; they are not connected with the rest of the group. Always true when outside is true."),
+      outside: boolean2().optional().describe("true: make an outside code (\uC678\uBD80\uC6A9 \uCF54\uB4DC) for someone you do not know, such as an outside open-source contributor. Requires a working relay and never falls back to direct addresses. Carries only the relay mailbox, hides this computer's name, account, folder paths, port and internal or VPN addresses from that peer, and is always private."),
       model: string2().min(1).max(60).optional().describe("The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess."),
       effort: string2().min(1).max(60).optional().describe("Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess."),
       expires_minutes: number2().int().min(0).max(MAX_CODE_MINUTES).optional().describe(`How many minutes the code can be used. Default ${DEFAULT_CODE_MINUTES}. 0: no time limit; the code works until this bridge closes. Either way the code works only once.`),
       resume: string2().min(1).max(200).optional().describe("To continue a bridge from an earlier session on this PC: after coworker restarted, or when your human moved this work to a new session. Give its session_id (from an earlier result, or from list_connections, which lists the bridges on this PC) or its name. It comes back with the same identity, connections and conversations, without a new code; if it is still running in that other session, it moves here and stops there. Leave it out to open a bridge normally.")
     }
-  }, tool(async ({ port, name, private: only, expires_minutes: minutes = DEFAULT_CODE_MINUTES, resume, model, effort }) => {
+  }, tool(async ({
+    port,
+    name,
+    private: only,
+    outside,
+    expires_minutes: minutes = DEFAULT_CODE_MINUTES,
+    resume,
+    model,
+    effort
+  }) => {
     if (resume) {
       const b = await resumeBridge(resume.trim());
       introduce(b, model, effort);
@@ -29739,7 +30137,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
         resumed: true,
         session_id: identity,
         name: b.name,
-        port: b.port,
+        port: b.isOutsideOnly ? undefined : b.port,
         connected,
         conversations,
         relay: relayInfo,
@@ -29750,11 +30148,46 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     }
     await resolveFolder();
     freshIfMoved();
+    if (outside) {
+      if (!relay)
+        throw new Error(outsideRelayError(undefined, "off"));
+      const b = getBridge(true);
+      const chosenName = name ?? clientLabel();
+      b.assertOutsideSafe({ name: chosenName });
+      const wasOpen = b.isOpen;
+      b.outsideName = chosenName;
+      if (!wasOpen)
+        b.name = chosenName;
+      introduce(b, model, effort);
+      b.open(port, { outsideOnly: !wasOpen });
+      const status = await b.relayReady(5000);
+      if (status !== "ok") {
+        if (!wasOpen)
+          b.shutdown();
+        throw new Error(outsideRelayError(relay, status));
+      }
+      const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60000).toISOString();
+      return {
+        code: b.newCode({ outside: true, private: true, ttlMs: minutes === 0 ? null : minutes * 60000 }),
+        session_id: identity,
+        expires: expires ?? "never: works until this bridge closes",
+        kind: "outside: relay only, hides this computer, and links only this session and the one who joins",
+        name: b.nameFor(true),
+        addresses: b.addrsFor(true),
+        relay: { url: relay, status },
+        group: [],
+        viewer: viewerUrl(),
+        listen_command: listenCommand(),
+        next: `Show the outside code to your human so they can share it with the outside person. It goes only through the relay, carries none of this computer's addresses, port or computer name, and links only this session and the one who joins. When talking to that session, never include this computer's name, account name, home or project folder full paths (use relative paths like src/file.ts:10), or internal or VPN addresses. The code works once, ${expires ? `until ${expires}` : "with no time limit until this bridge closes"}; make a new code for each further session.${" "}${viewerNote(viewerUrl())}${channelHint()}${tellFirst()} ${listen()}`
+      };
+    }
     const b = getBridge();
+    if (b.isOutsideOnly && !name && b.name === b.outsideName)
+      b.name = normalDefaultName();
     if (name)
       b.name = name;
     introduce(b, model, effort);
-    b.open(port);
+    b.open(port, { outsideOnly: false });
     const { relay: relayInfo, warn = "" } = await relayStatus(b);
     const expires = minutes === 0 ? undefined : new Date(Date.now() + minutes * 60000).toISOString();
     return {
@@ -29778,19 +30211,24 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     description: "Connect this session to a coworker's session using the connection code their AI produced with open_bridge. Opens this session's bridge too, so answers can come back.",
     inputSchema: {
       code: string2().min(10).describe('The whole connection code, starting with "cw1."'),
-      name: string2().min(1).max(80).optional().describe('Name the coworker will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>".'),
+      name: string2().min(1).max(80).optional().describe('Name the other side will see for this session. Defaults to "<folder> \xB7 <tool> @ <computer>", or "<tool>" when connecting with an outside code.'),
       model: string2().min(1).max(60).optional().describe("The model you are running as, as you know it (for example Fable 5.2 or GPT-5.5). The other side sees it. Leave it out if you do not know; do not guess."),
       effort: string2().min(1).max(60).optional().describe("Your reasoning effort setting, if you know it (for example low, medium, high, max). Leave it out if you do not know; do not guess.")
     }
   }, tool(async ({ code, name, model, effort }) => {
     await resolveFolder();
     freshIfMoved();
-    const b = getBridge();
+    const relayOnlyCode = decodeCode(code).addrs.every(isRelayAddr);
+    const b = getBridge(relayOnlyCode && !name);
+    if (!b.isOpen && relayOnlyCode && !name) {
+      b.name = clientLabel();
+      b.outsideName = clientLabel();
+    }
     if (name)
       b.name = name;
     introduce(b, model, effort);
     if (!b.isOpen)
-      b.open();
+      b.open(undefined, { outsideOnly: relayOnlyCode && !name });
     const { relay: relayInfo, warn = "" } = await relayStatus(b);
     const before = new Set(b.peers.keys());
     const peer = await b.connect(code);
@@ -29924,7 +30362,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       conclusion: string2().min(1).max(5000).describe("What the conversation settled, in a few sentences."),
       facts: array(object({
         fact: string2().min(1).max(2000),
-        evidence: string2().min(1).max(2000).describe("Where it was checked: a file path and line, a command and its result, a document."),
+        evidence: string2().min(1).max(2000).describe("Where it was checked: a file path and line (relative to the project, never a full path on this PC, when connected through an outside code), a command and its result, a document."),
         checked_by: _enum(["me", "them"]).describe("me: you checked it yourself. them: only the other side checked it and you did not.")
       })).max(50).optional().describe("Only what was actually checked."),
       guesses: items("What nobody checked: assumptions, likely causes, estimates."),
@@ -30063,12 +30501,16 @@ async function isInitialize(req) {
   });
   return Array.isArray(body) ? body.some((m) => m?.method === "initialize") : body?.method === "initialize";
 }
-async function rootsFolder(server) {
+async function rootsFolderPath(server) {
   if (!server.server.getClientCapabilities()?.roots)
     return;
   const { roots } = await server.server.listRoots(undefined, { timeout: 3000 });
   const uri = roots[0]?.uri;
-  return uri?.startsWith("file:") ? basename2(fileURLToPath(uri)) : undefined;
+  return uri?.startsWith("file:") ? fileURLToPath(uri) : undefined;
+}
+async function rootsFolder(server) {
+  const path = await rootsFolderPath(server);
+  return path ? basename3(path) : undefined;
 }
 async function serve({ home }) {
   const port = Number(process.env.COWORKER_APP_PORT) || APP_PORT;
@@ -30120,6 +30562,7 @@ async function serve({ home }) {
       relay: process.env.COWORKER_RELAY || undefined,
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
       folder: rootsFolder,
+      folderPath: rootsFolderPath,
       app: updating ? { downloaded: () => downloaded, restartCommand } : undefined
     });
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -30187,13 +30630,13 @@ async function listen(port, fetch2) {
 function appUpdates(script) {
   if (/^(off|false|0|no)$/i.test(process.env.COWORKER_AUTO_UPDATE ?? ""))
     return false;
-  return basename2(script) === "coworker.js" && !process.env.CLAUDE_PLUGIN_ROOT && !/[\\/]plugins[\\/]/.test(script);
+  return basename3(script) === "coworker.js" && !process.env.CLAUDE_PLUGIN_ROOT && !/[\\/]plugins[\\/]/.test(script);
 }
 function restartApp(script) {
   if (process.env.XPC_SERVICE_NAME === LABEL)
     process.exit(0);
   const bun = process.execPath;
-  if (platform4() === "win32") {
+  if (platform5() === "win32") {
     const ps = (s) => s.replace(/'/g, "''");
     const command = `Start-Process -FilePath '${ps(bun)}' -ArgumentList '"${ps(script)}"', 'serve' -WindowStyle Minimized`;
     spawn2("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
@@ -30243,7 +30686,7 @@ async function wake(home, input) {
 }
 
 // src/mcp.ts
-var home = process.env.COWORKER_HOME ?? join7(homedir3(), ".coworker");
+var home = process.env.COWORKER_HOME ?? join7(homedir4(), ".coworker");
 var command2 = process.argv[2];
 if (command2 === "serve")
   await serve({ home });
@@ -30269,6 +30712,7 @@ async function stdio() {
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
     folder: projectFolder,
+    folderPath: projectFolderPath,
     sessionId,
     restore,
     autoUpdate: installedAsPlugin()
@@ -30291,20 +30735,24 @@ function installedAsPlugin() {
   if (/^(off|false|0|no)$/i.test(process.env.COWORKER_AUTO_UPDATE ?? ""))
     return false;
   const script = process.argv[1] ?? "";
-  if (basename3(script) !== "coworker.js")
+  if (basename4(script) !== "coworker.js")
     return false;
   const root = process.env.CLAUDE_PLUGIN_ROOT;
   return root ? resolve3(script).startsWith(resolve3(root)) : true;
 }
-function projectFolder() {
+function projectFolderPath() {
   const given = process.env.COWORKER_PROJECT_DIR;
   if (given && !given.includes("${"))
-    return basename3(given);
+    return given;
   const cwd = workingDir();
   if (cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(cwd))
-    return basename3(cwd);
+    return cwd;
   const pwd = process.env.PWD;
-  return pwd && pwd !== cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(pwd) ? basename3(pwd) : undefined;
+  return pwd && pwd !== cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(pwd) ? pwd : undefined;
+}
+function projectFolder() {
+  const path = projectFolderPath();
+  return path ? basename4(path) : undefined;
 }
 function workingDir() {
   try {
