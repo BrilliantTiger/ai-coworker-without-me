@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ElicitRequestSchema, type ElicitRequest, type ElicitResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { waitSeconds } from '../src/limits'
+import { limitAfterCut, listenLimit, listenTimeout, waitSeconds } from '../src/limits'
 import { readSaved, savedPath, stillRunning } from '../src/resume'
 
 // 실제 MCP 서버 두 개를 띄워, Claude Code 쪽과 Codex 쪽이 도구만으로 주고받는지 본다.
@@ -21,7 +21,8 @@ async function session(clientName: string, env: Record<string, string> = {}, cli
       args: [join(import.meta.dir, '..', 'src', 'mcp.ts')],
       // 시험을 채널로 켠 Claude Code 안에서 돌려도 채널로 바뀌지 않게 정해 둔다.
       // Claude Code 안에서 돌려도 그 세션 ID를 물려받지 않게 비운다. 다시 켜기 시험만 따로 준다.
-      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDE_CODE_SESSION_ID: '', COWORKER_AUTO_UPDATE: 'off', COWORKER_NOTIFY: 'off', ...env } as Record<string, string>,
+      // 듣기가 스스로 끝나는 시간은 세션이 도는 곳에 따라 다르다. 어디서 돌려도 같게, 끝을 두지 않는 쪽으로 정해 둔다. 그 시험만 따로 준다.
+      env: { ...process.env, COWORKER_HOME: home, COWORKER_CHANNEL: 'off', CLAUDE_CODE_SESSION_ID: '', COWORKER_AUTO_UPDATE: 'off', COWORKER_NOTIFY: 'off', COWORKER_LISTEN_MS: '0', ...env } as Record<string, string>,
       stderr: 'inherit',
     }),
   )
@@ -360,13 +361,114 @@ test('ending the session closes its bridge and removes its state file', async ()
   expect(res).toBeNull()
 }, 15_000)
 
-test('Claude Code waits until something arrives; Codex ends before it gives up on the call', () => {
-  expect(waitSeconds(undefined, false)).toBe(Infinity)
-  expect(waitSeconds(0, false)).toBe(Infinity)
+// 2026-11-18, Orca 채팅형 세션: 듣기 명령이 Claude Code 의 백그라운드 시간 상한에 걸려 「killed」로 끝났고 AI는 다시 걸지 않았다.
+// 그런 세션에서는 듣기가 상한보다 먼저 스스로 끝나고(정상 종료), AI는 inbox 를 부른 뒤 다시 건다.
+test('where Claude Code stops background commands at a time limit, the listen command ends by itself first and the AI is told to run it again', async () => {
+  const claude = await session('claude-code', { COWORKER_LISTEN_MS: '1500' })
+  const codex = await session('codex-mcp-client')
+  const opened = await claude('open_bridge', {})
+  // timeout 을 함께 주게 한다. 주지 않으면 Claude Code 가 30분에 끊는다.
+  const how = `run \`${opened.listen_command}\` with Bash in the background (run_in_background: true, timeout: 3600000)`
+  expect(opened.next).toContain(how)
+  expect(opened.next).toContain('It ends by itself when something arrives, and after 2 seconds when nothing arrived.')
+  expect(opened.next).toContain('Do this also when Claude Code says it stopped the command at a time limit, whatever timeout it had; that is not an error.')
+  const listen = () => fetch(`${opened.viewer}/next`).then(r => r.text())
+  // 소식이 없으면 스스로 끝난다. 끊긴 것이 아니라 끝까지 답하고 끝난다.
+  const started = Date.now()
+  expect(await listen()).toContain('coworker: nothing new.')
+  expect(Date.now() - started).toBeGreaterThanOrEqual(1400)
+  // 명령이 끝났다는 알림에는 출력이 없다. AI는 inbox 를 부르고, 거기서 「알리지 말고 다시 걸라」는 말을 받는다.
+  const empty = await claude('inbox')
+  expect(empty.events).toEqual([])
+  expect(empty.next).toContain('Nothing new. Do not tell your human anything about this.')
+  expect(empty.next).toContain(how)
+  // 다시 건 명령은 이어서 듣는다. 몇 번을 스스로 끝나도 듣기는 이어지고, 소식이 오면 그 소식으로 끝난다.
+  expect(await listen()).toContain('coworker: nothing new.')
+  const third = listen()
+  await codex('connect', { code: opened.code })
+  expect(await third).toContain('(1 connected)')
+  expect((await claude('inbox')).events).toMatchObject([{ type: 'connected' }])
+  // wait_for_message 도 같은 시간에 빈 결과로 끝난다. 사람에게 알리지 않고 다시 듣게 한다.
+  const waitStarted = Date.now()
+  const waited = await claude('wait_for_message', {})
+  expect(waited.events).toEqual([])
+  expect(Date.now() - waitStarted).toBeGreaterThanOrEqual(1400)
+  expect(waited.next).toContain('Nothing new. Do not tell your human anything about this.')
+})
+
+// 스스로 끝나는 시간이 Claude Code 의 상한보다 길었던 경우(예: AI가 timeout 을 주지 않아 30분에 끊김, 또는 끝을 두지 않는 세션으로 잘못 봄).
+// 끊긴 뒤에도 듣기가 이어져야 한다: 서버가 끊긴 시간을 보고 기다림을 줄이고, inbox 가 AI에게 고장이 아니니 다시 걸라고 알린다.
+test('a listen command that Claude Code killed at its time limit is followed by shorter ones: inbox says so, and listening goes on', async () => {
+  // 끝을 두지 않는 세션으로 시작한다. 바닥을 1초로 줄이고, 「분에 맞게 끊겼는지」는 따지지 않게 「1분」을 1ms 로 둔다(그 규칙은 위 시험이 본다).
+  const claude = await session('claude-code', { COWORKER_LISTEN_MS: '0', COWORKER_LISTEN_CUT_FLOOR_MS: '1000', COWORKER_LISTEN_CUT_MINUTE_MS: '1' })
+  const opened = await claude('open_bridge', {})
+  expect(opened.next).toContain('(run_in_background: true)')
+  const url = `${opened.viewer}/next`
+  const stop = new AbortController()
+  const gone = fetch(url, { signal: stop.signal })
+    .then(r => r.text())
+    .catch(() => 'killed')
+  await Bun.sleep(1600)
+  stop.abort()
+  expect(await gone).toBe('killed')
+  // 끊긴 명령은 아무것도 찍지 못했다. AI가 inbox 를 부르면, 무슨 일이었고 이제 어떻게 되는지를 받는다.
+  let after = await claude('inbox')
+  for (let i = 0; i < 100 && !after.next.includes('Your last listen command'); i++) {
+    await Bun.sleep(20)
+    after = await claude('inbox')
+  }
+  expect(after.next).toMatch(/^Your last listen command was stopped after \d+ seconds?, before it ended by itself\. That looks like a time limit of Claude Code\. It is not an error\. From now on the listen command ends by itself after \d+ seconds?, before that limit\. Nothing new\. Tell your human in one line that Claude Code stopped the listen command at a time limit and that listening goes on\./)
+  expect(after.next).toContain(`run \`${opened.listen_command}\` with Bash in the background (run_in_background: true, timeout: 3600000)`)
+  // 다시 건 명령은 끊기지 않고 스스로 끝난다. 듣기가 이어진다.
+  expect(await fetch(url).then(r => r.text())).toContain('coworker: nothing new.')
+  // 한 번만 알린다.
+  expect((await claude('inbox')).next).not.toContain('Your last listen command')
+}, 20_000)
+
+test('Claude Code waits until something arrives, for at most 55 minutes at a time; Codex ends before it gives up on the call', () => {
+  expect(waitSeconds(undefined, false)).toBe(55 * 60)
+  expect(waitSeconds(0, false)).toBe(55 * 60)
   expect(waitSeconds(300, false)).toBe(300)
   expect(waitSeconds(30, false)).toBe(30)
+  // 이 세션의 듣기가 더 일찍 끝나야 하면 그 시간에 맞춘다. 끝을 두지 않는 세션에서도 55분을 넘기지 않는다.
+  expect(waitSeconds(undefined, false, 24 * 60_000)).toBe(24 * 60)
+  expect(waitSeconds(undefined, false, Infinity)).toBe(55 * 60)
   expect(waitSeconds(undefined, true)).toBe(50)
   expect(waitSeconds(300, true)).toBe(55)
+})
+
+test('listening ends by itself only where Claude Code stops background commands at a time limit', () => {
+  // 사람이 터미널에서 직접 쓰는 Claude Code 는 백그라운드 명령을 시간으로 끊지 않는다. 깨울 때마다 사용량이 드니 끝을 두지 않는다.
+  expect(listenLimit({ CLAUDE_CODE_ENTRYPOINT: 'cli' })).toBe(Infinity)
+  // Orca 채팅형 세션 같은 SDK 세션, 데스크톱 앱, 알 수 없는 곳은 30분(주면 2시간까지)에 끊는다. 그 전에 스스로 끝난다.
+  expect(listenLimit({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' })).toBe(55 * 60_000)
+  expect(listenLimit({ CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' })).toBe(55 * 60_000)
+  expect(listenLimit({})).toBe(55 * 60_000)
+  expect(listenTimeout(55 * 60_000)).toBe(60 * 60_000)
+  expect(listenTimeout(24 * 60_000)).toBe(60 * 60_000)
+  expect(listenTimeout(110 * 60_000)).toBe(115 * 60_000)
+  // 사람이 정할 수 있다. 0 이면 끝을 두지 않는다.
+  expect(listenLimit({ CLAUDE_CODE_ENTRYPOINT: 'cli', COWORKER_LISTEN_MINUTES: '20' })).toBe(20 * 60_000)
+  expect(listenLimit({ CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', COWORKER_LISTEN_MINUTES: '0' })).toBe(Infinity)
+  expect(listenLimit({ COWORKER_LISTEN_MINUTES: 'soon' })).toBe(55 * 60_000)
+  expect(listenLimit({ COWORKER_LISTEN_MS: '250' })).toBe(250)
+})
+
+test('a listen command that Claude Code stopped at its time limit makes the next ones end before that limit', () => {
+  // 30분 상한에 끊겼다: 명령이 뜨고 서버에 닿기까지 걸린 만큼 조금 일찍 끊긴다. 다음부터는 24분에 스스로 끝난다.
+  expect(limitAfterCut(30 * 60_000 - 700, Infinity)).toBe(24 * 60_000)
+  expect(limitAfterCut(30 * 60_000 - 700, 55 * 60_000)).toBe(24 * 60_000)
+  // 2시간 상한(2026-11-18 에 실제로 끊긴 값)이면 96분.
+  expect(limitAfterCut(2 * 60 * 60_000 - 300, Infinity)).toBe(96 * 60_000)
+  // 사람이 멈춘 것은 아무 때나 온다. 분에 맞지 않게 끊긴 것은 상한으로 보지 않는다.
+  expect(limitAfterCut(17 * 60_000 + 23_000, Infinity)).toBeUndefined()
+  expect(limitAfterCut(30 * 60_000 - 9_000, Infinity)).toBeUndefined()
+  // 너무 짧은 상한에는 맞추지 않는다. 그렇게 자주 깨우면 사용량만 든다.
+  expect(limitAfterCut(2 * 60_000 - 500, Infinity)).toBeUndefined()
+  expect(limitAfterCut(5 * 60_000 - 500, Infinity)).toBeUndefined()
+  // 이미 그보다 먼저 끝나고 있었으면 바꾸지 않는다. 줄이기만 한다.
+  expect(limitAfterCut(30 * 60_000 - 700, 20 * 60_000)).toBeUndefined()
+  expect(limitAfterCut(7 * 60_000 - 100, 55 * 60_000)).toBe(Math.floor(7 * 60_000 * 0.8))
 })
 
 test('a Claude Code session not started as a channel passes on how to start one, once', async () => {

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { Bridge, defersToHuman, isSavedBridge, parsePorts, routeId, saysNoAnswer, type BridgeEvent, type SavedBridge } from '../src/bridge'
 import { decodeCode, encodeCode } from '../src/code'
 import { newKeyPair, open, ReplayGuard, seal, fromB64 } from '../src/crypto'
-import { Viewer } from '../src/viewer'
+import { NOTHING_NEW, Viewer } from '../src/viewer'
 
 const opened: Bridge[] = []
 let nextPort = 17700
@@ -1085,6 +1085,85 @@ describe('viewer', () => {
       await a.close()
       expect(await last).toContain('bridge is closed')
       expect(await (await fetch(url)).text()).toContain('Do not run this command again')
+    } finally {
+      viewer.stop()
+    }
+  })
+
+  // 2026-11-18: Orca 채팅형 세션에서 듣기 명령이 Claude Code 의 백그라운드 시간 상한(2시간)에 걸려 「killed」로 끝났다.
+  // AI는 다시 걸지 않았고, 쉬는 세션이 된 그 세션을 Orca 가 내렸다. 그래서 듣기는 상한보다 먼저 스스로 끝난다.
+  test('a background listen command ends by itself when nothing arrives in time, and the next one listens on', async () => {
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 100 && !ok(); i++) await Bun.sleep(20)
+      expect(ok()).toBe(true)
+    }
+    const { a, b } = await pair()
+    await a.wait(0)
+    const viewer = new Viewer(a, { listenMs: 300 })
+    try {
+      const url = `${viewer.start()}/next`
+      expect(viewer.listenLimit).toBe(300)
+      const started = Date.now()
+      const res = await fetch(url)
+      // 정상 종료다: 응답이 끝까지 오고, 무엇을 할지 한 줄로 알려 준다.
+      expect(res.status).toBe(200)
+      expect(await res.text()).toBe(`${NOTHING_NEW}\n`)
+      expect(NOTHING_NEW).toContain('run this listen command in the background again')
+      expect(Date.now() - started).toBeGreaterThanOrEqual(280)
+      expect(viewer.listening).toBe(false)
+      // 스스로 끝난 것은 끊긴 것이 아니다. 기다림을 줄이지 않는다.
+      expect(viewer.takeCut()).toBeUndefined()
+      // 다시 걸면 이어서 듣는다. 그사이 소식이 오면 그 소식으로 끝난다.
+      const again = fetch(url).then(r => r.text())
+      await until(() => viewer.listening)
+      await b.ask(undefined, 'Which port?')
+      expect(await again).toContain('(1 question)')
+      // 여러 번 스스로 끝나도 소식은 남아 있다.
+      expect((await a.wait(0)).map(e => e.type)).toEqual(['message'])
+      expect(await (await fetch(url)).text()).toBe(`${NOTHING_NEW}\n`)
+    } finally {
+      viewer.stop()
+    }
+  })
+
+  test('a listen command cut at a time limit makes the next ones end before that limit; one stopped too early for a limit changes nothing', async () => {
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 400 && !ok(); i++) await Bun.sleep(10)
+      expect(ok()).toBe(true)
+    }
+    const { a } = await pair()
+    await a.wait(0)
+    // 끝을 두지 않는 세션(터미널)으로 시작한다. 시험에서는 바닥을 0.6초로 줄이고, 「분에 맞게 끊겼는지」는 따지지 않게 「1분」을 1ms 로 둔다.
+    // 분에 맞지 않게 끊긴 것을 상한으로 보지 않는 규칙은 limitAfterCut 시험(test/mcp.test.ts)이 본다.
+    const viewer = new Viewer(a, { listenMs: Infinity, cutFloorMs: 600, cutMinuteMs: 1 })
+    try {
+      const url = `${viewer.start()}/next`
+      const cutAfter = async (ms: number) => {
+        const stop = new AbortController()
+        const gone = fetch(url, { signal: stop.signal }).catch(() => 'cut')
+        await until(() => viewer.listening)
+        await Bun.sleep(ms)
+        stop.abort()
+        expect(await gone).toBe('cut')
+        await until(() => !viewer.listening)
+      }
+      // 바닥보다 일찍 끊긴 것은 상한으로 보지 않는다. 그렇게 자주 깨우면 사용량만 든다.
+      await cutAfter(150)
+      expect(viewer.listenLimit).toBe(Infinity)
+      expect(viewer.takeCut()).toBeUndefined()
+      // 상한에 끊기면 다음부터는 그 0.8배에 스스로 끝난다.
+      await cutAfter(900)
+      const cut = viewer.takeCut()
+      expect(cut?.waitedMs).toBeGreaterThanOrEqual(890)
+      expect(cut?.limitMs).toBe(Math.max(600, Math.floor(cut!.waitedMs * 0.8)))
+      expect(viewer.listenLimit).toBe(cut!.limitMs)
+      // 한 번만 알린다.
+      expect(viewer.takeCut()).toBeUndefined()
+      // 다시 건 명령은 끊기기 전에 스스로 끝난다.
+      const started = Date.now()
+      expect(await (await fetch(url)).text()).toBe(`${NOTHING_NEW}\n`)
+      expect(Date.now() - started).toBeGreaterThanOrEqual(cut!.limitMs - 20)
+      expect(viewer.takeCut()).toBeUndefined()
     } finally {
       viewer.stop()
     }

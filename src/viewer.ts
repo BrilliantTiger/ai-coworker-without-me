@@ -5,6 +5,7 @@ import { openQuestion } from './bridge'
 import type { Bridge, BridgeEvent, ViewerAddress } from './bridge'
 import { randomToken } from './crypto'
 import { hostForUrl } from './net'
+import { limitAfterCut, listenLimit } from './limits'
 import { PAGE, QUIET_AFTER_MS } from './page'
 import { viewAddress, type ViewAddressDeps, type ViewAddressSetting } from './viewaddr'
 
@@ -33,14 +34,20 @@ export class Viewer {
   private clear = new Set<string>()
   // 전에 쓰던 포트를 쓰지 못해 옮겼으면 그 포트. 링크가 바뀌었다고 사람에게 알린다.
   private movedFrom?: number
+  // 듣기 명령이 소식 없이 스스로 끝나는 시간(ms). 끝을 두지 않으면 Infinity. 까닭은 limits.ts 에 있다.
+  private limit: number
+  // 듣기 명령이 시간 상한에 끊긴 것으로 보여 기다림을 줄였다. AI가 다음에 inbox 를 부를 때 한 번 알려 준다.
+  private cut?: { waitedMs: number; limitMs: number }
 
   // pushes: 채널로 켠 세션이라 소식이 세션에 바로 들어간다. 그때는 기다릴 것이 없다.
+  // listenMs: 듣기 명령이 스스로 끝나는 시간. 주지 않으면 이 세션이 도는 곳을 보고 정한다. cutFloorMs · cutMinuteMs 는 시험용이다.
   constructor(
     private readonly bridge: Bridge,
-    private readonly options: { pushes?: boolean; quietAfterMs?: number; address?: string; at?: ViewAddressSetting } & ViewAddressDeps = {},
+    private readonly options: { pushes?: boolean; quietAfterMs?: number; address?: string; at?: ViewAddressSetting; listenMs?: number; cutFloorMs?: number; cutMinuteMs?: number } & ViewAddressDeps = {},
   ) {
     this.token = bridge.viewerAt?.token ?? randomToken()
     this.address = options.at ?? (options.address?.trim() ? viewAddress(options.address, options) : undefined)
+    this.limit = options.listenMs ?? listenLimit()
   }
 
   // 열기 전에 본다: 쓰려는 포트에서 다른 프로그램이 이미 답하고 있는지. 127.0.0.1 과 정한 주소 둘 다 본다.
@@ -268,6 +275,18 @@ export class Viewer {
     return this.listener !== undefined
   }
 
+  // 듣기 명령이 소식 없이 스스로 끝나는 시간(ms). 끝을 두지 않으면 Infinity.
+  get listenLimit() {
+    return this.limit
+  }
+
+  // 듣기 명령이 시간 상한에 끊겨 기다림을 줄였으면, 그 사실을 한 번만 돌려준다.
+  takeCut() {
+    const cut = this.cut
+    this.cut = undefined
+    return cut
+  }
+
   // 백그라운드로 돌려 둘 명령. 새 소식이 오면 한 줄을 찍고 끝난다.
   // Windows PowerShell 에서 curl 은 다른 명령의 별명이라 curl.exe 로 부른다. Git Bash 에서도 curl.exe 가 된다.
   listenCommand(platform: string = process.platform) {
@@ -308,15 +327,19 @@ export class Viewer {
   // 새 소식이 쌓이거나 브릿지가 닫히면 한 줄을 돌려주고 끝나고, 명령이 끝났다고 Claude Code 가 AI를 깨운다.
   // 소식은 가져가지 않는다. AI가 inbox 로 읽으므로 이 명령이 중간에 끊겨도 소식은 남는다.
   // 기다림은 마지막 하나만 산다. 새 명령이 오면 앞의 명령은 바로 끝나서, 백그라운드 명령이 쌓이지 않는다.
+  // 소식이 없어도 정한 시간이 지나면 스스로 끝난다(limits.ts). Claude Code 의 시간 상한에 걸려 「killed」로 끝나면 AI가 다시 걸지 않기 때문이다.
   private next(req: Request, headers: Record<string, string>): Promise<Response> {
     this.listener?.('coworker: a newer listen command took over from this one. Nothing to do.')
     // AI가 스스로 기다리기 시작했으니, 다시 켤 때 훅이 걸어 둔 기다림은 끝낸다. 두 번 깨우지 않는다.
     for (const done of [...this.wakers]) done(LISTENING_ITSELF)
     return new Promise(resolve => {
       let unwatch = () => {}
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const started = Date.now()
       const finish = (text: string) => {
         if (this.listener === finish) this.listener = undefined
         unwatch()
+        clearTimeout(timer)
         resolve(new Response(text && `${text}\n`, { headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' } }))
       }
       const check = () => {
@@ -325,10 +348,26 @@ export class Viewer {
       }
       this.listener = finish
       unwatch = this.bridge.watch(check)
-      // 명령이 멈췄으면(사람이 백그라운드 작업을 멈췄거나 세션이 끝났다) 더 기다리지 않는다.
-      req.signal.addEventListener('abort', () => finish(''), { once: true })
+      if (Number.isFinite(this.limit)) timer = setTimeout(() => finish(NOTHING_NEW), this.limit)
+      // 명령이 멈췄으면(사람이 백그라운드 작업을 멈췄거나, 세션이 끝났거나, Claude Code 가 시간 상한으로 끊었다) 더 기다리지 않는다.
+      // 시간 상한으로 끊긴 것으로 보이면 다음부터는 그보다 먼저 스스로 끝나게 기다림을 줄인다.
+      req.signal.addEventListener(
+        'abort',
+        () => {
+          if (this.listener === finish) this.learnFromCut(Date.now() - started)
+          finish('')
+        },
+        { once: true },
+      )
       check()
     })
+  }
+
+  private learnFromCut(waitedMs: number) {
+    const shorter = limitAfterCut(waitedMs, this.limit, this.options.cutFloorMs, this.options.cutMinuteMs)
+    if (shorter === undefined) return
+    this.limit = shorter
+    this.cut = { waitedMs, limitMs: shorter }
   }
 
   // 세션을 다시 켜면(Claude Code resume) 백그라운드 대기 명령이 사라진다. 사람이 말을 걸기 전까지 AI는 그것을 다시 걸지 않는다.
@@ -408,6 +447,10 @@ const ISSUE_GAP_MS = 1000
 // 백그라운드 명령이 찍는 한 줄. 무엇이 몇 건 왔는지만 알린다. 상대가 정한 이름이나 보낸 글은 넣지 않는다.
 // 내용은 AI가 inbox 로 읽는다. 아무 일도 없으면 아무것도 돌려주지 않아 명령이 계속 기다린다.
 const LISTENING_ITSELF = 'coworker: this session is listening by itself now. Nothing to do.'
+
+// 소식 없이 정한 시간이 지나 듣기 명령이 스스로 끝날 때 찍는 한 줄.
+export const NOTHING_NEW =
+  'coworker: nothing new. This listen command ends by itself after a while, so that no time limit stops it. That is how listening works, not an error. Call the coworker inbox tool, then run this listen command in the background again. Do not tell your human anything about this.'
 
 // 다시 켠 뒤 깨우는 한 줄은 이것으로 시작한다. 훅은 코드 2로 끝나야 AI를 깨우는데, Claude Code 는 코드 2로 끝난 훅을
 // 언제나 실패(error)로 기록한다(2.1.323). 그래서 Orca 같은 화면은 이 한 줄을 빨간 「hook failed」 상자에 넣는다(2026-11-13).

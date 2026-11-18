@@ -27466,10 +27466,36 @@ function firstTimeHint(home) {
 }
 
 // src/limits.ts
-function waitSeconds(requested, codex) {
+var LISTEN_MS = 55 * 60000;
+var LISTEN_TIMEOUT_MS = 60 * 60000;
+var LISTEN_FLOOR_MS = 5 * 60000;
+var TIMER_MAX_MS = 2000000000;
+var given = (text) => {
+  const n = Number(text);
+  return text !== undefined && text.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : undefined;
+};
+function listenLimit(env = process.env) {
+  const ms = given(env.COWORKER_LISTEN_MS);
+  if (ms !== undefined)
+    return ms ? Math.min(ms, TIMER_MAX_MS) : Infinity;
+  const minutes = given(env.COWORKER_LISTEN_MINUTES);
+  if (minutes !== undefined)
+    return minutes ? Math.min(minutes * 60000, TIMER_MAX_MS) : Infinity;
+  return env.CLAUDE_CODE_ENTRYPOINT === "cli" ? Infinity : LISTEN_MS;
+}
+function limitAfterCut(waitedMs, current, floorMs = given(process.env.COWORKER_LISTEN_CUT_FLOOR_MS) || LISTEN_FLOOR_MS, minuteMs = given(process.env.COWORKER_LISTEN_CUT_MINUTE_MS) || 60000) {
+  const limit = Math.round(waitedMs / minuteMs) * minuteMs;
+  const early = limit - waitedMs;
+  if (limit < floorMs || early > minuteMs / 12 || early < -minuteMs / 60)
+    return;
+  const shorter = Math.max(floorMs, Math.floor(limit * 0.8));
+  return shorter < Math.min(current, limit) ? shorter : undefined;
+}
+var listenTimeout = (limitMs) => Math.max(LISTEN_TIMEOUT_MS, Math.ceil((limitMs + 5 * 60000) / 60000) * 60000);
+function waitSeconds(requested, codex, limitMs = LISTEN_MS) {
   if (codex)
     return Math.min(requested ?? 50, 55);
-  return requested || Infinity;
+  return Math.min(requested || Infinity, Math.min(limitMs, LISTEN_MS) / 1000);
 }
 
 // src/notify.ts
@@ -29217,11 +29243,14 @@ class Viewer {
   avoidPort;
   clear = new Set;
   movedFrom;
+  limit;
+  cut;
   constructor(bridge, options = {}) {
     this.bridge = bridge;
     this.options = options;
     this.token = bridge.viewerAt?.token ?? randomToken();
     this.address = options.at ?? (options.address?.trim() ? viewAddress(options.address, options) : undefined);
+    this.limit = options.listenMs ?? listenLimit();
   }
   async ready() {
     const want = this.wanted();
@@ -29409,6 +29438,14 @@ class Viewer {
   get listening() {
     return this.listener !== undefined;
   }
+  get listenLimit() {
+    return this.limit;
+  }
+  takeCut() {
+    const cut = this.cut;
+    this.cut = undefined;
+    return cut;
+  }
   listenCommand(platform = process.platform) {
     this.start();
     return `${platform === "win32" ? "curl.exe" : "curl"} -s ${this.localUrl}/next`;
@@ -29455,10 +29492,13 @@ class Viewer {
       done(LISTENING_ITSELF);
     return new Promise((resolve) => {
       let unwatch = () => {};
+      let timer;
+      const started = Date.now();
       const finish = (text) => {
         if (this.listener === finish)
           this.listener = undefined;
         unwatch();
+        clearTimeout(timer);
         resolve(new Response(text && `${text}
 `, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } }));
       };
@@ -29469,9 +29509,22 @@ class Viewer {
       };
       this.listener = finish;
       unwatch = this.bridge.watch(check);
-      req.signal.addEventListener("abort", () => finish(""), { once: true });
+      if (Number.isFinite(this.limit))
+        timer = setTimeout(() => finish(NOTHING_NEW), this.limit);
+      req.signal.addEventListener("abort", () => {
+        if (this.listener === finish)
+          this.learnFromCut(Date.now() - started);
+        finish("");
+      }, { once: true });
       check();
     });
+  }
+  learnFromCut(waitedMs) {
+    const shorter = limitAfterCut(waitedMs, this.limit, this.options.cutFloorMs, this.options.cutMinuteMs);
+    if (shorter === undefined)
+      return;
+    this.limit = shorter;
+    this.cut = { waitedMs, limitMs: shorter };
   }
   wake(req, headers) {
     const reply = (text) => new Response(text && `${text}
@@ -29546,6 +29599,7 @@ var RECENT_TEXT = 400;
 var ISSUE_TTL_MS = 60 * 60000;
 var ISSUE_GAP_MS = 1000;
 var LISTENING_ITSELF = "coworker: this session is listening by itself now. Nothing to do.";
+var NOTHING_NEW = "coworker: nothing new. This listen command ends by itself after a while, so that no time limit stops it. That is how listening works, not an error. Call the coworker inbox tool, then run this listen command in the background again. Do not tell your human anything about this.";
 var AFTER_RESTART = "coworker: not an error.";
 function newsLine(events, open, when = "listening") {
   if (events.length) {
@@ -29653,7 +29707,7 @@ function createSession(opts) {
   Tell your human right away
   - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you end your turn.` : `Stay open until your human says stop
   - Once your human opens or connects a bridge, keep listening until your human tells you to stop. Only then call close_bridge.
-  - In Claude Code, listen in the background so your human can keep talking to you. open_bridge and connect give a listen command: run it with Bash in the background (run_in_background: true) and end your turn. It ends by itself when something arrives, and Claude Code then tells you; call inbox, handle what it shows, and run the listen command in the background again. Keep only one running, and do not wait for it. If you cannot run it, use wait_for_message as below.
+  - In Claude Code, listen in the background so your human can keep talking to you. open_bridge and connect give a listen command: run it with Bash in the background (run_in_background: true, and the timeout their result names when it names one) and end your turn. It ends by itself when something arrives, and in some sessions also after a set time when nothing arrived; Claude Code then tells you. Every time it ends, call inbox, handle what it shows, and run the listen command in the background again. Do this also when Claude Code says it stopped the command at a time limit, whatever timeout the command had: that is not an error, and your human asked you to keep listening. Only when Claude Code says it stopped the command because the system is low on memory, do not run it again: tell your human in one line, and listen with wait_for_message instead. Keep only one running, and do not wait for it. If you cannot run it, use wait_for_message as below.
   - Elsewhere (for example Codex), listening means: call wait_for_message, handle what arrives, then call wait_for_message again.
   - Do not stop after one question or one answer. Your human may interrupt you at any time. Do what they ask, then go back to listening.
   - Both sides ask and both sides answer. When you need something from the other side, use send_question and keep listening for the answer.
@@ -29732,14 +29786,29 @@ ${text}` : "";
   const background = () => !channel && clientLabel() === "Claude Code";
   const listenCommand = () => background() ? viewerOf().listenCommand() : undefined;
   const tellFirst = () => background() && !viewer?.listening ? " Write all of this to your human in your reply first, and only then start listening." : "";
+  let keptLimit;
+  const listenMs = () => viewer?.listenLimit ?? keptLimit ?? listenLimit();
+  const span = (ms) => {
+    const [n, unit] = ms >= 60000 ? [Math.round(ms / 60000), "minute"] : [Math.round(ms / 1000), "second"];
+    return `${n} ${unit}${n === 1 ? "" : "s"}`;
+  };
+  const QUIET = "Nothing new. Do not tell your human anything about this. Write no text for them in this turn, not even that you are still listening.";
   function listen() {
     if (channel)
       return "Keep listening: what the other side sends comes in by itself as a <channel> notice from coworker. Do not call wait_for_message; end your turn when you are done.";
     if (!background())
       return "Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.";
     if (viewer?.listening)
-      return "Keep listening: your background listen command is still running and ends by itself when something arrives. Do not start another one and do not call wait_for_message; end your turn when you are done.";
-    return `Keep listening in the background, so your human can keep talking to you: run \`${listenCommand()}\` with Bash in the background (run_in_background: true), then end your turn. Do not wait for it and do not call wait_for_message. When it ends, Claude Code tells you: call inbox, handle what it shows, and run the command in the background again. If you cannot run it, call wait_for_message instead.`;
+      return "Keep listening: your background listen command is still running. Do not start another one and do not call wait_for_message; end your turn when you are done. When it ends, call inbox and do what it says.";
+    const command = listenCommand();
+    const ms = listenMs();
+    const how = Number.isFinite(ms) ? `run_in_background: true, timeout: ${listenTimeout(ms)}` : "run_in_background: true";
+    const ends = Number.isFinite(ms) ? `It ends by itself when something arrives, and after ${span(ms)} when nothing arrived.` : "It ends by itself when something arrives.";
+    return `Keep listening in the background, so your human can keep talking to you: run \`${command}\` with Bash in the background (${how}), then end your turn. Do not wait for it and do not call wait_for_message. ${ends} Every time it ends, Claude Code tells you: call inbox, handle what it shows, and run the command in the background again. Do this also when Claude Code says it stopped the command at a time limit, whatever timeout it had; that is not an error. If you cannot run it, call wait_for_message instead.`;
+  }
+  function cutNote() {
+    const cut = viewer?.takeCut();
+    return cut ? `Your last listen command was stopped after ${span(cut.waitedMs)}, before it ended by itself. That looks like a time limit of Claude Code. It is not an error. From now on the listen command ends by itself after ${span(cut.limitMs)}, before that limit. ` : "";
   }
   let folder;
   let folderKnown = false;
@@ -29761,8 +29830,7 @@ ${text}` : "";
     return bridge;
   }
   function adopt(b) {
-    viewer?.stop();
-    viewer = undefined;
+    dropViewer();
     bridge = b;
     moved = false;
     if (channel)
@@ -29773,8 +29841,7 @@ ${text}` : "";
         return;
       moved = true;
       closeWindows(false);
-      viewer?.stop();
-      viewer = undefined;
+      dropViewer();
       if (live.get(identity)?.bridge === b)
         live.delete(identity);
     };
@@ -29784,8 +29851,7 @@ ${text}` : "";
         if (bridge !== b)
           return;
         bridge = undefined;
-        viewer?.stop();
-        viewer = undefined;
+        dropViewer();
       }
     });
   }
@@ -30006,8 +30072,14 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     }
   }
   let viewer;
+  function dropViewer() {
+    if (viewer)
+      keptLimit = viewer.listenLimit;
+    viewer?.stop();
+    viewer = undefined;
+  }
   const viewerAt = opts.viewerAddress?.trim() ? viewAddress(opts.viewerAddress) : undefined;
-  const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel, at: viewerAt });
+  const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel, at: viewerAt, listenMs: keptLimit });
   const viewerUrl = async () => {
     await viewerOf().ready();
     return viewerOf().start();
@@ -30025,7 +30097,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     const warn = status === "ok" ? "" : ` The relay ${relay} is not working (${typeof status === "object" ? status.error : status}); tell your human. Sessions on the same office network or VPN still connect directly.`;
     return { relay: { url: relay, status }, warn };
   }
-  const KEEPALIVE_MS = Number(process.env.COWORKER_KEEPALIVE_MS) || 5 * 60000;
+  const KEEPALIVE_MS = Number(process.env.COWORKER_KEEPALIVE_MS) || 2 * 60000;
   const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value, null, 2) }] });
   function tool(run) {
     return async (args, extra) => {
@@ -30277,9 +30349,9 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("wait_for_message", {
     title: "Wait for message",
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: channel ? "Not needed in this session: what the other side sends comes in by itself as a <channel> notice from coworker. Returns at once." : "Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code, run the background listen command from open_bridge or connect instead, so your human can keep talking to you; call this only if you cannot run that command. In Claude Code this waits until something arrives, with no time limit; in Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and keep listening until your human says stop. If nothing arrived, say nothing to your human and keep listening.",
+    description: channel ? "Not needed in this session: what the other side sends comes in by itself as a <channel> notice from coworker. Returns at once." : "Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code, run the background listen command from open_bridge or connect instead, so your human can keep talking to you; call this only if you cannot run that command. In Claude Code this waits until something arrives, for at most 55 minutes at a time; in Codex it waits up to 55 seconds. When it returns with nothing new, call it again. Returns at once if something is already waiting. Handle what arrives, tell your human, and keep listening until your human says stop. If nothing arrived, say nothing to your human and keep listening.",
     inputSchema: {
-      timeout_sec: number2().int().min(0).optional().describe("Leave it out to wait until something arrives (Codex: 50 seconds, at most 55). Give it only when you want the wait to end sooner.")
+      timeout_sec: number2().int().min(0).optional().describe("Leave it out to wait until something arrives (Claude Code: at most 55 minutes; Codex: 50 seconds, at most 55). Give it only when you want the wait to end sooner.")
     }
   }, tool(async ({ timeout_sec }, { signal, _meta, sendNotification }) => {
     const b = getBridge();
@@ -30292,11 +30364,11 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     const token = _meta?.progressToken;
     let beats = 0;
     const alive = token !== undefined ? setInterval(() => void sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++beats, message: "listening" } }).catch(() => {}), KEEPALIVE_MS) : undefined;
-    const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal).finally(() => clearInterval(alive));
+    const events = await b.wait(waitSeconds(timeout_sec, isCodex(), listenMs()) * 1000, signal).finally(() => clearInterval(alive));
     if (events.some((e) => e.type === "moved"))
       return { events, next: MOVED };
     if (!events.length)
-      return { events, next: background() ? `Nothing new. Do not tell your human anything about this. ${listen()}` : "Nothing new. Do not tell your human anything about this; call wait_for_message again now." };
+      return { events, next: background() ? `${QUIET} ${listen()}` : "Nothing new. Do not tell your human anything about this; call wait_for_message again now." };
     return { events, next: `${NEWS} After that: ${listen()}` };
   }));
   server.registerTool("inbox", {
@@ -30307,7 +30379,8 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   }, tool(async () => {
     const b = getBridge();
     const events = await b.wait(0);
-    const next = moved || events.some((e) => e.type === "moved") ? MOVED : !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`;
+    const cut = cutNote();
+    const next = moved || events.some((e) => e.type === "moved") ? MOVED : !b.isOpen ? undefined : `${cut}${events.length ? `${NEWS} After that: ${listen()}` : cut ? `Nothing new. Tell your human in one line that Claude Code stopped the listen command at a time limit and that listening goes on. ${listen()}` : `${QUIET} ${listen()}`}`;
     const asking = b.humanQuestions().map((q) => q.thread);
     return { events, conversations: b.threadSummaries(), waiting_for_your_human: asking.length ? asking : undefined, listen_command: b.isOpen ? listenCommand() : undefined, next };
   }));
