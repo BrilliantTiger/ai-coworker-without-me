@@ -16411,7 +16411,7 @@ class StdioServerTransport {
 
 // src/mcp.ts
 import { homedir as homedir3 } from "os";
-import { basename as basename3, join as join7, resolve as resolve3 } from "path";
+import { basename as basename3, join as join7, resolve as resolve5 } from "path";
 
 // src/autostart.ts
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
@@ -16574,12 +16574,12 @@ function detectChannel(env = process.env) {
 
 // src/resume.ts
 import { readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync as rmSync3, statSync as statSync3 } from "fs";
-import { join as join3 } from "path";
+import { join as join3, resolve as resolve3 } from "path";
 
 // src/bridge.ts
 import { createHash as createHash3, randomUUID } from "crypto";
 import { appendFileSync as appendFileSync2, chmodSync, closeSync, existsSync as existsSync3, mkdirSync as mkdirSync3, openSync, readdirSync, readFileSync as readFileSync2, readSync, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
-import { basename, dirname as dirname2, extname, join as join2 } from "path";
+import { basename, dirname as dirname2, extname, isAbsolute, relative, resolve as resolve2 } from "path";
 
 // src/agreement.ts
 var isText = (v, max) => typeof v === "string" && v.length > 0 && v.length <= max;
@@ -16915,17 +16915,37 @@ var FILE_PROBLEM = {
 };
 var FILE_ID = /^[A-Za-z0-9-]{8,64}$/;
 var SHA256 = /^[0-9a-f]{64}$/;
+var THREAD_ID = /^[0-9a-f]{8}$/;
+var isThreadId = (value) => typeof value === "string" && value.length === 8 && THREAD_ID.test(value);
+var WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+function pathInside(folder, name) {
+  if (!folder || !name || name === "." || name === "..")
+    return;
+  if (name.includes("/") || name.includes("\\") || name.includes("\x00") || name.includes(":"))
+    return;
+  if (basename(name) !== name)
+    return;
+  const base = resolve2(folder);
+  const full = resolve2(base, name);
+  const rel = relative(base, full);
+  if (!rel || rel !== name || rel.startsWith("..") || isAbsolute(rel) || dirname2(full) !== base)
+    return;
+  return full;
+}
 var SECRET_FILE = /^(?:\.env(?:\..*)?|\.netrc|\.npmrc|\.pypirc|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|.*\.(?:pem|key|p12|pfx|jks|keystore|kdbx))$/i;
 function safeFileName(name) {
   const base = String(name ?? "").split(/[\\/]/).pop() ?? "";
-  const clean = base.replace(/[\x00-\x1f\x7f<>:"|?*]/g, "_").replace(/^\.+/, "").trim().slice(0, 150);
-  return clean || "file";
+  const clean = base.replace(/[\x00-\x1f\x7f<>:"|?*]/g, "_").replace(/^\.+/, "").trim().replace(/[. ]+$/, "").slice(0, 150);
+  if (!clean)
+    return "file";
+  return WINDOWS_RESERVED.test(clean) ? `_${clean}`.slice(0, 150) : clean;
 }
 function freePath(folder, name) {
-  const ext = extname(name), stem = name.slice(0, name.length - ext.length);
-  let path = join2(folder, name);
-  for (let n = 2;existsSync3(path); n++)
-    path = join2(folder, `${stem} (${n})${ext}`);
+  const clean = safeFileName(name);
+  const ext = extname(clean), stem = clean.slice(0, clean.length - ext.length);
+  let path = pathInside(folder, clean);
+  for (let n = 2;path && existsSync3(path); n++)
+    path = pathInside(folder, `${stem} (${n})${ext}`);
   return path;
 }
 var DEFERS_TO_HUMAN = [
@@ -17054,6 +17074,7 @@ class Bridge {
   invites = new Map;
   closedAsks = new Map;
   seen = new Set;
+  refusedThreads = new Map;
   replay;
   clockOff = new Map;
   outbox = [];
@@ -17100,7 +17121,8 @@ class Bridge {
       ...options,
       relay: options.relay?.trim().replace(/\/+$/, "") || undefined
     };
-    this.log = new LinkLog(this.opts.home ? join2(this.opts.home, "logs", `${this.route}.log`) : undefined);
+    const logsDir = this.opts.home ? pathInside(this.opts.home, "logs") : undefined;
+    this.log = new LinkLog(logsDir ? pathInside(logsDir, `${this.route}.log`) : undefined);
   }
   static restore(saved, options) {
     const b = new Bridge({ ...options, name: saved.name, keys: { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) } });
@@ -17119,7 +17141,8 @@ class Bridge {
         given: isToken(p.given) ? p.given : undefined
       });
     for (const t of saved.threads)
-      b.threads.set(t.id, t);
+      if (t && isThreadId(t.id))
+        b.threads.set(t.id, t);
     for (const t of b.threads.values())
       for (const m of t.messages ?? [])
         if (m.kind === "question" && !m.noAnswer && saysNoAnswer(m.text))
@@ -17138,7 +17161,8 @@ class Bridge {
     if (isToken(saved.relaySecret))
       b.keptRelaySecret = saved.relaySecret;
     for (const q of saved.asking ?? [])
-      b.asking.set(q.thread, q);
+      if (q && isThreadId(q.thread))
+        b.asking.set(q.thread, q);
     try {
       b.open(saved.port);
     } catch {
@@ -17591,6 +17615,7 @@ ${f.evidence}`).join(`
     this.ended = [];
     this.retryWakers.clear();
     this.invites.clear();
+    this.refusedThreads.clear();
     this.outbox = [];
     this.changed();
   }
@@ -18009,7 +18034,16 @@ ${f.evidence}`).join(`
     }
   }
   receive(peer, msg) {
-    if (!msg || typeof msg.id !== "string" || typeof msg.thread !== "string" || typeof msg.text !== "string")
+    if (!msg || typeof msg !== "object")
+      return;
+    if (!isThreadId(msg.thread)) {
+      const count = (this.refusedThreads.get(peer.key) ?? 0) + 1;
+      this.refusedThreads.set(peer.key, count);
+      this.log.write("refused_thread_id", { id: peerId(peer.key), count });
+      this.dropStagedChunks(peer, msg.files);
+      return;
+    }
+    if (typeof msg.id !== "string" || typeof msg.text !== "string")
       return;
     if (!KINDS.includes(msg.kind))
       return;
@@ -18111,7 +18145,7 @@ ${f.evidence}`).join(`
     if (!Array.isArray(waiting))
       return;
     for (const w of waiting) {
-      if (!w || typeof w.thread !== "string" || typeof w.since !== "string")
+      if (!w || !isThreadId(w.thread) || typeof w.since !== "string")
         continue;
       const t = this.threads.get(w.thread);
       if (!t || t.peer !== peer.key || t.status !== "peer_checking_with_their_human")
@@ -18387,7 +18421,11 @@ ${f.evidence}`).join(`
     return changed;
   }
   filesDir(kind) {
-    return this.opts.home ? join2(this.opts.home, "files", this.route, kind) : undefined;
+    if (!this.opts.home)
+      return;
+    const root = pathInside(this.opts.home, "files");
+    const mine = root ? pathInside(root, this.route) : undefined;
+    return mine ? pathInside(mine, kind) : undefined;
   }
   async assertTakesFiles(peers) {
     for (const peer of peers) {
@@ -18449,7 +18487,10 @@ ${f.evidence}`).join(`
     mkdirSync3(dir, { recursive: true, mode: 448 });
     return read.map((f) => {
       const id = randomUUID();
-      writeFileSync2(join2(dir, id), f.bytes, { mode: 384 });
+      const file = pathInside(dir, id);
+      if (!file)
+        throw new Error("nothing was sent: this session has no folder to keep files in");
+      writeFileSync2(file, f.bytes, { mode: 384 });
       return { id, name: f.name, size: f.bytes.length, sha256: createHash3("sha256").update(f.bytes).digest("hex"), path: f.path };
     });
   }
@@ -18467,25 +18508,47 @@ ${f.evidence}`).join(`
     if (payload.type !== "file" || payload.data !== undefined)
       return payload;
     const dir = this.filesDir("out");
+    const file = dir && typeof payload.id === "string" && FILE_ID.test(payload.id) ? pathInside(dir, payload.id) : undefined;
     let data = "";
-    try {
-      const fd = openSync(join2(dir, payload.id), "r");
+    if (file)
       try {
-        const buf = Buffer.alloc(FILE_CHUNK);
-        data = buf.subarray(0, readSync(fd, buf, 0, FILE_CHUNK, payload.seq * FILE_CHUNK)).toString("base64");
-      } finally {
-        closeSync(fd);
-      }
-    } catch {}
+        const fd = openSync(file, "r");
+        try {
+          const buf = Buffer.alloc(FILE_CHUNK);
+          data = buf.subarray(0, readSync(fd, buf, 0, FILE_CHUNK, payload.seq * FILE_CHUNK)).toString("base64");
+        } finally {
+          closeSync(fd);
+        }
+      } catch {}
     return { ...payload, data };
   }
   unspool(payload) {
     if (payload.type !== "msg" || !payload.msg.files?.length)
       return;
     const dir = this.filesDir("out");
-    if (dir)
-      for (const f of payload.msg.files)
-        rmSync2(join2(dir, f.id), { force: true });
+    if (!dir)
+      return;
+    for (const f of payload.msg.files) {
+      if (typeof f?.id !== "string" || !FILE_ID.test(f.id))
+        continue;
+      const file = pathInside(dir, f.id);
+      if (file)
+        rmSync2(file, { force: true });
+    }
+  }
+  dropStagedChunks(peer, sent) {
+    if (!Array.isArray(sent) || !sent.length)
+      return;
+    const partial = this.filesDir("partial");
+    if (!partial)
+      return;
+    for (const f of sent.slice(0, MAX_FILES)) {
+      if (!f || typeof f.id !== "string" || !FILE_ID.test(f.id))
+        continue;
+      const file = pathInside(partial, `${peerId(peer.key)}-${f.id}`);
+      if (file)
+        rmSync2(file, { force: true });
+    }
   }
   takeChunk(peer, p) {
     const dir = this.filesDir("partial");
@@ -18499,14 +18562,18 @@ ${f.evidence}`).join(`
     const bytes = Buffer.from(p.data, "base64");
     if (bytes.length !== (p.seq < of - 1 ? FILE_CHUNK : p.size - FILE_CHUNK * (of - 1)))
       return;
-    const prefix = `${peerId(peer.key)}-`, path = join2(dir, prefix + p.id);
+    const prefix = `${peerId(peer.key)}-`, path = pathInside(dir, prefix + p.id);
+    if (!path)
+      return;
     try {
       if (p.seq === 0) {
         mkdirSync3(dir, { recursive: true, mode: 448 });
         const mine = readdirSync(dir).filter((n) => n.startsWith(prefix));
-        for (const n of mine)
-          if (Date.now() - statSync2(join2(dir, n)).mtimeMs > 24 * 60 * 60000)
-            rmSync2(join2(dir, n), { force: true });
+        for (const n of mine) {
+          const old = pathInside(dir, n);
+          if (old && Date.now() - statSync2(old).mtimeMs > 24 * 60 * 60000)
+            rmSync2(old, { force: true });
+        }
         if (!existsSync3(path) && readdirSync(dir).filter((n) => n.startsWith(prefix)).length >= MAX_FILES * 2)
           return;
         writeFileSync2(path, bytes, { mode: 384 });
@@ -18523,13 +18590,13 @@ ${f.evidence}`).join(`
       if (!f || typeof f.id !== "string" || !FILE_ID.test(f.id) || typeof f.name !== "string" || !Number.isInteger(f.size) || f.size < 0 || typeof f.sha256 !== "string" || !SHA256.test(f.sha256))
         return [];
       const note = { id: f.id, name: safeFileName(f.name), size: f.size, sha256: f.sha256 };
-      const from = partial ? join2(partial, `${peerId(peer.key)}-${f.id}`) : undefined;
+      const from = partial ? pathInside(partial, `${peerId(peer.key)}-${f.id}`) : undefined;
       const fail = (problem) => {
         if (from)
           rmSync2(from, { force: true });
         return [{ ...note, ok: false, problem }];
       };
-      if (!from || !received)
+      if (!from || !received || !isThreadId(thread.id))
         return fail("no_folder");
       total += note.size;
       if (note.size > MAX_FILE_BYTES || total > MAX_FILES_BYTES)
@@ -18545,9 +18612,13 @@ ${f.evidence}`).join(`
       try {
         if (createHash3("sha256").update(readFileSync2(from)).digest("hex") !== note.sha256)
           return fail("sha256");
-        const folder = join2(received, safeFileName(thread.id).slice(0, 64));
+        const folder = pathInside(received, thread.id);
+        if (!folder)
+          return fail("no_folder");
         mkdirSync3(folder, { recursive: true, mode: 448 });
         const to = freePath(folder, note.name);
+        if (!to)
+          return fail("no_folder");
         renameSync2(from, to);
         chmodSync(to, 384);
         return [{ ...note, name: basename(to), path: to, ok: true }];
@@ -18558,7 +18629,7 @@ ${f.evidence}`).join(`
     return notes.length ? notes : undefined;
   }
   takeReceipt(peer, r) {
-    const thread = typeof r.thread === "string" ? this.threads.get(r.thread) : undefined;
+    const thread = isThreadId(r.thread) ? this.threads.get(r.thread) : undefined;
     if (!thread || thread.peer !== peer.key || !Array.isArray(r.files))
       return;
     const message = thread.messages.find((m) => m.id === r.msg && m.from === "me");
@@ -18811,11 +18882,16 @@ ${f.evidence}`).join(`
     }
   }
   saveAgreement(thread) {
-    if (!this.opts.home)
+    if (!this.opts.home || !isThreadId(thread.id))
       return;
-    const dir = join2(this.opts.home, "agreements");
+    const dir = pathInside(this.opts.home, "agreements");
+    if (!dir)
+      return;
     const started = thread.messages[0]?.at ?? now();
-    const path = join2(dir, `${started.slice(0, 10)}-${thread.id}.md`);
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(started.slice(0, 10)) ? started.slice(0, 10) : now().slice(0, 10);
+    const path = pathInside(dir, `${day}-${thread.id}.md`);
+    if (!path)
+      return;
     const latest = new Map;
     for (const m of thread.messages)
       if (m.agreement)
@@ -18856,14 +18932,17 @@ ${log.join(`
     }
   }
   statePath() {
-    return this.opts.home && this.port ? join2(this.opts.home, "bridges", `${this.port}.json`) : undefined;
+    if (!this.opts.home || !Number.isInteger(this.port) || this.port <= 0)
+      return;
+    const dir = pathInside(this.opts.home, "bridges");
+    return dir ? pathInside(dir, `${this.port}.json`) : undefined;
   }
   writeState() {
     const path = this.statePath();
     if (!path)
       return;
     try {
-      mkdirSync3(join2(this.opts.home, "bridges"), { recursive: true, mode: 448 });
+      mkdirSync3(dirname2(path), { recursive: true, mode: 448 });
       const state = { name: this.name, port: this.port, pid: process.pid, addrs: this.addrs(), code: this.lastCode, updatedAt: now() };
       writeFileSync2(path, JSON.stringify(state, null, 2), { mode: 384 });
     } catch {}
@@ -18876,7 +18955,11 @@ ${log.join(`
 }
 
 // src/resume.ts
-var savedPath = (home, id) => join3(home, "sessions", `${id.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+function savedPath(home, id) {
+  const dir = join3(resolve3(home), "sessions");
+  const stem = String(id ?? "").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(0, 120) || "session";
+  return pathInside(dir, `${stem}.json`) ?? join3(dir, "session.json");
+}
 function readSaved(path) {
   try {
     const saved = JSON.parse(readFileSync3(path, "utf8"));
@@ -18913,9 +18996,10 @@ async function findSession(home, id) {
   return {};
 }
 function listSaved(home) {
+  const dir = join3(resolve3(home), "sessions");
   let names;
   try {
-    names = readdirSync2(join3(home, "sessions"));
+    names = readdirSync2(dir);
   } catch {
     return [];
   }
@@ -18923,7 +19007,10 @@ function listSaved(home) {
   for (const name of names) {
     if (!name.endsWith(".json"))
       continue;
-    const saved = readSaved(join3(home, "sessions", name));
+    const path = pathInside(dir, name);
+    if (!path)
+      continue;
+    const saved = readSaved(path);
     if (saved)
       found.push({ id: name.slice(0, -".json".length), saved });
   }
@@ -18944,7 +19031,7 @@ async function waitUntilStopped(saved) {
   }
 }
 function pruneSaved(home) {
-  const dir = join3(home, "sessions");
+  const dir = join3(resolve3(home), "sessions");
   let names;
   try {
     names = readdirSync2(dir);
@@ -18952,7 +19039,9 @@ function pruneSaved(home) {
     return;
   }
   for (const name of names) {
-    const path = join3(dir, name);
+    const path = pathInside(dir, name);
+    if (!path)
+      continue;
     try {
       if (name.endsWith(".tmp") && Date.now() - statSync3(path).mtimeMs > 60000)
         rmSync3(path, { force: true });
@@ -19777,7 +19866,7 @@ data:
 import { spawn as spawn2 } from "child_process";
 import { randomUUID as randomUUID3 } from "crypto";
 import { platform as platform4 } from "os";
-import { basename as basename2, resolve as resolve2 } from "path";
+import { basename as basename2, resolve as resolve4 } from "path";
 import { fileURLToPath } from "url";
 // package.json
 var version2 = "0.12.1";
@@ -27392,7 +27481,7 @@ function run2(command, args, env) {
 // src/session.ts
 import { rmSync as rmSync5 } from "fs";
 import { homedir as homedir2 } from "os";
-import { isAbsolute, join as join6 } from "path";
+import { isAbsolute as isAbsolute2, join as join6 } from "path";
 
 // src/update.ts
 import { closeSync as closeSync2, mkdirSync as mkdirSync5, openSync as openSync2, renameSync as renameSync3, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync4 } from "fs";
@@ -29299,7 +29388,7 @@ function fullPaths(files) {
     return;
   return files.map((f) => {
     const path = f === "~" || f.startsWith("~/") || f.startsWith("~\\") ? join6(homedir2(), f.slice(1)) : f;
-    if (!isAbsolute(path))
+    if (!isAbsolute2(path))
       throw new Error(`nothing was sent: give the full path of each file (got ${f})`);
     return path;
   });
@@ -30075,7 +30164,7 @@ async function serve({ home }) {
   const sessions = new Map;
   pruneSaved(home);
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
-  const script = resolve2(process.argv[1] ?? "");
+  const script = resolve4(process.argv[1] ?? "");
   const restartCommand = `bun "${script}" autostart on`;
   const updating = appUpdates(script);
   let downloaded;
@@ -30294,7 +30383,7 @@ function installedAsPlugin() {
   if (basename3(script) !== "coworker.js")
     return false;
   const root = process.env.CLAUDE_PLUGIN_ROOT;
-  return root ? resolve3(script).startsWith(resolve3(root)) : true;
+  return root ? resolve5(script).startsWith(resolve5(root)) : true;
 }
 function projectFolder() {
   const given = process.env.COWORKER_PROJECT_DIR;

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, extname, join } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Server } from 'bun'
 import { isAgreement, renderAgreement, type Agreement } from './agreement'
 import { decodeCode, encodeCode } from './code'
@@ -159,6 +159,21 @@ export type FileNote = {
 type WireFile = { id: string; name: string; size: number; sha256: string }
 const FILE_ID = /^[A-Za-z0-9-]{8,64}$/
 const SHA256 = /^[0-9a-f]{64}$/
+// 대화 번호는 randomUUID 앞 여덟 글자(소문자 16진수)다.
+export const THREAD_ID = /^[0-9a-f]{8}$/
+export const isThreadId = (value: unknown): value is string => typeof value === 'string' && value.length === 8 && THREAD_ID.test(value)
+const WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
+// 지정한 폴더 바로 아래 이름 하나만 받아 그 안의 경로를 만든다.
+export function pathInside(folder: string, name: string): string | undefined {
+  if (!folder || !name || name === '.' || name === '..') return undefined
+  if (name.includes('/') || name.includes('\\') || name.includes('\x00') || name.includes(':')) return undefined
+  if (basename(name) !== name) return undefined
+  const base = resolve(folder)
+  const full = resolve(base, name)
+  const rel = relative(base, full)
+  if (!rel || rel !== name || rel.startsWith('..') || isAbsolute(rel) || dirname(full) !== base) return undefined
+  return full
+}
 // 열쇠나 비밀번호를 담는 파일의 이름. 이런 파일은 보내지 않는다.
 const SECRET_FILE = /^(?:\.env(?:\..*)?|\.netrc|\.npmrc|\.pypirc|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|.*\.(?:pem|key|p12|pfx|jks|keystore|kdbx))$/i
 // 받은 파일의 이름에서 폴더와 제어 글자를 뺀다. 숨김 파일이 되지 않게 앞의 점도 뺀다. 상대가 적어 보낸 이름은 믿지 않는다.
@@ -168,14 +183,17 @@ export function safeFileName(name: unknown): string {
     .replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_')
     .replace(/^\.+/, '')
     .trim()
+    .replace(/[. ]+$/, '')
     .slice(0, 150)
-  return clean || 'file'
+  if (!clean) return 'file'
+  return WINDOWS_RESERVED.test(clean) ? `_${clean}`.slice(0, 150) : clean
 }
 // 같은 이름이 이미 있으면 덮어쓰지 않고 이름 뒤에 번호를 붙인다.
-function freePath(folder: string, name: string) {
-  const ext = extname(name), stem = name.slice(0, name.length - ext.length)
-  let path = join(folder, name)
-  for (let n = 2; existsSync(path); n++) path = join(folder, `${stem} (${n})${ext}`)
+function freePath(folder: string, name: string): string | undefined {
+  const clean = safeFileName(name)
+  const ext = extname(clean), stem = clean.slice(0, clean.length - ext.length)
+  let path = pathInside(folder, clean)
+  for (let n = 2; path && existsSync(path); n++) path = pathInside(folder, `${stem} (${n})${ext}`)
   return path
 }
 
@@ -582,6 +600,7 @@ export class Bridge {
   private invites = new Map<string, Invite>()
   private closedAsks = new Map<string, string>()
   private seen = new Set<string>()
+  private refusedThreads = new Map<string, number>()
   // 예전 봉투를 다시 보내 오는 것을 거른다. 받는 요청과 받은 답 모두.
   private replay: ReplayGuard
   // 시계가 달라 주고받지 못한 상대와 그때. 사람에게는 상대마다 한 시간에 한 번만 알린다.
@@ -644,7 +663,8 @@ export class Bridge {
       ...options,
       relay: options.relay?.trim().replace(/\/+$/, '') || undefined,
     }
-    this.log = new LinkLog(this.opts.home ? join(this.opts.home, 'logs', `${this.route}.log`) : undefined)
+    const logsDir = this.opts.home ? pathInside(this.opts.home, 'logs') : undefined
+    this.log = new LinkLog(logsDir ? pathInside(logsDir, `${this.route}.log`) : undefined)
   }
 
   // 저장해 둔 세션을 같은 키로 되살린다. 전에 쓰던 포트가 비어 있으면 그 포트로 연다.
@@ -665,7 +685,7 @@ export class Bridge {
         token: isToken(p.token) ? p.token : undefined,
         given: isToken(p.given) ? p.given : undefined,
       })
-    for (const t of saved.threads) b.threads.set(t.id, t)
+    for (const t of saved.threads) if (t && isThreadId(t.id)) b.threads.set(t.id, t)
     // 글로만 답이 필요 없다고 적은 알림을 알아보기 전(0.10 이하)에 저장한 대화도 알림으로 표시한다.
     for (const t of b.threads.values()) for (const m of t.messages ?? []) if (m.kind === 'question' && !m.noAnswer && saysNoAnswer(m.text)) m.noAnswer = true
     b.outbox = saved.outbox.filter(o => b.peers.has(o.peer))
@@ -678,7 +698,7 @@ export class Bridge {
     b.events = (saved.events ?? []).filter(e => e.type !== 'moved')
     b.viewerAddress = saved.viewer
     if (isToken(saved.relaySecret)) b.keptRelaySecret = saved.relaySecret
-    for (const q of saved.asking ?? []) b.asking.set(q.thread, q)
+    for (const q of saved.asking ?? []) if (q && isThreadId(q.thread)) b.asking.set(q.thread, q)
     try {
       b.open(saved.port)
     } catch {
@@ -1173,6 +1193,7 @@ export class Bridge {
     this.ended = []
     this.retryWakers.clear()
     this.invites.clear()
+    this.refusedThreads.clear()
     this.outbox = []
     this.changed()
   }
@@ -1605,7 +1626,15 @@ export class Bridge {
   }
 
   private receive(peer: Peer, msg: WireMessage) {
-    if (!msg || typeof msg.id !== 'string' || typeof msg.thread !== 'string' || typeof msg.text !== 'string') return
+    if (!msg || typeof msg !== 'object') return
+    if (!isThreadId(msg.thread)) {
+      const count = (this.refusedThreads.get(peer.key) ?? 0) + 1
+      this.refusedThreads.set(peer.key, count)
+      this.log.write('refused_thread_id', { id: peerId(peer.key), count })
+      this.dropStagedChunks(peer, msg.files)
+      return
+    }
+    if (typeof msg.id !== 'string' || typeof msg.text !== 'string') return
     if (!KINDS.includes(msg.kind)) return
     if (this.seen.has(msg.id)) return
     this.seen.add(msg.id)
@@ -1708,7 +1737,7 @@ export class Bridge {
   private takeWaiting(peer: Peer, waiting: unknown) {
     if (!Array.isArray(waiting)) return
     for (const w of waiting as WaitState[]) {
-      if (!w || typeof w.thread !== 'string' || typeof w.since !== 'string') continue
+      if (!w || !isThreadId(w.thread) || typeof w.since !== 'string') continue
       const t = this.threads.get(w.thread)
       if (!t || t.peer !== peer.key || t.status !== 'peer_checking_with_their_human') continue
       const window = ['shown', 'closed_without_answer', 'text'].includes(w.window) ? w.window : 'shown'
@@ -2008,7 +2037,10 @@ export class Bridge {
 
   // 파일을 두는 자리. 보내려고 둔 사본(out), 받는 중인 조각(partial), 받은 파일(received). 세션마다 따로다.
   private filesDir(kind: 'out' | 'partial' | 'received') {
-    return this.opts.home ? join(this.opts.home, 'files', this.route, kind) : undefined
+    if (!this.opts.home) return undefined
+    const root = pathInside(this.opts.home, 'files')
+    const mine = root ? pathInside(root, this.route) : undefined
+    return mine ? pathInside(mine, kind) : undefined
   }
 
   // 파일을 받을 줄 아는 상대인지 본다. 모르면 한 번 물어본다(상대가 그사이 새 판으로 올렸을 수 있다).
@@ -2065,7 +2097,9 @@ export class Bridge {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     return read.map(f => {
       const id = randomUUID()
-      writeFileSync(join(dir, id), f.bytes, { mode: 0o600 })
+      const file = pathInside(dir, id)
+      if (!file) throw new Error('nothing was sent: this session has no folder to keep files in')
+      writeFileSync(file, f.bytes, { mode: 0o600 })
       return { id, name: f.name, size: f.bytes.length, sha256: createHash('sha256').update(f.bytes).digest('hex'), path: f.path }
     })
   }
@@ -2084,16 +2118,18 @@ export class Bridge {
   private withData(payload: Payload): Payload {
     if (payload.type !== 'file' || payload.data !== undefined) return payload
     const dir = this.filesDir('out')
+    const file = dir && typeof payload.id === 'string' && FILE_ID.test(payload.id) ? pathInside(dir, payload.id) : undefined
     let data = ''
-    try {
-      const fd = openSync(join(dir!, payload.id), 'r')
+    if (file)
       try {
-        const buf = Buffer.alloc(FILE_CHUNK)
-        data = buf.subarray(0, readSync(fd, buf, 0, FILE_CHUNK, payload.seq * FILE_CHUNK)).toString('base64')
-      } finally {
-        closeSync(fd)
-      }
-    } catch {}
+        const fd = openSync(file, 'r')
+        try {
+          const buf = Buffer.alloc(FILE_CHUNK)
+          data = buf.subarray(0, readSync(fd, buf, 0, FILE_CHUNK, payload.seq * FILE_CHUNK)).toString('base64')
+        } finally {
+          closeSync(fd)
+        }
+      } catch {}
     return { ...payload, data }
   }
 
@@ -2101,7 +2137,23 @@ export class Bridge {
   private unspool(payload: Payload) {
     if (payload.type !== 'msg' || !payload.msg.files?.length) return
     const dir = this.filesDir('out')
-    if (dir) for (const f of payload.msg.files) rmSync(join(dir, f.id), { force: true })
+    if (!dir) return
+    for (const f of payload.msg.files) {
+      if (typeof f?.id !== 'string' || !FILE_ID.test(f.id)) continue
+      const file = pathInside(dir, f.id)
+      if (file) rmSync(file, { force: true })
+    }
+  }
+
+  private dropStagedChunks(peer: Peer, sent: unknown) {
+    if (!Array.isArray(sent) || !sent.length) return
+    const partial = this.filesDir('partial')
+    if (!partial) return
+    for (const f of sent.slice(0, MAX_FILES) as Array<Partial<WireFile> | null>) {
+      if (!f || typeof f.id !== 'string' || !FILE_ID.test(f.id)) continue
+      const file = pathInside(partial, `${peerId(peer.key)}-${f.id}`)
+      if (file) rmSync(file, { force: true })
+    }
   }
 
   // 파일 조각을 받아 이어 붙인다. 조각마다 자리가 정해져 있어서, 같은 조각이 다시 와도 한 번만 붙는다.
@@ -2115,13 +2167,17 @@ export class Bridge {
     const bytes = Buffer.from(p.data, 'base64')
     // 마지막 조각만 짧다. 길이가 다르면 받지 않는다.
     if (bytes.length !== (p.seq < of - 1 ? FILE_CHUNK : p.size - FILE_CHUNK * (of - 1))) return
-    const prefix = `${peerId(peer.key)}-`, path = join(dir, prefix + p.id)
+    const prefix = `${peerId(peer.key)}-`, path = pathInside(dir, prefix + p.id)
+    if (!path) return
     try {
       if (p.seq === 0) {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
         // 한 상대가 받다 만 조각을 끝없이 쌓지 못하게 한다. 하루 넘게 묵은 것은 치운다.
         const mine = readdirSync(dir).filter(n => n.startsWith(prefix))
-        for (const n of mine) if (Date.now() - statSync(join(dir, n)).mtimeMs > 24 * 60 * 60_000) rmSync(join(dir, n), { force: true })
+        for (const n of mine) {
+          const old = pathInside(dir, n)
+          if (old && Date.now() - statSync(old).mtimeMs > 24 * 60 * 60_000) rmSync(old, { force: true })
+        }
         if (!existsSync(path) && readdirSync(dir).filter(n => n.startsWith(prefix)).length >= MAX_FILES * 2) return
         writeFileSync(path, bytes, { mode: 0o600 })
       } else if (existsSync(path) && statSync(path).size === p.seq * FILE_CHUNK) appendFileSync(path, bytes)
@@ -2137,12 +2193,12 @@ export class Bridge {
     const notes = sent.slice(0, MAX_FILES).flatMap((f: Partial<WireFile> | null): FileNote[] => {
       if (!f || typeof f.id !== 'string' || !FILE_ID.test(f.id) || typeof f.name !== 'string' || !Number.isInteger(f.size) || f.size! < 0 || typeof f.sha256 !== 'string' || !SHA256.test(f.sha256)) return []
       const note: FileNote = { id: f.id, name: safeFileName(f.name), size: f.size!, sha256: f.sha256 }
-      const from = partial ? join(partial, `${peerId(peer.key)}-${f.id}`) : undefined
+      const from = partial ? pathInside(partial, `${peerId(peer.key)}-${f.id}`) : undefined
       const fail = (problem: FileProblem): FileNote[] => {
         if (from) rmSync(from, { force: true })
         return [{ ...note, ok: false, problem }]
       }
-      if (!from || !received) return fail('no_folder')
+      if (!from || !received || !isThreadId(thread.id)) return fail('no_folder')
       total += note.size
       if (note.size > MAX_FILE_BYTES || total > MAX_FILES_BYTES) return fail('limit')
       let size = -1
@@ -2153,9 +2209,11 @@ export class Bridge {
       if (size > note.size) return fail('size')
       try {
         if (createHash('sha256').update(readFileSync(from)).digest('hex') !== note.sha256) return fail('sha256')
-        const folder = join(received, safeFileName(thread.id).slice(0, 64))
+        const folder = pathInside(received, thread.id)
+        if (!folder) return fail('no_folder')
         mkdirSync(folder, { recursive: true, mode: 0o700 })
         const to = freePath(folder, note.name)
+        if (!to) return fail('no_folder')
         renameSync(from, to)
         chmodSync(to, 0o600)
         return [{ ...note, name: basename(to), path: to, ok: true }]
@@ -2168,7 +2226,7 @@ export class Bridge {
 
   // 보낸 파일을 상대가 받아서 확인한 결과. 대화 기록에 적고, 온전히 가지 못한 것이 있으면 AI에게 알린다.
   private takeReceipt(peer: Peer, r: Extract<Payload, { type: 'receipt' }>) {
-    const thread = typeof r.thread === 'string' ? this.threads.get(r.thread) : undefined
+    const thread = isThreadId(r.thread) ? this.threads.get(r.thread) : undefined
     if (!thread || thread.peer !== peer.key || !Array.isArray(r.files)) return
     const message = thread.messages.find(m => m.id === r.msg && m.from === 'me')
     if (!message?.files) return
@@ -2420,10 +2478,13 @@ export class Bridge {
 
   // 합의문 파일. 대화마다 하나이고, 양쪽이 쓴 마지막 판과 대화 기록을 담는다. 세션이 끝나도 남는다.
   private saveAgreement(thread: Thread): string | undefined {
-    if (!this.opts.home) return undefined
-    const dir = join(this.opts.home, 'agreements')
+    if (!this.opts.home || !isThreadId(thread.id)) return undefined
+    const dir = pathInside(this.opts.home, 'agreements')
+    if (!dir) return undefined
     const started = thread.messages[0]?.at ?? now()
-    const path = join(dir, `${started.slice(0, 10)}-${thread.id}.md`)
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(started.slice(0, 10)) ? started.slice(0, 10) : now().slice(0, 10)
+    const path = pathInside(dir, `${day}-${thread.id}.md`)
+    if (!path) return undefined
     const latest = new Map<string, ThreadMessage>()
     for (const m of thread.messages) if (m.agreement) latest.set(m.agreement.by, m)
     const who = (m: ThreadMessage) => (m.from === 'me' ? `${this.name} → ${thread.peerName}` : `${thread.peerName} → ${this.name}`)
@@ -2449,14 +2510,16 @@ export class Bridge {
 
   // 사람이 연결 코드를 다시 보거나 열린 브릿지를 확인할 수 있게 남겨 둔다.
   private statePath() {
-    return this.opts.home && this.port ? join(this.opts.home, 'bridges', `${this.port}.json`) : undefined
+    if (!this.opts.home || !Number.isInteger(this.port) || this.port <= 0) return undefined
+    const dir = pathInside(this.opts.home, 'bridges')
+    return dir ? pathInside(dir, `${this.port}.json`) : undefined
   }
 
   private writeState() {
     const path = this.statePath()
     if (!path) return
     try {
-      mkdirSync(join(this.opts.home!, 'bridges'), { recursive: true, mode: 0o700 })
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
       const state = { name: this.name, port: this.port, pid: process.pid, addrs: this.addrs(), code: this.lastCode, updatedAt: now() }
       writeFileSync(path, JSON.stringify(state, null, 2), { mode: 0o600 })
     } catch {}
