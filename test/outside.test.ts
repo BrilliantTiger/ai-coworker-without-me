@@ -162,7 +162,7 @@ function recordingRelay(key?: string) {
     },
   })
   servers.push(proxy)
-  return { url: `http://localhost:${proxy.port}`, port: proxy.port!, recorded }
+  return { url: `http://localhost:${proxy.port}`, port: proxy.port!, recorded, stop: () => (real.stop(true), proxy.stop(true)) }
 }
 
 // 첫 세션이 상대에게 보낸 암호화 봉투를 상대 비밀키로 모두 열어 평문과 파일 조각까지 꺼낸다.
@@ -533,3 +533,167 @@ test('tool descriptions, AI instructions, README and PRIVACY explain outside cod
   expect(privacy).toContain('outside')
   expect(privacy).toContain('외부용 코드')
 })
+
+// 이 컴퓨터의 루프백이 아닌 IPv4 주소 하나. 없으면 그 확인은 건너뛴다.
+function lanAddress(): string | undefined {
+  for (const list of Object.values(networkInterfaces())) for (const nic of list ?? []) if (!nic.internal && nic.family === 'IPv4') return nic.address
+  return undefined
+}
+
+// 그 포트가 이 컴퓨터 밖에서 닿는 주소로도 받고 있는지.
+async function answersOnLan(port: number): Promise<boolean> {
+  const addr = lanAddress()
+  if (!addr) return false
+  try {
+    await fetch(`http://${addr}:${port}/`, { signal: AbortSignal.timeout(1500) })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const pressButton = (viewer: string) => fetch(`${viewer}/code`, { method: 'POST', headers: { 'x-coworker-viewer': '1' } })
+const onlyRelay = (code: string, relayUrl: string) => {
+  const d = decodeCode(code)
+  return d.addrs.length === 1 && d.addrs[0]!.startsWith(`${relayUrl}/v1/box/`)
+}
+
+test('a bridge opened for outside sessions stays that way: a second and a tenth outside code, a failed call, the button and a restart never open it to the network or make an ordinary code', async () => {
+  const relay = recordingRelay()
+  const env = { COWORKER_RELAY: relay.url, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'desk-session', COWORKER_HOME: tempDir('home') }
+  const deskSession = await rawSession('claude-code', env)
+
+  const first = await deskSession.call('open_bridge', { outside: true })
+  const stays = async (s: typeof deskSession) => {
+    const me = (await s.call('list_connections')).me
+    expect(me.addrs.length === 1 && me.addrs[0].startsWith(`${relay.url}/v1/box/`)).toBe(true)
+    expect(await answersOnLan(me.port)).toBe(false)
+  }
+  await stays(deskSession)
+
+  // 둘째부터 열째 코드까지.
+  for (let i = 2; i <= 10; i++) {
+    const more = await deskSession.call('open_bridge', { outside: true })
+    expect(onlyRelay(more.code, relay.url)).toBe(true)
+    expect(more.kind).toStartWith('outside')
+  }
+  await stays(deskSession)
+
+  // 동료용 코드를 달라고 하면 거절한다. 그 뒤에도 그대로다.
+  for (const args of [{}, { private: true }, { name: 'for colleagues' }]) {
+    const asked = await deskSession.callRaw('open_bridge', args)
+    expect(asked.isError).toBe(true)
+    expect(asked.text).toMatch(/outside sessions only/)
+    expect(asked.text).not.toContain('cw1.')
+  }
+  await stays(deskSession)
+
+  // 화면의 버튼도 외부용 코드만 만든다.
+  await Bun.sleep(1100)
+  const pressed = (await (await pressButton(first.viewer)).json()) as { code: string; kind?: string }
+  expect(onlyRelay(pressed.code, relay.url)).toBe(true)
+  expect(pressed.kind).toBe('outside')
+
+  // 다시 켠 뒤에도 그대로다.
+  await deskSession.client.close()
+  const back = await rawSession('claude-code', env)
+  for (let i = 0; i < 40 && !(await back.call('list_connections')).me.open; i++) await Bun.sleep(50)
+  await stays(back)
+  expect((await back.callRaw('open_bridge', {})).isError).toBe(true)
+  const after = await back.call('open_bridge', { outside: true })
+  expect(onlyRelay(after.code, relay.url)).toBe(true)
+  await stays(back)
+
+  // 중계 서버가 사라져 외부용 코드를 만들지 못해도 브릿지는 바뀌지 않는다.
+  relay.stop()
+  for (let i = 0; i < 2; i++) {
+    const failed = await back.callRaw('open_bridge', { outside: true })
+    expect(failed.isError).toBe(true)
+    expect(failed.text).not.toContain('cw1.')
+  }
+  const me = (await back.call('list_connections')).me
+  expect(me.open).toBe(true)
+  expect(JSON.stringify(me.addrs).includes('127.0.0.1')).toBe(false)
+  expect(await answersOnLan(me.port)).toBe(false)
+  expect((await back.callRaw('open_bridge', {})).isError).toBe(true)
+  await Bun.sleep(1100)
+  const dead = await pressButton(after.viewer)
+  const body = await dead.text()
+  expect(body).not.toContain('cw1.')
+  expect(await answersOnLan(me.port)).toBe(false)
+}, 60_000)
+
+test('everything a session says about itself is checked before it reaches an outside session: model and effort too, from the AI and from the conversation view', async () => {
+  const { url: relayUrl } = recordingRelay()
+  const host = await rawSession('claude-code', { COWORKER_RELAY: relayUrl })
+  const mark = shortHostname()
+
+  // 여는 순간에 적은 모델에 컴퓨터 이름이 있으면 열지 않는다.
+  const refused = await host.callRaw('open_bridge', { outside: true, model: `Fable 5.2 on ${mark}` })
+  expect(refused.isError).toBe(true)
+  expect(refused.text).not.toContain('cw1.')
+  const refusedEffort = await host.callRaw('open_bridge', { outside: true, effort: join(homedir(), 'max') })
+  expect(refusedEffort.isError).toBe(true)
+
+  const opened = await host.call('open_bridge', { outside: true, model: 'Fable 5.2', effort: 'high' })
+  const guest = await rawSession('codex-mcp-client', { COWORKER_RELAY: relayUrl })
+  await guest.call('connect', { code: opened.code })
+  await waitEvent(host.call, e => e.type === 'connected')
+
+  // 화면(채팅창 위 띠)에서 적어도, 다음 코드를 만들며 적어도 나가지 않는다.
+  const fromView = await fetch(`${opened.viewer}/about`, {
+    method: 'POST',
+    headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: `Fable 5.2 @ ${mark}.local`, effort: `high (${userInfo().username})` }),
+  })
+  expect(fromView.ok).toBe(false)
+  expect((await host.callRaw('open_bridge', { outside: true, model: `host ${mark}` })).isError).toBe(true)
+  // 괜찮은 값은 그대로 간다.
+  await fetch(`${opened.viewer}/about`, {
+    method: 'POST',
+    headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' },
+    body: JSON.stringify({ effort: 'max' }),
+  })
+  for (let i = 0; i < 40 && (await guest.call('list_connections')).peers[0]?.about?.effort !== 'max'; i++) await Bun.sleep(50)
+  expect((await guest.call('list_connections')).peers[0].about).toEqual({ app: 'Claude Code', model: 'Fable 5.2', effort: 'max' })
+
+  // 외부용 코드로 들어가는 쪽이 적는 것도 같다.
+  const joiner = await rawSession('codex-mcp-client', { COWORKER_RELAY: relayUrl })
+  const another = await host.call('open_bridge', { outside: true })
+  expect((await joiner.callRaw('connect', { code: another.code, model: `GPT on ${mark}` })).isError).toBe(true)
+}, 30_000)
+
+test('a file goes to an outside session only when it is UTF-8 text that passes the check, whatever encoding hides the content', async () => {
+  const { url: relayUrl } = recordingRelay()
+  const host = await rawSession('claude-code', { COWORKER_RELAY: relayUrl })
+  const guest = await rawSession('codex-mcp-client', { COWORKER_RELAY: relayUrl })
+  const opened = await host.call('open_bridge', { outside: true })
+  await guest.call('connect', { code: opened.code })
+  await waitEvent(host.call, e => e.type === 'connected')
+
+  const leak = `path=${homedir()}\nhost=${shortHostname()}\n`
+  const files: [string, Buffer][] = [
+    ['utf16le.txt', Buffer.from(`﻿${leak}`, 'utf16le')],
+    ['utf16be.txt', Buffer.from(Buffer.from(leak, 'utf16le')).swap16()],
+    ['latin1.txt', Buffer.concat([Buffer.from(leak), Buffer.from([0xe9, 0x0a])])],
+    ['picture.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13])],
+    ['plain.txt', Buffer.from(leak)],
+  ]
+  for (const [name, bytes] of files) {
+    const path = join(host.home, name)
+    writeFileSync(path, bytes)
+    const attempt = await host.callRaw('send_question', { question: 'Attached.', files: [path] })
+    expect({ name, isError: attempt.isError === true }).toEqual({ name, isError: true })
+  }
+  // 인코딩 때문에 거절한 것은 까닭을 말한다.
+  const why = await host.callRaw('send_question', { question: 'Attached.', files: [join(host.home, 'utf16le.txt')] })
+  expect(why.text).toMatch(/UTF-8/)
+  expect((await guest.call('wait_for_message', { timeout_sec: 0 })).events).toEqual([])
+
+  // UTF-8 글로 된 괜찮은 파일은 간다.
+  const fine = join(host.home, 'fine.txt')
+  writeFileSync(fine, 'line one\n한글 줄\n')
+  const sent = await host.call('send_question', { question: 'A sample.', files: [fine] })
+  const arrived = await waitEvent(guest.call, e => e.type === 'message' && e.thread === sent.thread)
+  expect(arrived.files[0]).toMatchObject({ name: 'fine.txt', verified: true })
+}, 30_000)
