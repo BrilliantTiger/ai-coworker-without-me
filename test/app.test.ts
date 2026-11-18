@@ -1,12 +1,12 @@
 import { afterAll, expect, test } from 'bun:test'
-import { failsOnWindows } from './known'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { connect as tcp } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { launchAgentPlist, windowsShortcutScript } from '../src/autostart'
 
 // coworker 앱: 이 PC의 여러 세션이 127.0.0.1 의 HTTP 로 한 앱에 붙는다. 디렉터리판 플러그인이 이렇게 붙는다.
@@ -47,7 +47,7 @@ async function startApp(env: Record<string, string> = {}) {
 
 async function session(port: number, name: string, folder?: string) {
   const client = new Client({ name, version: '1.0.0' }, folder ? { capabilities: { roots: {} } } : undefined)
-  if (folder) client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: [{ uri: `file://${folder}`, name: 'project' }] }))
+  if (folder) client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: [{ uri: pathToFileURL(resolve(folder)).href, name: 'project' }] }))
   const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
   await client.connect(transport)
   clients.push(client)
@@ -70,8 +70,7 @@ const rawStatus = (port: number, host: string) =>
     sock.on('error', fail)
   })
 
-// Windows: 세션 이름에 폴더 이름이 빠진다. 드라이브 글자가 없는 폴더 주소(file:///work/api-server)에서 이름을 얻지 못한다.
-failsOnWindows('two sessions on one app ask and answer each other, each with its own bridge', async () => {
+test('two sessions on one app ask and answer each other, each with its own bridge', async () => {
   const { port } = await startApp()
   const a = await session(port, 'claude-code', '/work/api-server')
   const b = await session(port, 'codex-mcp-client', '/work/web-app')
