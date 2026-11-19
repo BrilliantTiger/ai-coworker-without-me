@@ -16411,7 +16411,7 @@ class StdioServerTransport {
 
 // src/mcp.ts
 import { homedir as homedir3 } from "os";
-import { basename as basename3, join as join7, resolve as resolve5 } from "path";
+import { basename as basename4, join as join7, resolve as resolve6 } from "path";
 
 // src/autostart.ts
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
@@ -16572,9 +16572,10 @@ function detectChannel(env = process.env) {
   return !!launcher && channelRequested(launcher, !!env.CLAUDE_PLUGIN_ROOT);
 }
 
-// src/resume.ts
-import { readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync as rmSync3, statSync as statSync3 } from "fs";
-import { join as join3, resolve as resolve3 } from "path";
+// src/keep.ts
+import { spawn as spawn2 } from "child_process";
+import { existsSync as existsSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
+import { basename as basename2, resolve as resolve4 } from "path";
 
 // src/bridge.ts
 import { createHash as createHash4, randomUUID } from "crypto";
@@ -17121,6 +17122,10 @@ class Bridge {
   saveTimer;
   forget = false;
   opts;
+  awaySince;
+  watcher;
+  handedOver = false;
+  stoppedByHuman = false;
   constructor(options) {
     this.keys = options.keys ?? newKeyPair();
     this.replay = new ReplayGuard(undefined, options.clock);
@@ -17183,25 +17188,29 @@ class Bridge {
     for (const q of saved.asking ?? [])
       if (q && isThreadId(q.thread))
         b.asking.set(q.thread, q);
+    if (options.keeper)
+      b.awaySince = now();
     try {
       b.open(saved.port);
-    } catch {
+    } catch (e) {
+      if (options.keeper)
+        throw e;
       b.open();
     }
-    b.log.write("restored", { name: b.name, peers: b.peers.size, queued: b.outbox.length });
+    b.log.write("restored", { name: b.name, peers: b.peers.size, queued: b.outbox.length, by: options.keeper ? "keeper" : undefined });
     for (const peer of b.peers.values()) {
-      b.sayHello(peer, { back: true }).catch(() => {});
+      b.sayHello(peer, options.keeper ? {} : { back: true }).catch(() => {});
       b.pollLoop(peer.key);
     }
     return b;
   }
-  static async askToMove(saved) {
+  static async askToMove(saved, keeperOnly = false, stop = false) {
     const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) };
     try {
       const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(seal({ type: "handover" }, keys.publicKey, keys)),
+        body: JSON.stringify(seal({ type: "handover", ...keeperOnly ? { keeper: true } : {}, ...stop ? { stop: true } : {} }, keys.publicKey, keys)),
         signal: AbortSignal.timeout(5000)
       });
       if (!res.ok)
@@ -17211,8 +17220,34 @@ class Bridge {
       return false;
     }
   }
+  static async watchHolder(saved, renewMs) {
+    const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) };
+    try {
+      const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(seal({ type: "watch" }, keys.publicKey, keys)),
+        signal: AbortSignal.timeout(renewMs)
+      });
+      if (!res.ok)
+        return res.status === 404 ? "gone" : "unsupported";
+      const answer = open2(await res.json(), keys);
+      return answer?.type === "watch_end" ? answer.why : "unsupported";
+    } catch (e) {
+      return e?.name === "TimeoutError" ? "again" : "gone";
+    }
+  }
   persist() {
     this.save();
+  }
+  note(event, fields = {}) {
+    this.log.write(event, fields);
+  }
+  get worthKeeping() {
+    return this.peers.size > 0 || [...this.tokens.values()].some((t) => t.expires > Date.now());
+  }
+  get watched() {
+    return !!this.watcher;
   }
   snapshot() {
     return {
@@ -17234,6 +17269,9 @@ class Bridge {
       events: this.events,
       viewer: this.viewerAddress,
       asking: [...this.asking.values()],
+      keep: this.opts.guard || this.opts.keeper ? true : undefined,
+      keptBy: this.opts.keeper ? process.pid : undefined,
+      keptSince: this.awaySince,
       pid: process.pid,
       savedAt: now()
     };
@@ -17279,6 +17317,7 @@ class Bridge {
     this.writeState();
     this.changed();
     this.save();
+    this.opts.guard?.();
   }
   newCode(options = {}) {
     if (!this.server)
@@ -17349,6 +17388,7 @@ class Bridge {
         about: peer.about,
         state: down ? "reconnecting" : "connected",
         since: isoOf(down?.since),
+        ...peer.away ? { away: peer.away } : {},
         via: peer.lastAddr ? isRelayAddr(peer.lastAddr) ? "relay" : "direct" : pulling ? "pickup" : "direct"
       };
     });
@@ -17396,7 +17436,7 @@ class Bridge {
     thread.messages.push({ id: msg.id, from: "me", kind: msg.kind, text: msg.text, context: msg.context, ...notice, ...files.length ? { files } : {}, at: msg.at });
     this.changed();
     try {
-      return { thread: thread.id, to: peer.name, delivery: await this.sendMessage(peer, msg, thread.id), ...sentFiles(files) };
+      return { thread: thread.id, to: peer.name, delivery: await this.sendMessage(peer, msg, thread.id), ...this.awayNote(peer), ...sentFiles(files) };
     } catch (e) {
       this.outbox = this.outbox.filter((o) => o.thread !== thread.id);
       this.unspool({ type: "msg", msg });
@@ -17425,7 +17465,7 @@ class Bridge {
       thread.status = "waiting_for_peer";
     this.changed();
     const delivery = await this.sendMessage(peer, msg, thread.id);
-    return { thread: thread.id, to: peer.name, delivery, status: thread.status, ...sentFiles(files) };
+    return { thread: thread.id, to: peer.name, delivery, ...this.awayNote(peer), status: thread.status, ...sentFiles(files) };
   }
   async hold(threadId, note) {
     const thread = this.threads.get(threadId);
@@ -17443,7 +17483,7 @@ class Bridge {
       thread.status = "checking_with_your_human";
     this.changed();
     const delivery = await this.sendOrQueue(peer, { type: "msg", msg }, thread.id);
-    return { thread: thread.id, to: peer.name, delivery, status: thread.status };
+    return { thread: thread.id, to: peer.name, delivery, ...this.awayNote(peer), status: thread.status };
   }
   async agree(threadId, input) {
     const thread = this.threads.get(threadId);
@@ -17481,7 +17521,7 @@ ${f.evidence}`).join(`
     const file = this.saveAgreement(thread);
     const peer = this.peers.get(thread.peer);
     const delivery = peer ? await this.sendOrQueue(peer, { type: "msg", msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`;
-    return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file };
+    return { thread: thread.id, to: thread.peerName, delivery, ...this.awayNote(peer), status: thread.status, file };
   }
   unread() {
     return this.events;
@@ -17543,6 +17583,8 @@ ${f.evidence}`).join(`
         state: reachable ? "connected" : "reconnecting",
         via: direct ? placeOf(peer.lastAddr, peer.port) : pulling ? "the other side cannot be reached directly, so it comes here to pick up messages" : undefined,
         queued: this.outbox.filter((o) => o.peer === peer.key).length,
+        their_ai_session: peer.away ? "closed" : undefined,
+        their_ai_session_closed_since: peer.away,
         last_seen: isoOf(peer.lastSeen),
         last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
         next_try: reachable ? undefined : isoOf(peer.retryAt) ?? "now",
@@ -17593,11 +17635,21 @@ ${f.evidence}`).join(`
           await this.handOver(p, { type: "bye" }, 2000);
       }
     }));
+    if (this.watcher) {
+      this.watcher("closed");
+      this.watcher = undefined;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
     this.shutdown();
   }
-  shutdown() {
+  shutdown(reason) {
+    if (reason)
+      this.stopReason = reason;
     if (this.server)
       this.log.write("closed", { by: this.forget ? "this side's human (close_bridge)" : this.stopReason ?? "the process stopped; it comes back on restart" });
+    this.watcher?.(this.forget ? "closed" : this.handedOver ? "moved" : "stopped");
+    this.watcher = undefined;
+    this.handedOver = false;
     this.stopReason = undefined;
     clearInterval(this.ticker);
     clearTimeout(this.saveTimer);
@@ -17659,10 +17711,10 @@ ${f.evidence}`).join(`
       return new Response("not found", { status: 404 });
     const sealed = await req.json().catch(() => null);
     const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, "");
-    const { status, body } = await this.respond(sealed, seenAt);
+    const { status, body } = await this.respond(sealed, seenAt, false, () => server.timeout(req, 0));
     return new Response(body, { status, headers: { "content-type": status === 200 ? "application/json" : "text/plain" } });
   }
-  async respond(sealed, seenAt, relayed = false) {
+  async respond(sealed, seenAt, relayed = false, hold) {
     const payload = open2(sealed, this.keys);
     if (!payload)
       return { status: 403, body: "forbidden" };
@@ -17675,14 +17727,27 @@ ${f.evidence}`).join(`
     const answer = (p) => ({ status: 200, body: JSON.stringify(seal(p, fromB64(from), this.keys)) });
     const forbidden = { status: 403, body: "forbidden" };
     if (from === this.key && payload.type === "handover" && this.server) {
-      this.emit({ type: "moved", at: now() });
-      this.stopReason = "another session on this PC took over this bridge";
+      if (payload.keeper && !this.opts.keeper)
+        return answer({ type: "ok" });
+      if (!this.opts.keeper)
+        this.emit({ type: "moved", at: now() });
+      this.stoppedByHuman = !!payload.stop && !!this.opts.keeper;
+      this.stopReason = this.stoppedByHuman ? "a human told the keeper to stop (keep stop); the bridge is down until its session starts again" : this.opts.keeper ? "a session on this PC took this bridge over from the keeper" : "another session on this PC took over this bridge";
+      this.handedOver = true;
       this.save();
+      this.watcher?.("moved");
+      this.watcher = undefined;
       setTimeout(() => {
         this.shutdown();
         this.onMoved?.();
       }, 50);
       return answer({ type: "handover_ok" });
+    }
+    if (from === this.key && payload.type === "watch" && this.server) {
+      hold?.();
+      this.watcher?.("replaced");
+      const why = await new Promise((resolve) => this.watcher = resolve);
+      return answer({ type: "watch_end", why });
     }
     const peer = this.peers.get(from);
     if (!peer) {
@@ -17706,7 +17771,8 @@ ${f.evidence}`).join(`
       const rejoin = this.rejoinFor(added);
       const again = !!token && "again" in token;
       this.addPeer(added, { emit: true, via: invited ? invite.by : undefined, again, how: invited ? "introduced" : again ? "came back with its token" : "code" });
-      return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about, can: CAN });
+      this.noteAway(added, payload.away);
+      return answer({ type: "hello_ack", name: this.name, members: members.map(memberOf), private: token?.private || undefined, rejoin, about: this.about, can: CAN, away: this.awaySince });
     }
     peer.lastSeen = Date.now();
     this.wakeRetry(peer.key);
@@ -17799,21 +17865,40 @@ ${f.evidence}`).join(`
     }
     if (isToken(hello.rejoin))
       peer.token = hello.rejoin;
+    this.noteAway(peer, hello.away);
     if (hello.back)
       this.emit({ type: "connected", peer: peer.name, again: true, at: now() });
     else
       this.changed();
     this.flush();
     this.learn(peer, hello.about, hello.can);
-    return { type: "hello_ack", name: this.name, rejoin: this.rejoinFor(peer), about: this.about, can: CAN };
+    return { type: "hello_ack", name: this.name, rejoin: this.rejoinFor(peer), about: this.about, can: CAN, away: this.awaySince };
+  }
+  noteAway(peer, away) {
+    const since = typeof away === "string" && away.length <= 40 && !Number.isNaN(Date.parse(away)) ? away : undefined;
+    if (since === peer.away)
+      return;
+    const was = peer.away;
+    peer.away = since;
+    if (since && !was) {
+      this.log.write("peer_session_closed", { id: peerId(peer.key), peer: peer.name, since, what: "their AI session is closed; their PC keeps what arrives until it starts again" });
+      this.emit({ type: "peer_session_closed", peer: peer.name, since, at: now() });
+      return;
+    }
+    if (!since)
+      this.log.write("peer_session_open", { id: peerId(peer.key), peer: peer.name });
+    this.changed();
+  }
+  awayNote(peer) {
+    return peer?.away ? { their_ai_session: `closed since ${peer.away}. Their PC received this and keeps it; their AI reads it when that session starts again. Tell your human: they may want to reach the other human another way.` } : {};
   }
   process(peer, payload) {
     switch (payload.type) {
       case "ping":
-        return { type: "pong", waiting: this.waitingFor(peer), can: CAN };
+        return { type: "pong", waiting: this.waitingFor(peer), can: CAN, away: this.awaySince };
       case "msg":
         this.receive(peer, payload.msg);
-        return { type: "ok" };
+        return { type: "ok", away: this.awaySince };
       case "bye":
         this.dropPeer(peer);
         return { type: "ok" };
@@ -17823,7 +17908,8 @@ ${f.evidence}`).join(`
         peer.addrs = payload.addrs;
         peer.port = payload.port;
         this.learn(peer, payload.about, payload.can);
-        return { type: "hello_ack", name: this.name, about: this.about, can: CAN };
+        this.noteAway(peer, payload.away);
+        return { type: "hello_ack", name: this.name, about: this.about, can: CAN, away: this.awaySince };
       case "introduce":
         if (!peer.private)
           this.invite(payload.member, peer.name);
@@ -18396,7 +18482,7 @@ ${f.evidence}`).join(`
     }
   }
   async sayHello(peer, extra = {}) {
-    const reply = await this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, can: CAN, ...extra });
+    const reply = await this.deliver(peer, { type: "hello", name: this.name, addrs: this.addrs(), port: this.port, rejoin: this.rejoinFor(peer), about: this.about, can: CAN, away: this.awaySince, ...extra });
     if (reply.type === "hello_ack")
       this.learn(peer, reply.about, reply.can);
     if (reply.type === "hello_ack" && isToken(reply.rejoin)) {
@@ -18794,6 +18880,8 @@ ${f.evidence}`).join(`
       if (!reply || reply === "refused")
         continue;
       peer.lastAddr = addr;
+      if (reply.type === "ok" || reply.type === "pong" || reply.type === "hello_ack")
+        this.noteAway(peer, reply.away);
       return reply;
     }
     if (refused)
@@ -18988,7 +19076,49 @@ ${log.join(`
   }
 }
 
+// src/notify.ts
+import { spawn } from "child_process";
+import { appendFileSync as appendFileSync3 } from "fs";
+function osNotify(title, body) {
+  const log = process.env.COWORKER_NOTIFY_LOG;
+  if (log) {
+    try {
+      appendFileSync3(log, `${JSON.stringify({ title, body })}
+`);
+    } catch {}
+    return;
+  }
+  if (process.env.COWORKER_NOTIFY === "off")
+    return;
+  const short = (s, n) => s.length > n ? `${s.slice(0, n - 1)}\u2026` : s;
+  title = short(title, 80);
+  body = short(body, 240);
+  try {
+    if (process.platform === "darwin")
+      run2("osascript", ["-e", "on run argv", "-e", 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"', "-e", "end run", title, body]);
+    else if (process.platform === "win32")
+      run2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST], { CW_TITLE: title, CW_BODY: body });
+    else
+      run2("notify-send", ["-u", "critical", title, body]);
+  } catch {}
+}
+var WINDOWS_TOAST = [
+  "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]",
+  "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)",
+  "$t=$x.GetElementsByTagName('text')",
+  "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:CW_TITLE))",
+  "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:CW_BODY))",
+  "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))"
+].join(";");
+function run2(command, args, env) {
+  const child = spawn(command, args, { stdio: "ignore", detached: true, windowsHide: true, env: env ? { ...process.env, ...env } : process.env });
+  child.on("error", () => {});
+  child.unref();
+}
+
 // src/resume.ts
+import { readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync as rmSync3, statSync as statSync3 } from "fs";
+import { join as join3, resolve as resolve3 } from "path";
 function savedPath(home, id) {
   const dir = join3(resolve3(home), "sessions");
   const stem = String(id ?? "").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(0, 120) || "session";
@@ -19019,13 +19149,18 @@ async function findSession(home, id) {
   if (!id)
     return {};
   const path = savedPath(home, id);
-  const saved = readSaved(path);
+  let saved = readSaved(path);
   if (!saved)
     return { sessionId: id };
   for (let i = 0;i < 10; i++) {
     if (!await stillRunning(saved))
       return { sessionId: id, restore: readSaved(path) ?? saved };
+    if (saved.keptBy && await Bridge.askToMove(saved, true)) {
+      await waitUntilStopped(saved);
+      return { sessionId: id, restore: readSaved(path) ?? saved };
+    }
     await Bun.sleep(200);
+    saved = readSaved(path) ?? saved;
   }
   return {};
 }
@@ -19081,6 +19216,352 @@ function pruneSaved(home) {
         rmSync3(path, { force: true });
     } catch {}
   }
+}
+
+// src/winjob.ts
+var DETACHED_PROCESS = 8;
+var CREATE_NEW_PROCESS_GROUP = 512;
+var CREATE_UNICODE_ENVIRONMENT = 1024;
+var CREATE_BREAKAWAY_FROM_JOB = 16777216;
+var STARTF_USESTDHANDLES = 256;
+var INVALID_HANDLE = 0xffffffffffffffffn;
+function quoteWindowsArg(arg) {
+  if (arg !== "" && !/[\s"]/.test(arg))
+    return arg;
+  let out = '"';
+  let slashes = 0;
+  for (const ch of arg) {
+    if (ch === "\\") {
+      slashes++;
+      continue;
+    }
+    out += ch === '"' ? `${"\\".repeat(slashes * 2 + 1)}"` : `${"\\".repeat(slashes)}${ch}`;
+    slashes = 0;
+  }
+  return `${out}${"\\".repeat(slashes * 2)}"`;
+}
+function windowsEnvBlock(env) {
+  const rows = Object.entries(env).filter(([name]) => name !== "" && !name.includes("=") && !name.includes("\x00")).sort(([a], [b]) => a.toUpperCase() < b.toUpperCase() ? -1 : a.toUpperCase() > b.toUpperCase() ? 1 : 0).map(([name, value]) => `${name}=${value.replaceAll("\x00", "")}\x00`);
+  return Buffer.from(`${rows.join("") || "\x00"}\x00`, "utf16le");
+}
+async function spawnOutsideJob(command, cwd, env) {
+  if (process.platform !== "win32" || !command[0])
+    return false;
+  try {
+    const { dlopen, FFIType, ptr } = await import("bun:ffi");
+    const lib = dlopen("kernel32.dll", {
+      CreateProcessW: {
+        args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+        returns: FFIType.i32
+      },
+      GetStdHandle: { args: [FFIType.u32], returns: FFIType.u64 },
+      CloseHandle: { args: [FFIType.u64], returns: FFIType.i32 }
+    });
+    try {
+      const wide = (text) => Buffer.from(`${text}\x00`, "utf16le");
+      const commandLine = wide(command.map(quoteWindowsArg).join(" "));
+      const block = windowsEnvBlock(env);
+      const folder = cwd ? wide(cwd) : undefined;
+      const startup = Buffer.alloc(104);
+      startup.writeUInt32LE(104, 0);
+      const std = [4294967286, 4294967285, 4294967284].map((which) => BigInt(lib.symbols.GetStdHandle(which)));
+      const inherit = std.every((h) => h !== 0n && h !== INVALID_HANDLE);
+      if (inherit) {
+        startup.writeUInt32LE(STARTF_USESTDHANDLES, 60);
+        std.forEach((h, i) => startup.writeBigUInt64LE(h, 80 + i * 8));
+      }
+      const made = Buffer.alloc(24);
+      const flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT | CREATE_BREAKAWAY_FROM_JOB;
+      const ok = lib.symbols.CreateProcessW(null, ptr(commandLine), null, null, inherit ? 1 : 0, flags, ptr(block), folder ? ptr(folder) : null, ptr(startup), ptr(made));
+      if (!ok)
+        return false;
+      lib.symbols.CloseHandle(made.readBigUInt64LE(0));
+      lib.symbols.CloseHandle(made.readBigUInt64LE(8));
+      return true;
+    } finally {
+      lib.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
+// src/keep.ts
+var GRACE_MS = Number(process.env.COWORKER_KEEP_GRACE_MS) || 3000;
+var MAX_KEPT = Number(process.env.COWORKER_KEEP_MAX) || 10;
+var NOTIFY_GAP_MS = 5 * 60000;
+var CAP_CHECK_MS = Number(process.env.COWORKER_KEEP_CHECK_MS) || 5 * 60000;
+var WATCH_MS = Number(process.env.COWORKER_KEEP_WATCH_MS) || 4 * 60000;
+var KOREAN = /[\uAC00-\uD7A3]/;
+function keepsBridges(env = process.env, script = process.argv[1] ?? "") {
+  const set = env.COWORKER_KEEP ?? "";
+  if (/^(off|false|0|no)$/i.test(set))
+    return false;
+  if (/^(on|true|1|yes)$/i.test(set))
+    return true;
+  return basename2(script) === "coworker.js";
+}
+var ENV_KEEP = new Set("PATH HOME USER LOGNAME SHELL LANG TMPDIR TEMP TMP TZ USERPROFILE APPDATA LOCALAPPDATA PROGRAMDATA SYSTEMROOT SYSTEMDRIVE WINDIR COMSPEC PATHEXT HOMEDRIVE HOMEPATH USERNAME USERDOMAIN BUN_INSTALL HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS".split(" "));
+function keeperEnv(env, home) {
+  const out = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined)
+      continue;
+    const upper = name.toUpperCase();
+    if (ENV_KEEP.has(upper) || /^(COWORKER_|LC_|XDG_)/.test(upper))
+      out[name] = value;
+  }
+  out.COWORKER_HOME = home;
+  return out;
+}
+var keeperCommand = (args) => [process.execPath, "--no-install", resolve4(process.argv[1] ?? ""), ...args];
+var keeperFolder = (home) => existsSync4(home) ? home : undefined;
+function launch(args, home) {
+  try {
+    const [program, ...rest] = keeperCommand(args);
+    const child = spawn2(program, rest, {
+      stdio: "ignore",
+      detached: true,
+      windowsHide: true,
+      cwd: keeperFolder(home),
+      env: keeperEnv(process.env, home)
+    });
+    child.on("error", () => {});
+    child.unref();
+  } catch {}
+}
+function startKeeper(home, id) {
+  launch(["keep", "--detach", id], home);
+}
+var APART_WAIT_MS = 5000;
+var logOf = (home, saved) => {
+  const dir = pathInside(home, "logs");
+  return new LinkLog(dir ? pathInside(dir, `${routeId(saved.publicKey)}.log`) : undefined);
+};
+var held = async (saved) => !!saved.keptBy && await stillRunning(saved);
+var hasSomethingToKeep = (saved) => saved.peers.length > 0 || saved.tokens.some((t) => (t.expires ?? Infinity) > Date.now());
+async function keep(home, args) {
+  const [first, second, third] = args;
+  if (first === "--detach" && second) {
+    if (process.platform === "win32") {
+      const outside = await spawnOutsideJob(keeperCommand(["keep", second]), keeperFolder(home), keeperEnv(process.env, home));
+      if (!outside)
+        launch(["keep", second], home);
+      return 0;
+    }
+    launch(["keep", "--apart", second, String(process.pid)], home);
+    const hold = Number(process.env.COWORKER_KEEP_START_HOLD_MS) || 0;
+    if (hold > 0)
+      await Bun.sleep(hold);
+    return 0;
+  }
+  if (first === "--apart" && second) {
+    const starter = Number(third);
+    const end = Date.now() + APART_WAIT_MS;
+    while (starter > 0 && process.ppid === starter && Date.now() < end)
+      await Bun.sleep(5);
+    launch(["keep", second], home);
+    return 0;
+  }
+  if (first === "list")
+    return list(home);
+  if (first === "stop")
+    return stopAll(home);
+  if (!first || first.startsWith("-")) {
+    console.error("usage: bun coworker.js keep list | stop");
+    return 1;
+  }
+  return guard(home, first);
+}
+async function guard(home, id) {
+  const path = savedPath(home, id);
+  let saved = readSaved(path);
+  for (let i = 0;i < 20 && !saved && existsSync4(path); i++) {
+    await Bun.sleep(100);
+    saved = readSaved(path);
+  }
+  if (!saved)
+    return 0;
+  const log = logOf(home, saved);
+  const me = process.pid;
+  log.write("keeper_waiting", { keeper: me, watching: saved.pid, port: saved.port, what: "a keeper watches the process that holds this bridge; it opens no port while it waits" });
+  const leave = (why) => {
+    log.write("keeper_stopped", { keeper: me, why });
+    return 0;
+  };
+  for (;; ) {
+    const watching = saved.pid;
+    const end = await Bridge.watchHolder(saved, WATCH_MS);
+    if (end === "again")
+      continue;
+    if (end === "replaced")
+      return leave("a newer keeper watches this bridge");
+    if (end === "closed")
+      return leave("the bridge was closed by its human");
+    await Bun.sleep(GRACE_MS);
+    const now = readSaved(path);
+    if (!now)
+      return leave("the bridge was closed, or moved to another session");
+    if (!await stillRunning(now)) {
+      saved = now;
+      break;
+    }
+    if (now.pid !== watching || now.keptBy)
+      return leave("another process holds this bridge now");
+    saved = now;
+  }
+  if (!hasSomethingToKeep(saved))
+    return leave("no connection and no unused code is left to keep");
+  let bridge;
+  for (let i = 0;i < 20 && !bridge; i++) {
+    try {
+      bridge = Bridge.restore(saved, {
+        home,
+        ports: parsePorts(process.env.COWORKER_PORTS),
+        relay: process.env.COWORKER_RELAY || undefined,
+        relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+        saveTo: path,
+        nudgeMs: Number(process.env.COWORKER_NUDGE_MS) || undefined,
+        tickMs: Number(process.env.COWORKER_TICK_MS) || undefined,
+        keeper: true
+      });
+    } catch {
+      if (await stillRunning(saved))
+        return leave("another process holds this bridge now");
+      await Bun.sleep(250);
+      const now = readSaved(path);
+      if (!now)
+        return leave("the bridge was closed, or moved to another session");
+      saved = now;
+    }
+  }
+  if (!bridge)
+    return leave(`port ${saved.port} is in use by another program; the keeper opens no other port`);
+  const kept = bridge;
+  kept.persist();
+  kept.note("keeper_took_over", {
+    keeper: me,
+    port: kept.port,
+    connections: kept.peers.size,
+    why: "the process that held this bridge stopped",
+    what: "the keeper receives on the same port with the same key and keeps what arrives; the AI session reads it when it starts again"
+  });
+  let done = false;
+  const finish = (why) => {
+    if (done)
+      return;
+    done = true;
+    kept.shutdown(why);
+    log.write("keeper_stopped", { keeper: me, why });
+    process.exit(0);
+  };
+  kept.onMoved = () => {
+    if (done)
+      return;
+    done = true;
+    if (kept.stoppedByHuman)
+      log.write("keeper_stopped", { keeper: me, why: 'a human ran "keep stop"; the bridge is down until its session starts again' });
+    else
+      log.write("keeper_handed_over", { keeper: me, port: saved.port, to: "a session on this PC", what: "that session holds the bridge now; the keeper has ended" });
+    process.exit(0);
+  };
+  let seen = kept.unread().length;
+  let notifiedAt = 0;
+  kept.onEvent = () => {
+    const events = kept.unread();
+    const fresh = events.slice(seen);
+    seen = events.length;
+    const arrived = fresh.findLast((e) => e.type === "message");
+    if (!arrived || arrived.type !== "message" || Date.now() - notifiedAt < NOTIFY_GAP_MS)
+      return;
+    notifiedAt = Date.now();
+    if (KOREAN.test(arrived.text))
+      osNotify(`coworker \xB7 ${arrived.from}`, `${kept.name}: \uC0C8 \uAE00\uC774 \uC654\uC2B5\uB2C8\uB2E4. \uC774 AI \uC138\uC158\uC740 \uB2EB\uD600 \uC788\uC5B4\uC11C \uBC1B\uC544 \uB450\uC5C8\uC2B5\uB2C8\uB2E4. \uC138\uC158\uC744 \uB2E4\uC2DC \uC5F4\uBA74 AI\uAC00 \uC77D\uACE0 \uB2F5\uD569\uB2C8\uB2E4.`);
+    else
+      osNotify(`coworker \xB7 ${arrived.from}`, `${kept.name}: a new message arrived. This AI session is closed, so it is kept here. Open the session again and its AI reads and answers it.`);
+  };
+  const nothingLeft = () => {
+    if (!done && kept.isOpen && !kept.worthKeeping)
+      finish("no connection and no unused code is left to keep");
+  };
+  kept.watch(nothingLeft);
+  const since = Date.now();
+  const overCap = async () => {
+    let later = 0;
+    for (const e of listSaved(home)) {
+      if (e.id === id || e.saved.keptBy === me || !(Date.parse(e.saved.keptSince ?? "") > since))
+        continue;
+      if (await held(e.saved))
+        later++;
+    }
+    return later >= MAX_KEPT;
+  };
+  setInterval(() => {
+    nothingLeft();
+    overCap().then((over) => {
+      if (over)
+        finish(`more than ${MAX_KEPT} bridges are kept on this PC; this one was kept the longest. Its saved state stays, and its session takes it up when it starts again`);
+    }).catch(() => {});
+  }, CAP_CHECK_MS);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    try {
+      process.on(signal, () => finish("the keeper process was told to stop"));
+    } catch {}
+  }
+  return new Promise(() => {});
+}
+async function reviveKept(home, except) {
+  const revived = [];
+  let kept = 0;
+  for (const e of listSaved(home)) {
+    if (kept >= MAX_KEPT)
+      break;
+    if (e.id === except || !e.saved.keep || !hasSomethingToKeep(e.saved))
+      continue;
+    if (await stillRunning(e.saved)) {
+      if (e.saved.keptBy)
+        kept++;
+      continue;
+    }
+    startKeeper(home, e.id);
+    revived.push(e.id);
+    kept++;
+  }
+  return revived;
+}
+async function list(home) {
+  const rows = [];
+  for (const e of listSaved(home))
+    if (await held(e.saved))
+      rows.push(e);
+  if (!rows.length)
+    console.log("no bridge is held by a keeper on this PC");
+  for (const e of rows)
+    console.log(`${e.saved.name}  port ${e.saved.port}  keeper pid ${e.saved.keptBy}  since ${e.saved.keptSince ?? "?"}  connected: ${e.saved.peers.map((p) => p.name).join(", ") || "nobody"}  session_id ${e.id}`);
+  return 0;
+}
+async function stopAll(home) {
+  let stopped = 0;
+  for (const e of listSaved(home)) {
+    if (!e.saved.keptBy || !await stillRunning(e.saved))
+      continue;
+    if (!await Bridge.askToMove(e.saved, true, true))
+      continue;
+    await waitUntilStopped(e.saved);
+    const path = savedPath(home, e.id);
+    try {
+      const state = JSON.parse(readFileSync4(path, "utf8"));
+      state.keep = false;
+      state.keptBy = undefined;
+      state.keptSince = undefined;
+      writeFileSync3(path, JSON.stringify(state), { mode: 384 });
+    } catch {}
+    console.log(`stopped keeping ${e.saved.name} (port ${e.saved.port})`);
+    stopped++;
+  }
+  if (!stopped)
+    console.log("no bridge is held by a keeper on this PC");
+  return 0;
 }
 
 // node_modules/content-type/index.js
@@ -19897,10 +20378,10 @@ data:
 }
 
 // src/serve.ts
-import { spawn as spawn2 } from "child_process";
+import { spawn as spawn3 } from "child_process";
 import { randomUUID as randomUUID3 } from "crypto";
 import { platform as platform4 } from "os";
-import { basename as basename2, resolve as resolve4 } from "path";
+import { basename as basename3, resolve as resolve5 } from "path";
 import { fileURLToPath } from "url";
 // package.json
 var version2 = "0.13.0";
@@ -27447,7 +27928,7 @@ var EMPTY_COMPLETION_RESULT = {
 import { randomUUID as randomUUID2 } from "crypto";
 
 // src/hint.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3 } from "fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync4, writeFileSync as writeFileSync4 } from "fs";
 import { join as join4 } from "path";
 var HINT = [
   "coworker: \uB3D9\uB8CC\uAC00 \uBCF4\uB0B8 \uC9C8\uBB38\uC774 \uC774 \uC138\uC158\uC5D0 \uBC14\uB85C \uB4E4\uC5B4\uC624\uAC8C \uD558\uB824\uBA74 Claude Code\uB97C \uC774\uB807\uAC8C \uCF1C\uC138\uC694.",
@@ -27457,59 +27938,45 @@ var HINT = [
 `);
 function firstTimeHint(home) {
   const seen = join4(home, "hint-shown");
-  if (existsSync4(seen))
+  if (existsSync5(seen))
     return;
   mkdirSync4(home, { recursive: true });
-  writeFileSync3(seen, `${new Date().toISOString()}
+  writeFileSync4(seen, `${new Date().toISOString()}
 `);
   return HINT;
 }
 
 // src/limits.ts
-function waitSeconds(requested, codex) {
+var LISTEN_MS = 55 * 60000;
+var LISTEN_TIMEOUT_MS = 60 * 60000;
+var LISTEN_FLOOR_MS = 5 * 60000;
+var TIMER_MAX_MS = 2000000000;
+var given = (text) => {
+  const n = Number(text);
+  return text !== undefined && text.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : undefined;
+};
+function listenLimit(env = process.env) {
+  const ms = given(env.COWORKER_LISTEN_MS);
+  if (ms !== undefined)
+    return ms ? Math.min(ms, TIMER_MAX_MS) : Infinity;
+  const minutes = given(env.COWORKER_LISTEN_MINUTES);
+  if (minutes !== undefined)
+    return minutes ? Math.min(minutes * 60000, TIMER_MAX_MS) : Infinity;
+  return env.CLAUDE_CODE_ENTRYPOINT === "cli" ? Infinity : LISTEN_MS;
+}
+function limitAfterCut(waitedMs, current, floorMs = given(process.env.COWORKER_LISTEN_CUT_FLOOR_MS) || LISTEN_FLOOR_MS, minuteMs = given(process.env.COWORKER_LISTEN_CUT_MINUTE_MS) || 60000) {
+  const limit = Math.round(waitedMs / minuteMs) * minuteMs;
+  const early = limit - waitedMs;
+  if (limit < floorMs || early > minuteMs / 12 || early < -minuteMs / 60)
+    return;
+  const shorter = Math.max(floorMs, Math.floor(limit * 0.8));
+  return shorter < Math.min(current, limit) ? shorter : undefined;
+}
+var listenTimeout = (limitMs) => Math.max(LISTEN_TIMEOUT_MS, Math.ceil((limitMs + 5 * 60000) / 60000) * 60000);
+function waitSeconds(requested, codex, limitMs = LISTEN_MS) {
   if (codex)
     return Math.min(requested ?? 50, 55);
-  return requested || Infinity;
-}
-
-// src/notify.ts
-import { spawn } from "child_process";
-import { appendFileSync as appendFileSync3 } from "fs";
-function osNotify(title, body) {
-  const log = process.env.COWORKER_NOTIFY_LOG;
-  if (log) {
-    try {
-      appendFileSync3(log, `${JSON.stringify({ title, body })}
-`);
-    } catch {}
-    return;
-  }
-  if (process.env.COWORKER_NOTIFY === "off")
-    return;
-  const short = (s, n) => s.length > n ? `${s.slice(0, n - 1)}\u2026` : s;
-  title = short(title, 80);
-  body = short(body, 240);
-  try {
-    if (process.platform === "darwin")
-      run2("osascript", ["-e", "on run argv", "-e", 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"', "-e", "end run", title, body]);
-    else if (process.platform === "win32")
-      run2("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST], { CW_TITLE: title, CW_BODY: body });
-    else
-      run2("notify-send", ["-u", "critical", title, body]);
-  } catch {}
-}
-var WINDOWS_TOAST = [
-  "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]",
-  "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)",
-  "$t=$x.GetElementsByTagName('text')",
-  "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:CW_TITLE))",
-  "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:CW_BODY))",
-  "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))"
-].join(";");
-function run2(command, args, env) {
-  const child = spawn(command, args, { stdio: "ignore", detached: true, windowsHide: true, env: env ? { ...process.env, ...env } : process.env });
-  child.on("error", () => {});
-  child.unref();
+  return Math.min(requested || Infinity, Math.min(limitMs, LISTEN_MS) / 1000);
 }
 
 // src/session.ts
@@ -27518,7 +27985,7 @@ import { homedir as homedir2 } from "os";
 import { isAbsolute as isAbsolute2, join as join6 } from "path";
 
 // src/update.ts
-import { closeSync as closeSync2, mkdirSync as mkdirSync5, openSync as openSync2, renameSync as renameSync3, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync4 } from "fs";
+import { closeSync as closeSync2, mkdirSync as mkdirSync5, openSync as openSync2, renameSync as renameSync3, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync5 } from "fs";
 import { join as join5 } from "path";
 var MARKETPLACE = "ai-coworker-without-me";
 var PLUGIN = `coworker@${MARKETPLACE}`;
@@ -27627,7 +28094,7 @@ async function appUpdate(script, current, home, deps = {}) {
     });
     if (!text?.slice(0, 500).includes(BANNER))
       return;
-    writeFileSync4(tmp, text);
+    writeFileSync5(tmp, text);
     if (await (deps.versionOf ?? versionOfFile)(tmp).catch(() => {
       return;
     }) !== latest)
@@ -29217,11 +29684,14 @@ class Viewer {
   avoidPort;
   clear = new Set;
   movedFrom;
+  limit;
+  cut;
   constructor(bridge, options = {}) {
     this.bridge = bridge;
     this.options = options;
     this.token = bridge.viewerAt?.token ?? randomToken();
     this.address = options.at ?? (options.address?.trim() ? viewAddress(options.address, options) : undefined);
+    this.limit = options.listenMs ?? listenLimit();
   }
   async ready() {
     const want = this.wanted();
@@ -29409,6 +29879,14 @@ class Viewer {
   get listening() {
     return this.listener !== undefined;
   }
+  get listenLimit() {
+    return this.limit;
+  }
+  takeCut() {
+    const cut = this.cut;
+    this.cut = undefined;
+    return cut;
+  }
   listenCommand(platform = process.platform) {
     this.start();
     return `${platform === "win32" ? "curl.exe" : "curl"} -s ${this.localUrl}/next`;
@@ -29455,10 +29933,13 @@ class Viewer {
       done(LISTENING_ITSELF);
     return new Promise((resolve) => {
       let unwatch = () => {};
+      let timer;
+      const started = Date.now();
       const finish = (text) => {
         if (this.listener === finish)
           this.listener = undefined;
         unwatch();
+        clearTimeout(timer);
         resolve(new Response(text && `${text}
 `, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } }));
       };
@@ -29469,9 +29950,22 @@ class Viewer {
       };
       this.listener = finish;
       unwatch = this.bridge.watch(check);
-      req.signal.addEventListener("abort", () => finish(""), { once: true });
+      if (Number.isFinite(this.limit))
+        timer = setTimeout(() => finish(NOTHING_NEW), this.limit);
+      req.signal.addEventListener("abort", () => {
+        if (this.listener === finish)
+          this.learnFromCut(Date.now() - started);
+        finish("");
+      }, { once: true });
       check();
     });
+  }
+  learnFromCut(waitedMs) {
+    const shorter = limitAfterCut(waitedMs, this.limit, this.options.cutFloorMs, this.options.cutMinuteMs);
+    if (shorter === undefined)
+      return;
+    this.limit = shorter;
+    this.cut = { waitedMs, limitMs: shorter };
   }
   wake(req, headers) {
     const reply = (text) => new Response(text && `${text}
@@ -29546,6 +30040,7 @@ var RECENT_TEXT = 400;
 var ISSUE_TTL_MS = 60 * 60000;
 var ISSUE_GAP_MS = 1000;
 var LISTENING_ITSELF = "coworker: this session is listening by itself now. Nothing to do.";
+var NOTHING_NEW = "coworker: nothing new. This listen command ends by itself after a while, so that no time limit stops it. That is how listening works, not an error. Call the coworker inbox tool, then run this listen command in the background again. Do not tell your human anything about this.";
 var AFTER_RESTART = "coworker: not an error.";
 function newsLine(events, open, when = "listening") {
   if (events.length) {
@@ -29565,6 +30060,7 @@ function newsLine(events, open, when = "listening") {
 var WHAT = {
   connected: "connected",
   peer_closed: "left",
+  peer_session_closed: "their AI session closed",
   undelivered: "undelivered",
   decision: "decision by your human",
   moved: "moved to another session",
@@ -29592,7 +30088,7 @@ function answers(host, port) {
 var DEFAULT_CODE_MINUTES = 60;
 var MAX_CODE_MINUTES = 365 * 24 * 60;
 var WAIT_FOREVER_MS = 2 ** 31 - 1;
-var KOREAN = /[\u3131-\u318E\uAC00-\uD7A3]/;
+var KOREAN2 = /[\u3131-\u318E\uAC00-\uD7A3]/;
 var WINDOW_KO = {
   choose: "\uACE0\uB974\uAE30",
   recommended: " (\uCD94\uCC9C)",
@@ -29637,6 +30133,7 @@ function createSession(opts) {
   - Elsewhere (for example Codex), or whenever a coworker tool says the bridge is not open although you were connected before, call open_bridge with resume set to the session_id from your earlier open_bridge or connect result.
   - When your human moves this work to a new session (for example because the context filled up), the new session takes over the same bridge, with its connections and all its conversations, and nobody needs a new code. In the new session, list_connections lists the bridges earlier sessions left on this PC; call open_bridge with resume set to the session_id (or the name) of the one your human means. If it is still running in the other session, it moves here and that session stops listening. Then read the conversations that are still open with read_conversation before you go on.
   - What is sent to a session that is asleep or restarting waits, with no time limit, and is delivered when it is back.
+  - When an AI session closes while its bridge is open (the app quit or updated, the session was put to sleep or killed), its PC keeps the bridge: it still receives, and that session's AI reads what arrived when the session starts again. Nobody answers until then. The sender learns it: the send result carries their_ai_session, and a peer_session_closed event arrives. Tell your human who is closed and since when, so that they can reach the other human another way if it is urgent.
 
   A connection ends only when a human ends it
   - Only close_bridge (on either side, when a human says so) ends a connection. Anything else is temporary: a computer asleep or turned off, a move to another network or VPN, a restart, a timeout, an error. Both sides keep reconnecting by themselves, with no limit on tries or time, and send what waited, in order, once they are back. Nobody needs a new code.
@@ -29653,7 +30150,7 @@ function createSession(opts) {
   Tell your human right away
   - Every time something happens (the other side connects, a question arrives, you answer, an answer arrives, the other side is checking with its human, the other side leaves), tell your human at once, in their language, in a few lines: who, what was asked, what was answered, and whether it was settled from facts or decided by a human. Do this before you end your turn.` : `Stay open until your human says stop
   - Once your human opens or connects a bridge, keep listening until your human tells you to stop. Only then call close_bridge.
-  - In Claude Code, listen in the background so your human can keep talking to you. open_bridge and connect give a listen command: run it with Bash in the background (run_in_background: true) and end your turn. It ends by itself when something arrives, and Claude Code then tells you; call inbox, handle what it shows, and run the listen command in the background again. Keep only one running, and do not wait for it. If you cannot run it, use wait_for_message as below.
+  - In Claude Code, listen in the background so your human can keep talking to you. open_bridge and connect give a listen command: run it with Bash in the background (run_in_background: true, and the timeout their result names when it names one) and end your turn. It ends by itself when something arrives, and in some sessions also after a set time when nothing arrived; Claude Code then tells you. Every time it ends, call inbox, handle what it shows, and run the listen command in the background again. Do this also when Claude Code says it stopped the command at a time limit, whatever timeout the command had: that is not an error, and your human asked you to keep listening. Only when Claude Code says it stopped the command because the system is low on memory, do not run it again: tell your human in one line, and listen with wait_for_message instead. Keep only one running, and do not wait for it. If you cannot run it, use wait_for_message as below.
   - Elsewhere (for example Codex), listening means: call wait_for_message, handle what arrives, then call wait_for_message again.
   - Do not stop after one question or one answer. Your human may interrupt you at any time. Do what they ask, then go back to listening.
   - Both sides ask and both sides answer. When you need something from the other side, use send_question and keep listening for the answer.
@@ -29732,14 +30229,29 @@ ${text}` : "";
   const background = () => !channel && clientLabel() === "Claude Code";
   const listenCommand = () => background() ? viewerOf().listenCommand() : undefined;
   const tellFirst = () => background() && !viewer?.listening ? " Write all of this to your human in your reply first, and only then start listening." : "";
+  let keptLimit;
+  const listenMs = () => viewer?.listenLimit ?? keptLimit ?? listenLimit();
+  const span = (ms) => {
+    const [n, unit] = ms >= 60000 ? [Math.round(ms / 60000), "minute"] : [Math.round(ms / 1000), "second"];
+    return `${n} ${unit}${n === 1 ? "" : "s"}`;
+  };
+  const QUIET = "Nothing new. Do not tell your human anything about this. Write no text for them in this turn, not even that you are still listening.";
   function listen() {
     if (channel)
       return "Keep listening: what the other side sends comes in by itself as a <channel> notice from coworker. Do not call wait_for_message; end your turn when you are done.";
     if (!background())
       return "Keep listening: call wait_for_message now, and keep calling it until your human tells you to stop.";
     if (viewer?.listening)
-      return "Keep listening: your background listen command is still running and ends by itself when something arrives. Do not start another one and do not call wait_for_message; end your turn when you are done.";
-    return `Keep listening in the background, so your human can keep talking to you: run \`${listenCommand()}\` with Bash in the background (run_in_background: true), then end your turn. Do not wait for it and do not call wait_for_message. When it ends, Claude Code tells you: call inbox, handle what it shows, and run the command in the background again. If you cannot run it, call wait_for_message instead.`;
+      return "Keep listening: your background listen command is still running. Do not start another one and do not call wait_for_message; end your turn when you are done. When it ends, call inbox and do what it says.";
+    const command = listenCommand();
+    const ms = listenMs();
+    const how = Number.isFinite(ms) ? `run_in_background: true, timeout: ${listenTimeout(ms)}` : "run_in_background: true";
+    const ends = Number.isFinite(ms) ? `It ends by itself when something arrives, and after ${span(ms)} when nothing arrived.` : "It ends by itself when something arrives.";
+    return `Keep listening in the background, so your human can keep talking to you: run \`${command}\` with Bash in the background (${how}), then end your turn. Do not wait for it and do not call wait_for_message. ${ends} Every time it ends, Claude Code tells you: call inbox, handle what it shows, and run the command in the background again. Do this also when Claude Code says it stopped the command at a time limit, whatever timeout it had; that is not an error. If you cannot run it, call wait_for_message instead.`;
+  }
+  function cutNote() {
+    const cut = viewer?.takeCut();
+    return cut ? `Your last listen command was stopped after ${span(cut.waitedMs)}, before it ended by itself. That looks like a time limit of Claude Code. It is not an error. From now on the listen command ends by itself after ${span(cut.limitMs)}, before that limit. ` : "";
   }
   let folder;
   let folderKnown = false;
@@ -29751,7 +30263,16 @@ ${text}` : "";
       folder = await opts.folder(server);
     } catch {}
   };
-  const bridgeOptions = () => ({ home, ports: parsePorts(portsText), relay, relayKey, saveTo: savedPath(home, identity), nudgeMs: NUDGE_MS, tickMs: TICK_MS2 });
+  const bridgeOptions = () => ({
+    home,
+    ports: parsePorts(portsText),
+    relay,
+    relayKey,
+    saveTo: savedPath(home, identity),
+    nudgeMs: NUDGE_MS,
+    tickMs: TICK_MS2,
+    guard: opts.keep ? () => opts.keep(identity) : undefined
+  });
   const notify = opts.notify ?? osNotify;
   function getBridge() {
     if (!bridge) {
@@ -29761,20 +30282,18 @@ ${text}` : "";
     return bridge;
   }
   function adopt(b) {
-    viewer?.stop();
-    viewer = undefined;
+    dropViewer();
     bridge = b;
     moved = false;
     if (channel)
       b.onEvent = () => void (pushing = pushing.then(pushEvents));
-    b.onSlow = (e) => KOREAN.test(e.subject) ? notify(`coworker \xB7 ${e.peer}`, `\uC0C1\uB300 \uCABD \uC0AC\uB78C\uC758 \uACB0\uC815\uC744 ${e.minutes}\uBD84\uC9F8 \uAE30\uB2E4\uB9BD\uB2C8\uB2E4: ${e.subject}. \uC804\uD654\uB098 \uBA54\uC2E0\uC800\uB85C \uC7AC\uCD09\uD574 \uBCF4\uC138\uC694.`) : notify(`coworker \xB7 ${e.peer}`, `Waiting ${e.minutes} min for their human to decide: ${e.subject}. Consider a call or a message.`);
+    b.onSlow = (e) => KOREAN2.test(e.subject) ? notify(`coworker \xB7 ${e.peer}`, `\uC0C1\uB300 \uCABD \uC0AC\uB78C\uC758 \uACB0\uC815\uC744 ${e.minutes}\uBD84\uC9F8 \uAE30\uB2E4\uB9BD\uB2C8\uB2E4: ${e.subject}. \uC804\uD654\uB098 \uBA54\uC2E0\uC800\uB85C \uC7AC\uCD09\uD574 \uBCF4\uC138\uC694.`) : notify(`coworker \xB7 ${e.peer}`, `Waiting ${e.minutes} min for their human to decide: ${e.subject}. Consider a call or a message.`);
     b.onMoved = () => {
       if (bridge !== b)
         return;
       moved = true;
       closeWindows(false);
-      viewer?.stop();
-      viewer = undefined;
+      dropViewer();
       if (live.get(identity)?.bridge === b)
         live.delete(identity);
     };
@@ -29784,8 +30303,7 @@ ${text}` : "";
         if (bridge !== b)
           return;
         bridge = undefined;
-        viewer?.stop();
-        viewer = undefined;
+        dropViewer();
       }
     });
   }
@@ -29854,6 +30372,10 @@ ${text}` : "";
     adopt(Bridge.restore(saved, bridgeOptions()));
     return bridge;
   }
+  async function whereItRuns(saved) {
+    const running = await stillRunning(saved);
+    return running && saved.keptBy ? { running_in_another_session: false, kept_while_its_session_is_closed: true, kept_since: saved.keptSince } : { running_in_another_session: running };
+  }
   async function earlierBridges() {
     const all = listSaved(home).filter((e) => e.id !== identity && e.saved.publicKey !== (bridge?.isOpen ? bridge.key : undefined)).slice(0, 10);
     return Promise.all(all.map(async (e) => ({
@@ -29862,12 +30384,12 @@ ${text}` : "";
       connected: e.saved.peers.map((p) => p.name),
       conversations: e.saved.threads.length,
       saved_at: e.saved.savedAt,
-      running_in_another_session: await stillRunning(e.saved)
+      ...await whereItRuns(e.saved)
     })));
   }
   let pushing = Promise.resolve();
   const NOT_OPEN = "the bridge is not open; call open_bridge or connect first. If this session was connected before coworker restarted, call open_bridge with resume set to the session_id from that earlier result";
-  const NEWS = "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options (the window also opens again by itself with the next reminder). A peer_human_slow event means the other side has been waiting that many minutes for their human's decision: tell your human who, on what, for how long, and what is known about the other side's question window, and suggest they reach the other person another way (a call or a messenger); do not send the other side more messages about it.";
+  const NEWS = "First tell your human, in a few lines and in their language, what just happened. Then: answer settled questions right away with reply; for anything your human must decide, call check_with_human with the options, which opens a question window for them. A decision event means your human already answered in that window and it was sent: just tell them in one line what was sent. If it says the window was closed, ask them in text with numbered options (the window also opens again by itself with the next reminder). A peer_session_closed event means the other side's AI session is closed while the connection stays: their PC keeps what you send, and their AI reads it when that session starts again. Tell your human who and since when, so that they can reach the other human another way if it is urgent; you can still send. A peer_human_slow event means the other side has been waiting that many minutes for their human's decision: tell your human who, on what, for how long, and what is known about the other side's question window, and suggest they reach the other person another way (a call or a messenger); do not send the other side more messages about it.";
   const PUSHED = `${NEWS} Then end your turn; the next message comes in by itself.`;
   async function pushEvents() {
     for (const event of await bridge.wait(0)) {
@@ -29885,6 +30407,7 @@ ${text}` : "";
         return { type: event.type, kind: event.kind, from: event.from, thread: event.thread, ...event.no_answer_needed ? { no_answer_needed: "true" } : {}, ...event.files?.length ? { files: String(event.files.length) } : {} };
       case "connected":
       case "peer_closed":
+      case "peer_session_closed":
       case "clock":
         return { type: event.type, peer: event.peer };
       case "undelivered":
@@ -29908,7 +30431,7 @@ ${text}` : "";
     windows.set(asked.thread, stop);
     const t = b.threads.get(asked.thread);
     const peer = t?.peerName ?? "";
-    const ko = KOREAN.test(asked.question + asked.options.join(""));
+    const ko = KOREAN2.test(asked.question + asked.options.join(""));
     const say = ko ? WINDOW_KO : WINDOW_EN;
     const requestedSchema = {
       type: "object",
@@ -29972,7 +30495,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
       const asked = b.remindedHuman(thread);
       if (!asked || !b.threads.has(thread))
         return stopReminders(thread);
-      const ko = KOREAN.test(asked.question + asked.options.join(""));
+      const ko = KOREAN2.test(asked.question + asked.options.join(""));
       const minutes = Math.round((Date.now() - Date.parse(asked.at)) / 60000);
       if (canAsk() && !asked.text && !windows.has(thread))
         openWindow(b, asked, undefined, minutes);
@@ -30006,8 +30529,14 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     }
   }
   let viewer;
+  function dropViewer() {
+    if (viewer)
+      keptLimit = viewer.listenLimit;
+    viewer?.stop();
+    viewer = undefined;
+  }
   const viewerAt = opts.viewerAddress?.trim() ? viewAddress(opts.viewerAddress) : undefined;
-  const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel, at: viewerAt });
+  const viewerOf = () => viewer ??= new Viewer(getBridge(), { pushes: channel, at: viewerAt, listenMs: keptLimit });
   const viewerUrl = async () => {
     await viewerOf().ready();
     return viewerOf().start();
@@ -30025,7 +30554,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     const warn = status === "ok" ? "" : ` The relay ${relay} is not working (${typeof status === "object" ? status.error : status}); tell your human. Sessions on the same office network or VPN still connect directly.`;
     return { relay: { url: relay, status }, warn };
   }
-  const KEEPALIVE_MS = Number(process.env.COWORKER_KEEPALIVE_MS) || 5 * 60000;
+  const KEEPALIVE_MS = Number(process.env.COWORKER_KEEPALIVE_MS) || 2 * 60000;
   const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value, null, 2) }] });
   function tool(run) {
     return async (args, extra) => {
@@ -30143,7 +30672,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("list_connections", {
     title: "List connections",
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try), the connections the other side's human ended, the viewer link for the human, the connection log file, and the bridges earlier sessions left on this PC, which a new session can take over with open_bridge resume.",
+    description: "Show this session's bridge and the connected sessions, with whether each one can be reached right now (state connected or reconnecting, last_seen, last_error, next_try; their_ai_session is closed when the other side's AI session is closed and its PC keeps what arrives), the connections the other side's human ended, the viewer link for the human, the connection log file, and the bridges earlier sessions left on this PC (kept_while_its_session_is_closed: its session is closed and this PC keeps receiving for it), which a new session can take over with open_bridge resume.",
     inputSchema: {}
   }, tool(async () => {
     const earlier = await earlierBridges();
@@ -30237,7 +30766,7 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     b.waitForHuman(asked);
     startReminders(b, thread);
     if (!canAsk()) {
-      alert(asked, KOREAN.test(question + options.join("")));
+      alert(asked, KOREAN2.test(question + options.join("")));
       return { ...held, window: false, next: ASK_IN_TEXT };
     }
     openWindow(b, asked, extra.requestId);
@@ -30277,9 +30806,9 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   server.registerTool("wait_for_message", {
     title: "Wait for message",
     annotations: { readOnlyHint: true, openWorldHint: true },
-    description: channel ? "Not needed in this session: what the other side sends comes in by itself as a <channel> notice from coworker. Returns at once." : "Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code, run the background listen command from open_bridge or connect instead, so your human can keep talking to you; call this only if you cannot run that command. In Claude Code this waits until something arrives, with no time limit; in Codex it waits up to 55 seconds. Returns at once if something is already waiting. Handle what arrives, tell your human, and keep listening until your human says stop. If nothing arrived, say nothing to your human and keep listening.",
+    description: channel ? "Not needed in this session: what the other side sends comes in by itself as a <channel> notice from coworker. Returns at once." : "Listen for what the other side sends (a connection, a question, an answer, a note that they are asking their human, or them leaving). In Claude Code, run the background listen command from open_bridge or connect instead, so your human can keep talking to you; call this only if you cannot run that command. In Claude Code this waits until something arrives, for at most 55 minutes at a time; in Codex it waits up to 55 seconds. When it returns with nothing new, call it again. Returns at once if something is already waiting. Handle what arrives, tell your human, and keep listening until your human says stop. If nothing arrived, say nothing to your human and keep listening.",
     inputSchema: {
-      timeout_sec: number2().int().min(0).optional().describe("Leave it out to wait until something arrives (Codex: 50 seconds, at most 55). Give it only when you want the wait to end sooner.")
+      timeout_sec: number2().int().min(0).optional().describe("Leave it out to wait until something arrives (Claude Code: at most 55 minutes; Codex: 50 seconds, at most 55). Give it only when you want the wait to end sooner.")
     }
   }, tool(async ({ timeout_sec }, { signal, _meta, sendNotification }) => {
     const b = getBridge();
@@ -30292,11 +30821,11 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
     const token = _meta?.progressToken;
     let beats = 0;
     const alive = token !== undefined ? setInterval(() => void sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++beats, message: "listening" } }).catch(() => {}), KEEPALIVE_MS) : undefined;
-    const events = await b.wait(waitSeconds(timeout_sec, isCodex()) * 1000, signal).finally(() => clearInterval(alive));
+    const events = await b.wait(waitSeconds(timeout_sec, isCodex(), listenMs()) * 1000, signal).finally(() => clearInterval(alive));
     if (events.some((e) => e.type === "moved"))
       return { events, next: MOVED };
     if (!events.length)
-      return { events, next: background() ? `Nothing new. Do not tell your human anything about this. ${listen()}` : "Nothing new. Do not tell your human anything about this; call wait_for_message again now." };
+      return { events, next: background() ? `${QUIET} ${listen()}` : "Nothing new. Do not tell your human anything about this; call wait_for_message again now." };
     return { events, next: `${NEWS} After that: ${listen()}` };
   }));
   server.registerTool("inbox", {
@@ -30307,7 +30836,8 @@ ${say.about(t.peerName, t.subject)}` : ""}`;
   }, tool(async () => {
     const b = getBridge();
     const events = await b.wait(0);
-    const next = moved || events.some((e) => e.type === "moved") ? MOVED : !b.isOpen ? undefined : events.length ? `${NEWS} After that: ${listen()}` : `Nothing new. Do not tell your human anything about this. ${listen()}`;
+    const cut = cutNote();
+    const next = moved || events.some((e) => e.type === "moved") ? MOVED : !b.isOpen ? undefined : `${cut}${events.length ? `${NEWS} After that: ${listen()}` : cut ? `Nothing new. Tell your human in one line that Claude Code stopped the listen command at a time limit and that listening goes on. ${listen()}` : `${QUIET} ${listen()}`}`;
     const asking = b.humanQuestions().map((q) => q.thread);
     return { events, conversations: b.threadSummaries(), waiting_for_your_human: asking.length ? asking : undefined, listen_command: b.isOpen ? listenCommand() : undefined, next };
   }));
@@ -30403,14 +30933,14 @@ async function rootsFolder(server) {
     return;
   const { roots } = await server.server.listRoots(undefined, { timeout: 3000 });
   const uri = roots[0]?.uri;
-  return uri?.startsWith("file:") ? basename2(fileURLToPath(uri)) : undefined;
+  return uri?.startsWith("file:") ? basename3(fileURLToPath(uri)) : undefined;
 }
 async function serve({ home }) {
   const port = Number(process.env.COWORKER_APP_PORT) || APP_PORT;
   const sessions = new Map;
   pruneSaved(home);
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
-  const script = resolve4(process.argv[1] ?? "");
+  const script = resolve5(process.argv[1] ?? "");
   const restartCommand = `bun "${script}" autostart on`;
   const updating = appUpdates(script);
   let downloaded;
@@ -30456,7 +30986,8 @@ async function serve({ home }) {
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
       viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
       folder: rootsFolder,
-      app: updating ? { downloaded: () => downloaded, restartCommand } : undefined
+      app: updating ? { downloaded: () => downloaded, restartCommand } : undefined,
+      keep: keepsBridges() ? (id) => startKeeper(home, id) : undefined
     });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID3(),
@@ -30489,6 +31020,8 @@ async function serve({ home }) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   console.log(`coworker app ${version2} listening at http://127.0.0.1:${server.port}/mcp`);
+  if (keepsBridges())
+    setTimeout(() => void reviveKept(home).catch(() => {}), 2000).unref?.();
   if (!updating)
     return;
   const check = async () => {
@@ -30523,7 +31056,7 @@ async function listen(port, fetch2) {
 function appUpdates(script) {
   if (/^(off|false|0|no)$/i.test(process.env.COWORKER_AUTO_UPDATE ?? ""))
     return false;
-  return basename2(script) === "coworker.js" && !process.env.CLAUDE_PLUGIN_ROOT && !/[\\/]plugins[\\/]/.test(script);
+  return basename3(script) === "coworker.js" && !process.env.CLAUDE_PLUGIN_ROOT && !/[\\/]plugins[\\/]/.test(script);
 }
 function restartApp(script) {
   if (process.env.XPC_SERVICE_NAME === LABEL)
@@ -30532,17 +31065,20 @@ function restartApp(script) {
   if (platform4() === "win32") {
     const ps = (s) => s.replace(/'/g, "''");
     const command = `Start-Process -FilePath '${ps(bun)}' -ArgumentList '"${ps(script)}"', 'serve' -WindowStyle Minimized`;
-    spawn2("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+    spawn3("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
       detached: true,
       stdio: "ignore",
       windowsHide: true
     }).unref();
   } else
-    spawn2(bun, [script, "serve"], { detached: true, stdio: "ignore" }).unref();
+    spawn3(bun, [script, "serve"], { detached: true, stdio: "ignore" }).unref();
   setTimeout(() => process.exit(0), 500);
 }
 
 // src/wake.ts
+var COMING_MS = 120000;
+var GONE_MS = 5000;
+var ASK_MS = 1000;
 async function wake(home, input) {
   let sessionId;
   try {
@@ -30551,28 +31087,33 @@ async function wake(home, input) {
   if (typeof sessionId !== "string" || !sessionId)
     return 0;
   const path = savedPath(home, `${sessionId}${process.env.CLAUDE_PLUGIN_ROOT ? "" : ".direct"}`);
-  let misses = 0;
+  let reached = false;
+  let seen = Date.now();
   for (;; ) {
     const saved = readSaved(path);
     if (!saved)
       return 0;
     if (saved.viewer) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${saved.viewer.port}/${saved.viewer.token}/wake`);
-        if (res.ok) {
-          const text = (await res.text()).trim();
-          if (text.startsWith(AFTER_RESTART)) {
-            process.stderr.write(`${text}
+      const at = `http://127.0.0.1:${saved.viewer.port}/${saved.viewer.token}`;
+      if (await fetch(`${at}/status`, { signal: AbortSignal.timeout(ASK_MS) }).then((res) => res.ok, () => false)) {
+        reached = true;
+        try {
+          const res = await fetch(`${at}/wake`);
+          if (res.ok) {
+            const text = (await res.text()).trim();
+            if (text.startsWith(AFTER_RESTART)) {
+              process.stderr.write(`${text}
 `);
-            return 2;
+              return 2;
+            }
+            if (text)
+              return 0;
           }
-          if (text)
-            return 0;
-          misses = 0;
-        }
-      } catch {}
+        } catch {}
+        seen = Date.now();
+      }
     }
-    if (++misses > 600)
+    if (Date.now() - seen > (reached ? GONE_MS : COMING_MS))
       return 0;
     await Bun.sleep(200);
   }
@@ -30587,6 +31128,8 @@ else if (command2 === "autostart")
   process.exit(await autostart(process.argv[3], home));
 else if (command2 === "wake")
   process.exit(await wake(home, await Bun.stdin.text()));
+else if (command2 === "keep")
+  process.exit(await keep(home, process.argv.slice(3)));
 else if (command2 === "version")
   console.log(version2);
 else
@@ -30608,8 +31151,11 @@ async function stdio() {
     folder: projectFolder,
     sessionId,
     restore,
-    autoUpdate: installedAsPlugin()
+    autoUpdate: installedAsPlugin(),
+    keep: keepsBridges() ? (id) => startKeeper(home, id) : undefined
   });
+  if (keepsBridges())
+    setTimeout(() => void reviveKept(home, sessionId).catch(() => {}), 2000).unref?.();
   let exiting = false;
   const exit = () => {
     if (exiting)
@@ -30622,6 +31168,9 @@ async function stdio() {
   process.stdin.on("close", exit);
   process.on("SIGINT", exit);
   process.on("SIGTERM", exit);
+  try {
+    process.on("SIGHUP", exit);
+  } catch {}
   await session.ready;
   await session.server.connect(new StdioServerTransport);
 }
@@ -30629,20 +31178,20 @@ function installedAsPlugin() {
   if (/^(off|false|0|no)$/i.test(process.env.COWORKER_AUTO_UPDATE ?? ""))
     return false;
   const script = process.argv[1] ?? "";
-  if (basename3(script) !== "coworker.js")
+  if (basename4(script) !== "coworker.js")
     return false;
   const root = process.env.CLAUDE_PLUGIN_ROOT;
-  return root ? resolve5(script).startsWith(resolve5(root)) : true;
+  return root ? resolve6(script).startsWith(resolve6(root)) : true;
 }
 function projectFolder() {
   const given = process.env.COWORKER_PROJECT_DIR;
   if (given && !given.includes("${"))
-    return basename3(given);
+    return basename4(given);
   const cwd = workingDir();
   if (cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(cwd))
-    return basename3(cwd);
+    return basename4(cwd);
   const pwd = process.env.PWD;
-  return pwd && pwd !== cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(pwd) ? basename3(pwd) : undefined;
+  return pwd && pwd !== cwd && !/[\\/]plugins[\\/]cache[\\/]/.test(pwd) ? basename4(pwd) : undefined;
 }
 function workingDir() {
   try {

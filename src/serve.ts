@@ -7,6 +7,7 @@ import { basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { version } from '../package.json'
 import { LABEL } from './autostart'
+import { keepsBridges, reviveKept, startKeeper } from './keep'
 import { pruneSaved } from './resume'
 import { createSession } from './session'
 import { appUpdate, firstCheckMs, UPDATE_EVERY_MS } from './update'
@@ -88,6 +89,8 @@ export async function serve({ home }: { home: string }) {
       viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
       folder: rootsFolder,
       app: updating ? { downloaded: () => downloaded, restartCommand } : undefined,
+      // 세션이 닫히거나 앱이 멈춰도 다리가 이어지게 지킴이를 세운다. 새 세션이 「브릿지 이어받아」로 지킴이에게서 넘겨받는다.
+      keep: keepsBridges() ? id => startKeeper(home, id) : undefined,
     })
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -125,6 +128,8 @@ export async function serve({ home }: { home: string }) {
   process.on('SIGINT', stop)
   process.on('SIGTERM', stop)
   console.log(`coworker app ${version} listening at http://127.0.0.1:${server.port}/mcp`)
+  // 로그인할 때 켜 둔 앱이면, PC를 다시 켠 뒤 지키던 다리에 지킴이를 다시 세운다.
+  if (keepsBridges()) setTimeout(() => void reviveKept(home).catch(() => {}), 2000).unref?.()
 
   if (!updating) return
   const check = async () => {
