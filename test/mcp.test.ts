@@ -776,13 +776,33 @@ test('a new session takes over the bridge of an earlier session that is still ru
 }, 30_000)
 
 // 플러그인의 세션 시작 훅이 띄우는 명령. Claude Code 가 훅 입력(JSON)을 표준 입력으로 준다.
-function wakeHook(homeDir: string, sessionId: string, pluginRoot: string) {
-  return Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'mcp.ts'), 'wake'], {
-    env: { ...process.env, COWORKER_HOME: homeDir, CLAUDE_PLUGIN_ROOT: pluginRoot },
+// reachedFile 을 주면, 훅이 세션의 서버에 닿은 때 그 파일이 생긴다. 시험이 그때를 알아야 할 때 쓴다.
+function wakeHook(homeDir: string, sessionId: string, pluginRoot: string, reachedFile?: string) {
+  const watched = reachedFile ? ['--preload', markReached(homeDir)] : []
+  return Bun.spawn([process.execPath, ...watched, join(import.meta.dir, '..', 'src', 'mcp.ts'), 'wake'], {
+    env: { ...process.env, COWORKER_HOME: homeDir, CLAUDE_PLUGIN_ROOT: pluginRoot, ...(reachedFile ? { WAKE_REACHED_FILE: reachedFile } : {}) },
     stdin: new Blob([JSON.stringify({ session_id: sessionId, hook_event_name: 'SessionStart', source: 'resume' })]),
     stdout: 'pipe',
     stderr: 'pipe',
   })
+}
+
+// 훅보다 먼저 읽히는 파일(--preload)을 만든다. 훅의 fetch 를 감싸서, 서버가 떠 있다는 답(/status)을 받은 때 표시 파일을 만든다.
+// 훅의 코드는 그대로 돈다. 훅은 그 답을 받은 뒤부터 서버가 떠 있는 것을 본 것으로 친다(src/wake.ts 의 reached).
+function markReached(dir: string) {
+  const path = join(dir, 'mark-reached.ts')
+  writeFileSync(
+    path,
+    `import { writeFileSync } from 'node:fs'
+const real = globalThis.fetch
+globalThis.fetch = Object.assign(async (input: any, init?: any) => {
+  const res = await real(input, init)
+  if (res.ok && String(input).endsWith('/status')) writeFileSync(process.env.WAKE_REACHED_FILE!, '')
+  return res
+}, real)
+`,
+  )
+  return path
 }
 
 test('a restarted Claude Code session is woken by its plugin hook when a message arrives before anyone listens', async () => {
@@ -842,8 +862,17 @@ test('the restart hook ends within seconds after its session ends, so a session 
   // 다시 켠 세션. 훅이 기다리고 있다.
   const second = new Client({ name: 'claude-code', version: '1.0.0' })
   await session('claude-code', env, second)
-  const hook = wakeHook(own, 'wake-ends', env.CLAUDE_PLUGIN_ROOT)
-  await Bun.sleep(700)
+  const reached = join(own, 'reached')
+  const hook = wakeHook(own, 'wake-ends', env.CLAUDE_PLUGIN_ROOT, reached)
+  // 훅이 서버에 닿을 때까지 기다린다. 닿기 전에 세션이 끝나는 것은 이 시험이 보는 경우가 아니다:
+  // 그때 훅은 서버가 아직 뜨는 중이라고 보고 2분을 기다린다.
+  // 전에는 여기서 0.7초만 기다렸다. GitHub 의 Windows 러너에서 훅이 그보다 늦게 떠서, 이 시험이 제 시간을 넘겼다(2026-11-19).
+  for (let i = 0; !existsSync(reached); i++) {
+    if (i >= 600) throw new Error('the hook did not reach the server')
+    await Bun.sleep(50)
+  }
+  // 닿은 훅은 세션이 도는 동안 기다린다.
+  await Bun.sleep(300)
   expect(hook.exitCode).toBeNull()
   // 세션이 끝났다. 깨울 AI가 없으니 훅도 곧 조용히 끝난다. 전에는 서버가 돌아오기를 2분 기다렸다.
   const started = Date.now()
@@ -851,7 +880,7 @@ test('the restart hook ends within seconds after its session ends, so a session 
   expect(await hook.exited).toBe(0)
   expect(Date.now() - started).toBeLessThan(15_000)
   expect(await new Response(hook.stderr).text()).toBe('')
-}, 30_000)
+}, 60_000)
 
 unsteady('questions that piled up before the restart wake the AI as soon as the session is back', async () => {
   const own = mkdtempSync(join(tmpdir(), 'coworker-wake-'))
