@@ -98,6 +98,8 @@ export type Peer = {
   retryAt?: number
   token?: string
   given?: string
+  // 그 세션의 AI가 닫혀 있고, 그 PC의 지킴이가 글을 받아 두고 있다. 닫힌 때다. 상대가 답에 실어 알려 준다(0.14 이상 판).
+  away?: string
 }
 
 // 상대 쪽 사람이 브릿지를 닫아 끝난 연결. 연결을 끝내는 것은 사람뿐이라서, 끝난 것은 이것만 남는다.
@@ -326,6 +328,8 @@ export type BridgeEvent =
       at: string
     }
   | { type: 'peer_closed'; peer: string; at: string }
+  // 상대의 AI 세션이 닫혀 있다(연결은 그대로다). 그 PC의 지킴이가 글을 받아 두고, 세션이 다시 열리면 그쪽 AI가 읽는다.
+  | { type: 'peer_session_closed'; peer: string; since: string; at: string }
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
   // 이 브릿지를 같은 PC의 다른 세션이 이어받았다. 이 세션은 더 듣지 않는다.
   | { type: 'moved'; at: string }
@@ -430,22 +434,29 @@ export type AgreementInput = {
 // 이미 이어진 상대도 주소나 포트가 바뀌면 hello 로 알린다. back 은 그 상대가 다시 켜져 돌아왔다는 뜻이다.
 type Payload =
   // rejoin: 받는 쪽이 보내는 쪽을 잊었다가 다시 붙을 때 들고 올 토큰. 보내는 쪽이 받는 쪽 키에만 쓰이게 만들어 건넨다.
-  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean; rejoin?: string; about?: About; can?: string[] }
-  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean; rejoin?: string; about?: About; can?: string[] }
+  // away: 보내는 쪽의 AI 세션이 닫혀 있고 지킴이가 다리를 지키고 있다. 닫힌 때다. 답(hello_ack, ok, pong)에도 같은 뜻으로 싣는다.
+  | { type: 'hello'; token?: string; name: string; addrs: string[]; port: number; back?: boolean; rejoin?: string; about?: About; can?: string[]; away?: string }
+  | { type: 'hello_ack'; name: string; members?: Member[]; private?: boolean; rejoin?: string; about?: About; can?: string[]; away?: string }
   | { type: 'introduce'; member: Member }
   | { type: 'msg'; msg: WireMessage }
-  | { type: 'ok' }
+  | { type: 'ok'; away?: string }
   // 받지 않았다. 까닭을 적어 준다(외부 세션의 한도를 넘었다, 외부 세션이 꽉 찼다). 이 답을 모르는 옛 판은 받은 것으로 안다.
   | { type: 'refused'; reason: string }
   | { type: 'ping' }
   // waiting: 받는 쪽이 이 상대와의 대화에서 자기 사람에게 묻는 중인 것. 0.7 이하 판은 보내지 않는다.
-  | { type: 'pong'; waiting?: WaitState[]; can?: string[] }
+  | { type: 'pong'; waiting?: WaitState[]; can?: string[]; away?: string }
   | { type: 'bye' }
   | { type: 'poll'; wait: number; ack?: string[] }
   | { type: 'batch'; items: { id: string; payload: Payload }[] }
   // 같은 PC의 다른 세션이 이 브릿지를 이어받는다. 이 브릿지의 비밀키로 봉인해 보내므로, 저장한 상태를 읽을 수 있는 쪽만 보낼 수 있다.
-  | { type: 'handover' }
+  // keeper: 지킴이가 쥐고 있을 때만 넘겨 달라는 뜻이다. 세션이 쥔 다리는 이 요청에 넘겨주지 않는다.
+  // stop: 이어받을 세션이 없다. 사람이 지킴이를 멈추라고 했다(keep stop).
+  | { type: 'handover'; keeper?: boolean; stop?: boolean }
   | { type: 'handover_ok' }
+  // 지킴이가 이 다리를 쥔 프로세스를 지켜본다. 같은 비밀키로 봉인해 보낸다. 다리가 멈출 때 까닭을 답한다.
+  // 답이 오기 전에 연결이 끊기면 그 프로세스가 죽은 것이다.
+  | { type: 'watch' }
+  | { type: 'watch_end'; why: WatchEnd }
   // 끊긴 까닭을 함께 보려고 상대의 연결 기록 가운데 이쪽에 관한 줄을 달라고 한다. 메시지 내용은 기록에 없다.
   | { type: 'log_request'; lines?: number }
   | { type: 'log'; entries: LogEntry[] }
@@ -453,6 +464,10 @@ type Payload =
   | { type: 'file'; id: string; seq: number; of: number; size: number; data?: string }
   // 파일이 붙은 글을 받은 쪽이, 파일마다 크기와 sha256 이 맞았는지 알려 준다.
   | { type: 'receipt'; thread: string; msg: string; files: { id: string; ok: boolean; problem?: string }[] }
+
+// 지켜보기가 끝난 까닭. closed: 사람이 다리를 닫았다. moved: 다른 세션이 이어받았다. stopped: 프로세스가 끝나며 멈췄다.
+// replaced: 새 지킴이가 지켜보기 시작했다.
+export type WatchEnd = 'closed' | 'moved' | 'stopped' | 'replaced'
 
 // 글에 붙여 보내는 파일의 이름표. 내용은 조각으로 따로 간다.
 const wireFiles = (files: FileNote[]) => (files.length ? { files: files.map(({ id, name, size, sha256 }) => ({ id, name, size, sha256 })) } : {})
@@ -506,6 +521,10 @@ export type BridgeOptions = {
   nudgeMs?: number
   // 이 PC 쪽 일(잠자기, 주소 바뀜, 오래 기다림)을 보는 간격. 시험에서만 줄인다.
   tickMs?: number
+  // 지킴이 프로세스가 연 다리다(keep.ts). AI가 붙어 있지 않다: 글을 받아 두기만 하고, 상대에게 AI 세션이 닫혀 있다고 알린다.
+  keeper?: boolean
+  // 다리가 열릴 때 부른다. 이 프로세스가 죽어도 다리를 이어 열 지킴이를 세워 둔다.
+  guard?: () => void
 }
 
 // 사람이 브라우저로 여는 대화 보기 화면의 주소. 세션을 다시 켜도 이 포트와 토큰으로 다시 열어서, 열어 둔 화면이 스스로 다시 붙는다.
@@ -539,6 +558,11 @@ export type SavedBridge = {
   viewer?: ViewerAddress
   // 이쪽 사람이 아직 답하지 않은 질문 창.
   asking?: HumanQuestion[]
+  // 세션이 닫혀도 지킴이가 이 다리를 지킨다(0.14 이상 판에서 지킴이를 켠 세션이 적는다).
+  keep?: boolean
+  // 지금 지킴이 프로세스가 쥐고 있다. 그 pid 와 쥔 때. 세션이 다시 열리면 이것을 보고 지킴이에게서 넘겨받는다.
+  keptBy?: number
+  keptSince?: string
   pid: number
   savedAt: string
 }
@@ -733,12 +757,21 @@ export class Bridge {
   private saveTimer?: ReturnType<typeof setTimeout>
   // close 로 닫았으면 저장한 상태를 지운다. 프로세스가 끝나서 닫힐 때는 다시 켤 때를 위해 남긴다.
   private forget = false
-  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey' | 'keys' | 'saveTo' | 'clock' | 'outsideName' | 'outsideOnly' | 'projectDir' | 'outsideLimits' | 'outsideFiles'>> & {
+  private readonly opts: Required<Omit<BridgeOptions, 'home' | 'relay' | 'relayKey' | 'keys' | 'saveTo' | 'clock' | 'outsideName' | 'outsideOnly' | 'projectDir' | 'outsideLimits' | 'outsideFiles' | 'keeper' | 'guard'>> & {
     home?: string
     relay?: string
     relayKey?: string
     saveTo?: string
+    keeper?: boolean
+    guard?: () => void
   }
+  // 지킴이가 이 다리를 쥔 때. 지킴이가 쥔 동안에만 있다. 상대에게 「AI 세션이 닫혀 있다」고 알릴 때 싣는다.
+  private awaySince?: string
+  // 이 프로세스를 지켜보는 지킴이에게 줄 답. 하나만 산다.
+  private watcher?: (why: WatchEnd) => void
+  private handedOver = false
+  // 지킴이가 넘겨준 것이 세션이 아니라 사람의 멈춤(keep stop)이었다.
+  stoppedByHuman = false
 
   constructor(options: BridgeOptions) {
     this.keys = options.keys ?? newKeyPair()
@@ -813,27 +846,32 @@ export class Bridge {
     b.viewerAddress = saved.viewer
     if (isToken(saved.relaySecret)) b.keptRelaySecret = saved.relaySecret
     for (const q of saved.asking ?? []) if (q && isThreadId(q.thread)) b.asking.set(q.thread, q)
+    if (options.keeper) b.awaySince = now()
     try {
       b.open(saved.port, { outsideOnly: b.outsideOnly })
-    } catch {
+    } catch (e) {
+      // 지킴이는 쓰던 포트로만 연다. 새 포트를 열지 않는다. 그 포트를 못 열면 다른 프로세스가 이 다리를 쥐고 있는 것이다.
+      if (options.keeper) throw e
       b.open(undefined, { outsideOnly: b.outsideOnly })
     }
-    b.log.write('restored', { name: b.outsideOnly ? b.nameFor(true) : b.name, peers: b.peers.size, queued: b.outbox.length })
+    b.log.write('restored', { name: b.outsideOnly ? b.nameFor(true) : b.name, peers: b.peers.size, queued: b.outbox.length, by: options.keeper ? 'keeper' : undefined })
     for (const peer of b.peers.values()) {
-      b.greet(peer, { back: true })
+      // 세션이 돌아왔으면 「다시 왔다」고 알린다. 지킴이는 그렇게 알리지 않고, AI 세션이 닫혀 있다는 것만 싣는다(sayHello).
+      b.greet(peer, options.keeper ? {} : { back: true })
       void b.pollLoop(peer.key)
     }
     return b
   }
 
   // 같은 PC의 다른 세션에서 돌고 있는 이 브릿지에게 이쪽으로 옮겨 오겠다고 알린다. 그쪽은 상태를 저장하고 멈춘다.
-  static async askToMove(saved: SavedBridge): Promise<boolean> {
+  // keeperOnly: 지킴이가 쥐고 있을 때만 넘겨받는다. 같은 세션 ID로 뜬 다른 서버가 쥔 다리는 건드리지 않는다.
+  static async askToMove(saved: SavedBridge, keeperOnly = false, stop = false): Promise<boolean> {
     const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) }
     try {
       const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(seal({ type: 'handover' }, keys.publicKey, keys)),
+        body: JSON.stringify(seal({ type: 'handover', ...(keeperOnly ? { keeper: true } : {}), ...(stop ? { stop: true } : {}) }, keys.publicKey, keys)),
         signal: AbortSignal.timeout(5000),
       })
       if (!res.ok) return false
@@ -843,9 +881,45 @@ export class Bridge {
     }
   }
 
+  // 지킴이가 부른다: 이 다리를 쥔 프로세스를 지켜본다. 다리가 멈추면 그 까닭을, 그 프로세스가 죽어 연결이 끊기면 'gone' 을 돌려준다.
+  // 그 프로세스가 지켜보기를 모르는 옛 판이면 'unsupported', 닿지 않으면 'gone' 이다. 새 포트를 열지 않고 다리의 포트에 붙는다.
+  // 답은 다리가 멈출 때 오므로 요청을 오래 붙잡아 둔다. Bun 은 답 없는 요청을 6분에 끊는다(1.4.4 에서 잼).
+  // 그 전에 renewMs 가 지나면 스스로 끊고 'again' 을 돌려준다. 다리는 그대로이니 부른 쪽이 바로 다시 건다.
+  static async watchHolder(saved: SavedBridge, renewMs: number): Promise<WatchEnd | 'gone' | 'unsupported' | 'again'> {
+    const keys = { publicKey: fromB64(saved.publicKey), secretKey: fromB64(saved.secretKey) }
+    try {
+      const res = await fetch(`http://127.0.0.1:${saved.port}/v1/${routeId(saved.publicKey)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(seal({ type: 'watch' }, keys.publicKey, keys)),
+        signal: AbortSignal.timeout(renewMs),
+      })
+      if (!res.ok) return res.status === 404 ? 'gone' : 'unsupported'
+      const answer = open(await res.json(), keys) as Payload | null
+      return answer?.type === 'watch_end' ? answer.why : 'unsupported'
+    } catch (e) {
+      return (e as { name?: string } | undefined)?.name === 'TimeoutError' ? 'again' : 'gone'
+    }
+  }
+
   // 지금 상태를 바로 저장한다. 다른 이름표로 옮겨 저장할 때 쓴다.
   persist() {
     this.save()
+  }
+
+  // 연결 기록에 한 줄 남긴다. 지킴이가 언제 지켜보기 시작했고 언제 넘겨받고 넘겨줬는지를 사람이 기록으로 볼 수 있게 한다.
+  note(event: string, fields: Record<string, unknown> = {}) {
+    this.log.write(event, fields)
+  }
+
+  // 지킬 것이 있는지: 이어진 상대가 있거나, 아직 쓸 수 있는 연결 코드가 있다.
+  get worthKeeping() {
+    return this.peers.size > 0 || [...this.tokens.values()].some(t => t.expires > Date.now())
+  }
+
+  // 지킴이가 이 프로세스를 지켜보고 있는지.
+  get watched() {
+    return !!this.watcher
   }
 
   snapshot(): SavedBridge {
@@ -873,6 +947,9 @@ export class Bridge {
       events: this.events,
       viewer: this.viewerAddress,
       asking: [...this.asking.values()],
+      keep: this.opts.guard || this.opts.keeper ? true : undefined,
+      keptBy: this.opts.keeper ? process.pid : undefined,
+      keptSince: this.awaySince,
       pid: process.pid,
       savedAt: now(),
     }
@@ -1012,6 +1089,8 @@ export class Bridge {
     this.changed()
     // 열자마자 한 번은 바로 저장한다. 이 세션이 곧바로 꺼져도 다시 켜거나 다른 세션이 이어받을 수 있다.
     this.save()
+    // 이 프로세스가 죽어도 다리가 이어지게 지킴이를 세워 둔다. 저장한 뒤에 부른다: 지킴이는 저장한 상태를 읽는다.
+    this.opts.guard?.()
   }
 
   // 새 연결 코드. 코드마다 토큰이 달라서 한 코드로는 한 세션만 연결할 수 있다.
@@ -1125,6 +1204,8 @@ export class Bridge {
         ...(peer.outside ? { outside: true } : {}),
         state: down ? ('reconnecting' as const) : ('connected' as const),
         since: isoOf(down?.since),
+        // 그쪽 AI 세션이 닫혀 있다. 닿기는 한다: 그 PC의 지킴이가 받아 둔다.
+        ...(peer.away ? { away: peer.away } : {}),
         via: peer.lastAddr ? (isRelayAddr(peer.lastAddr) ? ('relay' as const) : ('direct' as const)) : pulling ? ('pickup' as const) : ('direct' as const),
       }
     })
@@ -1166,7 +1247,7 @@ export class Bridge {
   }
 
   private async sendQuestion(peer: Peer, question: string, context?: string, ask?: AskInfo, noAnswer = false, category?: string, files: FileNote[] = []) {
-    assertNoSecrets({ question, context, category })
+    this.checkText({ question, context, category })
     if (peer.outside) this.assertOutsideSafe({ question, context, category })
     const label = cleanCategory(category)
     const thread: Thread = {
@@ -1190,7 +1271,7 @@ export class Bridge {
     thread.messages.push({ id: msg.id, from: 'me', kind: msg.kind, text: msg.text, context: msg.context, ...notice, ...(files.length ? { files } : {}), at: msg.at })
     this.changed()
     try {
-      return { thread: thread.id, to: peer.name, delivery: await this.sendMessage(peer, msg, thread.id), ...sentFiles(files) }
+      return { thread: thread.id, to: peer.name, delivery: await this.sendMessage(peer, msg, thread.id), ...this.awayNote(peer), ...sentFiles(files) }
     } catch (e) {
       // 보내다 만 파일 조각과 사본도 함께 치운다.
       this.outbox = this.outbox.filter(o => o.thread !== thread.id)
@@ -1206,7 +1287,7 @@ export class Bridge {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     if (!(opts.human && thread.status === 'agreed')) this.assertOpen(thread)
-    assertNoSecrets({ answer: text })
+    this.checkText({ answer: text })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     if (peer.outside) this.assertOutsideSafe({ answer: text })
@@ -1222,7 +1303,7 @@ export class Bridge {
     const delivery = await this.sendMessage(peer, msg, thread.id).catch(e => {
       throw this.unsaid(thread, msg, before, e)
     })
-    return { thread: thread.id, to: peer.name, delivery, status: thread.status, ...sentFiles(files) }
+    return { thread: thread.id, to: peer.name, delivery, ...this.awayNote(peer), status: thread.status, ...sentFiles(files) }
   }
 
   // 결정이 필요해 이쪽 사람에게 묻는 동안, 상대가 막연히 기다리지 않게 알린다.
@@ -1230,7 +1311,7 @@ export class Bridge {
     const thread = this.threads.get(threadId)
     if (!thread) throw new Error(`no conversation with id ${threadId}`)
     if (thread.status !== 'agreed') this.assertOpen(thread)
-    assertNoSecrets({ note })
+    this.checkText({ note })
     const peer = this.peers.get(thread.peer)
     if (!peer) throw new Error(`${thread.peerName} is no longer connected`)
     if (peer.outside) this.assertOutsideSafe({ note })
@@ -1242,7 +1323,7 @@ export class Bridge {
     const delivery = await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id).catch(e => {
       throw this.unsaid(thread, msg, before, e)
     })
-    return { thread: thread.id, to: peer.name, delivery, status: thread.status }
+    return { thread: thread.id, to: peer.name, delivery, ...this.awayNote(peer), status: thread.status }
   }
 
   // 대화를 마치고 합의문을 쓴다. 상대에게 보내고, 양쪽 PC에 파일로 남긴다.
@@ -1260,7 +1341,7 @@ export class Bridge {
       disagreements: input.disagreements?.join('\n'),
       for_humans: input.forHumans?.join('\n'),
     }
-    assertNoSecrets(fields)
+    this.checkText(fields)
     const peer = this.peers.get(thread.peer)
     if (peer?.outside) this.assertOutsideSafe(fields)
     const me = this.nameFor(peer)
@@ -1279,7 +1360,7 @@ export class Bridge {
     this.changed()
     const file = this.saveAgreement(thread)
     const delivery = peer ? await this.sendOrQueue(peer, { type: 'msg', msg }, thread.id) : `not sent: ${thread.peerName} is no longer connected`
-    return { thread: thread.id, to: thread.peerName, delivery, status: thread.status, file }
+    return { thread: thread.id, to: thread.peerName, delivery, ...this.awayNote(peer), status: thread.status, file }
   }
 
   // 상대가 받지 않은 글은 이쪽 대화에서도 뺀다. 보낸 것으로 남아 있으면 사람이 상대도 받았다고 여긴다.
@@ -1384,6 +1465,9 @@ export class Bridge {
               ? 'the other side cannot be reached directly, so it comes here to pick up messages'
               : undefined,
           queued: this.outbox.filter(o => o.peer === peer.key).length,
+          // 닿기는 하지만 그쪽 AI 세션이 닫혀 있다. 그 PC가 글을 받아 두고, 세션이 다시 열리면 그쪽 AI가 읽는다.
+          their_ai_session: peer.away ? 'closed' : undefined,
+          their_ai_session_closed_since: peer.away,
           last_seen: isoOf(peer.lastSeen),
           last_error: error ? { kind: error.kind, what: LINK_ERRORS[error.kind], detail: error.detail, at: isoOf(error.at) } : undefined,
           next_try: reachable ? undefined : (isoOf(peer.retryAt) ?? 'now'),
@@ -1444,12 +1528,24 @@ export class Bridge {
         }
       }),
     )
+    // 지켜보던 지킴이에게 사람이 닫았다고 먼저 알린다. 서버를 멈추면 그 답이 가지 못하므로, 답이 나갈 틈을 준다.
+    if (this.watcher) {
+      this.watcher('closed')
+      this.watcher = undefined
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
     this.shutdown()
   }
 
   // 알리지 않고 바로 닫는다. 프로세스가 끝날 때 쓴다. 그때는 다시 켤 때를 위해 상태를 남긴다.
-  shutdown() {
+  // reason: 연결 기록에 남길 까닭.
+  shutdown(reason?: string) {
+    if (reason) this.stopReason = reason
     if (this.server) this.log.write('closed', { by: this.forget ? 'this side\'s human (close_bridge)' : (this.stopReason ?? 'the process stopped; it comes back on restart') })
+    // 지켜보던 지킴이에게 까닭을 알린다. 사람이 닫았으면 지킴이도 끝나고, 프로세스가 끝나는 것이면 지킴이가 이어 연다.
+    this.watcher?.(this.forget ? 'closed' : this.handedOver ? 'moved' : 'stopped')
+    this.watcher = undefined
+    this.handedOver = false
     this.stopReason = undefined
     clearInterval(this.ticker)
     clearTimeout(this.saveTimer)
@@ -1509,20 +1605,21 @@ export class Bridge {
     if (req.method !== 'POST' || new URL(req.url).pathname !== `/v1/${this.route}`) return new Response('not found', { status: 404 })
     const sealed = await req.json().catch(() => null)
     const seenAt = server.requestIP(req)?.address.replace(/^::ffff:/, '')
-    const { status, body } = await this.respond(sealed, seenAt)
+    const { status, body } = await this.respond(sealed, seenAt, false, () => server.timeout(req, 0))
     return new Response(body, { status, headers: { 'content-type': status === 200 ? 'application/json' : 'text/plain' } })
   }
 
   // 바로 온 요청이든 중계 서버의 우편함에서 꺼낸 요청이든 같게 처리한다. seenAt 은 바로 왔을 때 상대의 IP다.
-  private async respond(sealed: unknown, seenAt: string | undefined, relayed = false): Promise<{ status: number; body: string }> {
+  // hold: 답을 오래 붙잡아 둘 요청이면 부른다. 조용한 연결을 끊는 시간을 이 요청에서는 끈다.
+  private async respond(sealed: unknown, seenAt: string | undefined, relayed = false, hold?: () => void): Promise<{ status: number; body: string }> {
     try {
-      return await this.respondInner(sealed, seenAt, relayed)
+      return await this.respondInner(sealed, seenAt, relayed, hold)
     } catch {
       return { status: 500, body: 'error' }
     }
   }
 
-  private async respondInner(sealed: unknown, seenAt: string | undefined, relayed: boolean): Promise<{ status: number; body: string }> {
+  private async respondInner(sealed: unknown, seenAt: string | undefined, relayed: boolean, hold?: () => void): Promise<{ status: number; body: string }> {
     const payload = open(sealed, this.keys) as Payload | null
     if (!payload) return { status: 403, body: 'forbidden' }
     // 다시 온 봉투는 거절하되 403 은 쓰지 않는다. 보낸 쪽이 같은 봉투를 다른 주소로 다시 보낸 것일 수도 있어서, 연결을 끊지 않고 다시 보내게 한다.
@@ -1535,14 +1632,35 @@ export class Bridge {
 
     // 같은 PC의 다른 세션이 이어받는다. 상태를 저장하고 멈춘다. 답을 보낸 뒤에 멈춰야 답이 간다.
     if (from === this.key && payload.type === 'handover' && this.server) {
-      this.emit({ type: 'moved', at: now() })
-      this.stopReason = 'another session on this PC took over this bridge'
+      // 지킴이에게만 한 요청이면, 세션이 쥔 다리는 넘겨주지 않는다.
+      if (payload.keeper && !this.opts.keeper) return answer({ type: 'ok' })
+      // 지킴이에게는 알릴 AI가 없다. 「이어받아 갔다」는 소식은 세션이 쥐고 있었을 때만 남긴다.
+      if (!this.opts.keeper) this.emit({ type: 'moved', at: now() })
+      this.stoppedByHuman = !!payload.stop && !!this.opts.keeper
+      this.stopReason = this.stoppedByHuman
+        ? 'a human told the keeper to stop (keep stop); the bridge is down until its session starts again'
+        : this.opts.keeper
+          ? 'a session on this PC took this bridge over from the keeper'
+          : 'another session on this PC took over this bridge'
+      this.handedOver = true
       this.save()
+      // 이 프로세스를 지켜보던 지킴이는 물러난다. 이어받은 쪽이 자기 지킴이를 세운다.
+      this.watcher?.('moved')
+      this.watcher = undefined
       setTimeout(() => {
         this.shutdown()
         this.onMoved?.()
       }, 50)
       return answer({ type: 'handover_ok' })
+    }
+
+    // 지킴이가 이 프로세스를 지켜본다. 다리가 멈출 때까지 답을 붙잡아 둔다. 그 전에 이 프로세스가 죽으면 연결이 끊겨서 지킴이가 안다.
+    // 지켜보는 지킴이는 하나다. 새 지킴이가 오면 앞의 지킴이는 물러난다.
+    if (from === this.key && payload.type === 'watch' && this.server) {
+      hold?.()
+      this.watcher?.('replaced')
+      const why = await new Promise<WatchEnd>(resolve => (this.watcher = resolve))
+      return answer({ type: 'watch_end', why })
     }
 
     const peer = this.peers.get(from)
@@ -1592,7 +1710,8 @@ export class Bridge {
       const rejoin = this.rejoinFor(added)
       const again = !!token && 'again' in token
       this.addPeer(added, { emit: true, via: invited ? invite!.by : undefined, again, how: invited ? 'introduced' : again ? 'came back with its token' : 'code' })
-      return answer({ type: 'hello_ack', name: this.nameFor(added), members: members.map(memberOf), private: isPrivate || undefined, rejoin, about: this.aboutFor(added), can: this.canFor(added) })
+      this.noteAway(added, payload.away)
+      return answer({ type: 'hello_ack', name: this.nameFor(added), members: members.map(memberOf), private: isPrivate || undefined, rejoin, about: this.aboutFor(added), can: this.canFor(added), away: this.awaySince })
     }
 
     if (peer.outside && !relayed) return forbidden
@@ -1693,22 +1812,46 @@ export class Bridge {
     }
     // 상대가 건넨 토큰은 늘 새것으로 바꿔 둔다. 이쪽을 잊은 상대에게 다시 들어갈 때 그것을 든다.
     if (isToken(hello.rejoin)) peer.token = hello.rejoin
+    this.noteAway(peer, hello.away)
     // 「돌아왔다」는 소식은 AI가 아직 읽지 않은 것이 있으면 또 쌓지 않는다.
     if (hello.back && !this.events.some(e => e.type === 'connected' && e.again && e.peer === peer.name)) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
     else this.changed()
     void this.flush()
     this.learn(peer, hello.about, hello.can)
-    return { type: 'hello_ack', name: this.nameFor(peer), rejoin: this.rejoinFor(peer), about: this.aboutFor(peer), can: this.canFor(peer) }
+    return { type: 'hello_ack', name: this.nameFor(peer), rejoin: this.rejoinFor(peer), about: this.aboutFor(peer), can: this.canFor(peer), away: this.awaySince }
+  }
+
+  // 상대가 인사나 답에 실어 보낸 것으로, 그쪽 AI 세션이 닫혀 있는지(지킴이만 받고 있는지) 안다. 바뀔 때만 AI에게 알린다.
+  // 다시 열린 것은 따로 알리지 않는다: 돌아온 세션이 「다시 왔다」고 인사한다.
+  private noteAway(peer: Peer, away: unknown) {
+    const since = typeof away === 'string' && away.length <= 40 && !Number.isNaN(Date.parse(away)) ? away : undefined
+    if (since === peer.away) return
+    const was = peer.away
+    peer.away = since
+    if (since && !was) {
+      this.log.write('peer_session_closed', { id: peerId(peer.key), peer: peer.name, since, what: 'their AI session is closed; their PC keeps what arrives until it starts again' })
+      this.emit({ type: 'peer_session_closed', peer: peer.name, since, at: now() })
+      return
+    }
+    if (!since) this.log.write('peer_session_open', { id: peerId(peer.key), peer: peer.name })
+    this.changed()
+  }
+
+  // 보내기 도구의 결과에 붙인다: 글은 닿았지만 그쪽 AI 세션이 닫혀 있다.
+  private awayNote(peer: Peer | undefined) {
+    return peer?.away
+      ? { their_ai_session: `closed since ${peer.away}. Their PC received this and keeps it; their AI reads it when that session starts again. Tell your human: they may want to reach the other human another way.` }
+      : {}
   }
 
   // 바로 받았든, 상대에게 가져왔든 같은 방식으로 처리한다.
   private process(peer: Peer, payload: Payload): Payload | null {
     switch (payload.type) {
       case 'ping':
-        return { type: 'pong', waiting: this.waitingFor(peer), can: this.canFor(peer) }
+        return { type: 'pong', waiting: this.waitingFor(peer), can: this.canFor(peer), away: this.awaySince }
       case 'msg': {
         const refused = this.receive(peer, payload.msg)
-        return refused ? { type: 'refused', reason: refused } : { type: 'ok' }
+        return refused ? { type: 'refused', reason: refused } : { type: 'ok', away: this.awaySince }
       }
       case 'bye':
         this.dropPeer(peer)
@@ -1721,7 +1864,8 @@ export class Bridge {
         }
         if (isToken(payload.rejoin)) peer.token = payload.rejoin
         this.learn(peer, payload.about, payload.can)
-        return { type: 'hello_ack', name: this.nameFor(peer), about: this.aboutFor(peer), can: this.canFor(peer) }
+        this.noteAway(peer, payload.away)
+        return { type: 'hello_ack', name: this.nameFor(peer), about: this.aboutFor(peer), can: this.canFor(peer), away: this.awaySince }
       case 'introduce':
         // 개인용·외부용 코드로 이어진 상대가 소개하는 세션은 받지 않는다.
         if (!peer.private) this.invite(payload.member, peer.name)
@@ -2462,6 +2606,7 @@ export class Bridge {
       rejoin: this.rejoinFor(peer),
       about: this.aboutFor(peer),
       can: this.canFor(peer),
+      away: this.awaySince,
       ...extra,
     }
   }
@@ -2485,8 +2630,24 @@ export class Bridge {
     if (this.peers.has(peer.key)) this.changed()
   }
 
+  // 밖으로 나가는 글을 본다: 비밀값으로 보이는 것, 그리고 이 세션의 대화 보기 링크.
+  private checkText(fields: Record<string, string | undefined>) {
+    assertNoSecrets(fields)
+    this.assertNoViewLink(fields)
+  }
+
+  // 대화 보기 링크를 아는 사람은 대화를 읽고 접근키를 만들 수 있다. 그래서 링크에 든 토큰이 들어 있는 글은 보내지 않는다.
+  private assertNoViewLink(fields: Record<string, string | Buffer | undefined>) {
+    const token = this.viewerAt?.token
+    if (!token || token.length < 8) return
+    for (const [field, value] of Object.entries(fields))
+      if (value?.includes(token))
+        throw new Error(`nothing was sent: the ${field} holds this session's conversation view link. Whoever has that link can read the conversation, so it is for your human only and is never sent to another session. Take the link out and send again`)
+  }
+
   // 이 세션의 소개를 정한다. 준 것만 바꾸고, 달라졌으면 이어진 세션에 다시 인사해서 알린다.
   setAbout(about: About) {
+    this.assertNoViewLink({ 'introduction text': Object.values(about).join(' ') })
     const next = cleanAbout({ ...this.about, ...about })
     if (JSON.stringify(next) === JSON.stringify(this.about)) return
     // 소개도 인사에 실려 외부 세션에게 간다. 이름과 같이, 이 컴퓨터에 관한 것이 들어 있으면 받지 않는다.
@@ -2553,6 +2714,7 @@ export class Bridge {
         throw new Error(`nothing was sent: cannot read the file ${path}. Give the full path of a file on this PC`)
       }
       if (bytes.length > MAX_FILE_BYTES) throw new Error(`nothing was sent: ${name} is larger than ${MAX_FILE_BYTES >> 20} MiB, the most one file can be`)
+      this.assertNoViewLink({ 'name of a file': name, [`file ${safeFileName(name)}`]: bytes })
       return { path, name: safeFileName(name), bytes }
     })
     if (read.reduce((n, f) => n + f.bytes.length, 0) > MAX_FILES_BYTES) throw new Error(`nothing was sent: the files are larger than ${MAX_FILES_BYTES >> 20} MiB together, the most one message can carry`)
@@ -2885,6 +3047,8 @@ export class Bridge {
       if (reply === 'refused') refused = true
       if (!reply || reply === 'refused') continue
       peer.lastAddr = addr
+      // 받는 쪽이 지킴이면 답에 그 사실이 실려 온다. 옛 판은 싣지 않는다.
+      if (reply.type === 'ok' || reply.type === 'pong' || reply.type === 'hello_ack') this.noteAway(peer, reply.away)
       return reply
     }
     if (refused) throw new DeliveryError('rejected', `${peer.name} refused the message`)

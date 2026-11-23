@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { isSavedBridge, pathInside, routeId, type SavedBridge } from './bridge'
+import { Bridge, isSavedBridge, pathInside, routeId, type SavedBridge } from './bridge'
 
 // 다시 켠 세션이 되살릴 브릿지 상태는 ~/.coworker/sessions/<이름표>.json 에 있다.
 // 사람이 close_bridge 로 닫을 때만 지운다. 시간이 지났다고 지우지 않는다(사람이 정함, 2026-11-10).
@@ -43,15 +43,22 @@ export async function stillRunning(saved: SavedBridge): Promise<boolean> {
 // stdio 서버가 뜰 때: 이 세션 ID로 저장해 둔 브릿지가 있고, 아무도 쓰고 있지 않으면 되살릴 것으로 돌려준다.
 // Claude Code 가 서버를 다시 띄울 때는 앞 프로세스가 막 끝나는 중일 수 있어서 잠깐 기다린다.
 // 그래도 다른 프로세스가 같은 브릿지를 돌리고 있으면 이 세션은 새 이름표를 쓴다(sessionId 없음).
+// 세션이 닫힌 동안 지킴이(keep.ts)가 이 다리를 쥐고 있었으면, 지킴이에게서 넘겨받는다. 지킴이는 받아 둔 글까지 저장하고 끝난다.
 export async function findSession(home: string, id: string | undefined): Promise<{ sessionId?: string; restore?: SavedBridge }> {
   if (!id) return {}
   const path = savedPath(home, id)
-  const saved = readSaved(path)
+  let saved = readSaved(path)
   if (!saved) return { sessionId: id }
   for (let i = 0; i < 10; i++) {
     // 앞 프로세스가 끝나면서 마지막 상태를 남겼을 수 있으니 다시 읽는다.
     if (!(await stillRunning(saved))) return { sessionId: id, restore: readSaved(path) ?? saved }
+    // 지킴이에게만 넘겨 달라고 한다. 같은 세션 ID로 뜬 다른 서버가 쥔 다리는 건드리지 않는다.
+    if (saved.keptBy && (await Bridge.askToMove(saved, true))) {
+      await waitUntilStopped(saved)
+      return { sessionId: id, restore: readSaved(path) ?? saved }
+    }
     await Bun.sleep(200)
+    saved = readSaved(path) ?? saved
   }
   return {}
 }

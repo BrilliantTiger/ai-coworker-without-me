@@ -1,6 +1,6 @@
 {
   "name": "coworker",
-  "version": "0.12.2",
+  "version": "0.14.0",
   "displayName": "AI Co-worker Without Me",
   "description": "Let coworkers' AI sessions (Claude Code, Codex) ask and answer each other directly over the office network, VPN or a relay.",
   "author": { "name": "BrilliantTiger" },
@@ -20,6 +20,7 @@
         "COWORKER_PORTS": "${user_config.ports}",
         "COWORKER_RELAY": "${user_config.relay}",
         "COWORKER_RELAY_KEY": "${user_config.relay_key}",
+        "COWORKER_VIEWER_ADDRESS": "${user_config.viewer_address}",
         "COWORKER_AUTO_UPDATE": "${user_config.auto_update}"
       }
     }
@@ -34,6 +35,7 @@
             {
               "type": "command",
               "command": "bun --no-install \"${CLAUDE_PLUGIN_ROOT}/coworker.js\" wake",
+              "async": true,
               "asyncRewake": true,
               "timeout": 2147483,
               "rewakeMessage": "From the coworker plugin, after this session restarted:",
@@ -63,6 +65,12 @@
       "title": "Relay key",
       "description": "The key set by whoever runs the relay. Leave empty if there is no relay.",
       "sensitive": true,
+      "default": ""
+    },
+    "viewer_address": {
+      "type": "string",
+      "title": "Viewer address",
+      "description": "Only if you open the conversation view from your other devices: the address of this computer under which they reach it, written out (for example its VPN address), or the word tailscale. A name is not accepted. Whoever has the view's link and can reach that address can read the conversation, make an access key and pin a conversation. Leave empty to open the view on this computer only.",
       "default": ""
     },
     "auto_update": {

@@ -121,7 +121,7 @@ test('the relay image carries every file relay.ts needs', async () => {
   }
   for (const file of needed) {
     expect(dockerfile).toContain(`COPY src/${file} ./${file}`)
-    expect(ignore.split('\n')).toContain(`!src/${file}`)
+    expect(ignore.split(/\r?\n/)).toContain(`!src/${file}`)
   }
 })
 

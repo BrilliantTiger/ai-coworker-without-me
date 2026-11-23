@@ -11,7 +11,20 @@ const root = join(import.meta.dir, '..')
 const pluginDir = join(root, 'plugin')
 const json = (path: string) => JSON.parse(readFileSync(path, 'utf8'))
 const temps: string[] = []
-afterAll(() => temps.forEach(t => rmSync(t, { recursive: true, force: true })))
+// Windows 는 어떤 프로세스의 작업 폴더인 폴더를 지우지 못한다. 막 끝나는 중인 프로세스(서버, 지킴이)가 놓을 때까지 몇 번 다시 해 본다.
+afterAll(async () => {
+  for (const t of temps) {
+    for (let i = 0; ; i++) {
+      try {
+        rmSync(t, { recursive: true, force: true })
+        break
+      } catch (e) {
+        if (i >= 40) throw e
+        await Bun.sleep(250)
+      }
+    }
+  }
+})
 
 test('the plugin folder holds the bundled server and no package install', () => {
   const files = readdirSync(pluginDir)
@@ -25,6 +38,8 @@ test('Claude Code and Codex start the bundle with bun --no-install; the only com
   expect(claude.mcpServers.coworker.args).toEqual(['--no-install', '${CLAUDE_PLUGIN_ROOT}/coworker.js'])
   // hooks 는 둘이다. 하나는 명령 훅이고, 하나는 채팅창 위 띠를 그리는 모듈의 파일이다(아래 시험).
   // 명령 훅은 세션을 다시 켰을 때만, 백그라운드로 돌며(asyncRewake) 그사이 온 소식으로 AI를 깨운다. 다른 명령 훅은 없다(디렉터리판에는 훅이 아예 없다).
+  // async 도 함께 켠다. asyncRewake 만 있으면 한 번 답하고 끝나는 세션(claude -p --resume)에서는 Claude Code 가 이 훅을 백그라운드로 돌리지 않고
+  // 끝나기를 기다린다(2.1.327 에서 확인). 훅은 소식이 올 때까지 기다리므로, 새 소식이 없으면 그 세션이 시작도 못 하고 멈춰 있었다.
   const [hooks, band] = claude.hooks
   expect(claude.hooks).toHaveLength(2)
   expect(band).toBe('./claude/hooks.json')
@@ -32,7 +47,7 @@ test('Claude Code and Codex start the bundle with bun --no-install; the only com
   expect(hooks.SessionStart).toEqual([
     {
       matcher: 'resume',
-      hooks: [expect.objectContaining({ type: 'command', command: 'bun --no-install "${CLAUDE_PLUGIN_ROOT}/coworker.js" wake', asyncRewake: true })],
+      hooks: [expect.objectContaining({ type: 'command', command: 'bun --no-install "${CLAUDE_PLUGIN_ROOT}/coworker.js" wake', async: true, asyncRewake: true })],
     },
   ])
   // 훅의 시간 제한을 밀리초로 바꿔도 타이머가 받는 값 안에 든다.

@@ -856,17 +856,31 @@ function activate(id, byHand) {
     if (top < 60) scrollBy({ top: top - 76, behavior: moving() ? 'smooth' : 'auto' })
   }
 }
+// 세션이 요청을 받지 않은 까닭을 사람이 읽을 말로 바꾼다. 세션이 답했으면 세션이 꺼졌다고 하지 않는다.
+// 화면을 연 주소 때문에 거절됐으면(403), 세션이 알려 준 주소로 다시 열라고 한다.
+const UNREACHED = '세션에 닿지 않습니다. 세션이 켜져 있는지 확인하세요.'
+async function whyNot(res, cannot) {
+  if (res.status === 409) return '브릿지가 닫혀 있어서 만들 수 없습니다. AI에게 「브릿지 열어줘」라고 하세요.'
+  if (res.status === 429) return '잠시 뒤에 다시 눌러 주세요.'
+  if (res.status === 403) {
+    const told = await res.json().catch(() => null)
+    const open = told && Array.isArray(told.open) ? told.open.filter(o => typeof o === 'string') : []
+    if (open.length) return '이 화면을 연 주소(' + location.origin + ')로는 ' + cannot + '. 이 주소로 다시 여세요: ' + open.map(o => o + location.pathname).join(' 또는 ')
+  }
+  return '세션이 이 요청을 받지 않았습니다(응답 ' + res.status + ').'
+}
 // 대화를 맨 위에 고정하거나 푼다. 세션이 기억하고, 바뀐 차례는 세션이 밀어 주는 새 내용으로 그려진다.
 // 읽어 주는 프로그램에는 결과를 한 번만 알린다.
 const said = byId('said')
 async function togglePin(v) {
   const want = !v.pinned
-  let ok = false
+  let ok = false, why = UNREACHED
   try {
     const res = await fetch(location.pathname + '/pin', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ threads: v.threads, pinned: want }) })
     ok = res.ok
+    if (!ok) why = await whyNot(res, '고정을 바꿀 수 없습니다')
   } catch (e) {}
-  said.textContent = !ok ? '고정을 바꾸지 못했습니다. 세션이 켜져 있는지 확인하세요.' : '「' + v.subject.textContent + '」 대화' + (want ? '를 맨 위에 고정했습니다.' : '의 고정을 풀었습니다.')
+  said.textContent = !ok ? why : '「' + v.subject.textContent + '」 대화' + (want ? '를 맨 위에 고정했습니다.' : '의 고정을 풀었습니다.')
 }
 const PIN_PATH = 'M5.5 2h5v1.2l-1 .8v3.2l2 1.8v1H8.6V14L8 15.2 7.4 14v-4H4.5V9l2-1.8V4l-1-.8z'
 
@@ -1258,12 +1272,10 @@ const KEY_KIND = {
   },
 }
 const KEY_ERROR = {
-  closed: '브릿지가 닫혀 있어서 만들 수 없습니다. AI에게 「브릿지 열어줘」라고 하세요.',
-  wait: '잠시 뒤에 다시 눌러 주세요.',
   relay: '중계 서버에 닿지 않아 외부용 접근키를 만들지 못했습니다. 중계 서버가 켜져 있는지, 설정한 주소와 키가 맞는지 확인한 뒤 다시 눌러 주세요. 이 컴퓨터의 주소가 든 다른 코드로 바꾸어 만들지 않았습니다.',
   outside_only: '이 브릿지는 외부용으로만 열려 있어서 동료용 접근키를 만들지 않습니다. 동료용 접근키는 다른 세션에서 만드세요.',
   unsafe: '이 세션의 이름이나 모델 소개에 이 컴퓨터에 관한 정보가 들어 있어서 외부용 접근키를 만들지 않았습니다. AI에게 이름을 바꿔 달라고 하세요.',
-  failed: '접근키를 만들지 못했습니다. 세션이 켜져 있는지 확인하세요.',
+  failed: '접근키를 만들지 못했습니다. 다시 눌러 주세요.',
 }
 // kind 를 주지 않으면: 이 브릿지가 한 가지만 만들 수 있으면 그것을 만들고, 둘 다 만들 수 있으면 사람이 고를 때까지 아무것도 만들지 않는다.
 async function issueKey(name, kind) {
@@ -1287,17 +1299,21 @@ async function issueKey(name, kind) {
   if (!keybox.open) keybox.showModal()
   try {
     const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ kind }) })
-    const made = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(res.status === 409 ? 'closed' : res.status === 429 ? 'wait' : made.error || 'failed')
+    if (!res.ok) {
+      // 만들지 못한 까닭을 세션이 알려 주면 그 말을 쓴다(중계 서버, 외부용 전용, 이름에 든 정보). 그 밖에는 응답 번호로 안다.
+      const told = await res.clone().json().catch(() => null)
+      throw new Error((told && KEY_ERROR[told.error]) || (await whyNot(res, '접근키를 만들 수 없습니다')))
+    }
+    const made = await res.json()
     // 만든 코드의 종류가 고른 것과 다르면 보여 주지 않는다.
-    if (made.kind !== kind) throw new Error('failed')
+    if (made.kind !== kind) throw new Error(KEY_ERROR.failed)
     hasKey = true
     put(keycode, made.code)
     put(byId('keyinfo'), '한 사람만, 한 번만 쓸 수 있습니다. ' + shortTime(made.expires) + '까지 쓸 수 있습니다.')
     fx(keycode, [{ opacity: .2 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' })
   } catch (e) {
     put(keycode, '')
-    put(byId('keyinfo'), KEY_ERROR[e.message] || KEY_ERROR.failed)
+    put(byId('keyinfo'), e instanceof TypeError ? UNREACHED : e.message)
   }
 }
 byId('keygroup').addEventListener('click', () => issueKey(keyFor, 'group'))

@@ -5,7 +5,8 @@ import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { connect as tcp } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { launchAgentPlist, windowsShortcutScript } from '../src/autostart'
 
 // coworker 앱: 이 PC의 여러 세션이 127.0.0.1 의 HTTP 로 한 앱에 붙는다. 디렉터리판 플러그인이 이렇게 붙는다.
@@ -46,7 +47,7 @@ async function startApp(env: Record<string, string> = {}) {
 
 async function session(port: number, name: string, folder?: string) {
   const client = new Client({ name, version: '1.0.0' }, folder ? { capabilities: { roots: {} } } : undefined)
-  if (folder) client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: [{ uri: `file://${folder}`, name: 'project' }] }))
+  if (folder) client.setRequestHandler(ListRootsRequestSchema, async () => ({ roots: [{ uri: pathToFileURL(resolve(folder)).href, name: 'project' }] }))
   const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
   await client.connect(transport)
   clients.push(client)

@@ -5,24 +5,27 @@ import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { autostart } from './autostart'
 import { detectChannel } from './channel'
+import { keep, keepsBridges, reviveKept, startKeeper } from './keep'
 import { findSession, pruneSaved } from './resume'
 import { serve } from './serve'
 import { createSession } from './session'
 import { version } from '../package.json'
 import { wake } from './wake'
 
-// 실행 방법은 다섯이다.
+// 실행 방법은 여섯이다.
 //   bun coworker.js                    Claude Code·Codex 가 플러그인으로 띄우는 stdio MCP 서버. 세션 하나를 맡는다.
 //   bun coworker.js serve              coworker 앱. 이 PC의 여러 세션을 127.0.0.1 의 HTTP 로 받는다. 디렉터리판 플러그인이 여기에 붙는다.
 //   bun coworker.js autostart on|off   로그인할 때 앱을 켤지 정한다.
 //   bun coworker.js wake               Claude Code 세션을 다시 켰을 때 플러그인 훅이 띄운다. 그사이 온 소식으로 AI를 깨운다.
 //   bun coworker.js version            이 파일의 판 번호를 찍는다. 앱이 새 판을 받았을 때 제대로 받았는지 이것으로 본다.
+//   bun coworker.js keep list|stop     세션이 닫힌 동안 지킴이가 쥐고 있는 다리를 보여 주거나 놓는다. 지킴이 자체도 이 명령으로 뜬다(keep.ts).
 const home = process.env.COWORKER_HOME ?? join(homedir(), '.coworker')
 const command = process.argv[2]
 
 if (command === 'serve') await serve({ home })
 else if (command === 'autostart') process.exit(await autostart(process.argv[3], home))
 else if (command === 'wake') process.exit(await wake(home, await Bun.stdin.text()))
+else if (command === 'keep') process.exit(await keep(home, process.argv.slice(3)))
 else if (command === 'version') console.log(version)
 else await stdio()
 
@@ -44,12 +47,17 @@ async function stdio() {
     relay: process.env.COWORKER_RELAY || undefined,
     relayKey: process.env.COWORKER_RELAY_KEY || undefined,
     outsideLimits: outsideLimitsFrom(process.env),
+    viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
     folder: projectFolder,
     folderPath: projectFolderPath,
     sessionId,
     restore,
     autoUpdate: installedAsPlugin(),
+    // 이 프로세스가 멈춰도(세션을 닫음, 강제 종료, 앱 종료 · 업데이트) 다리가 이어지게 지킴이를 세운다.
+    keep: keepsBridges() ? id => startKeeper(home, id) : undefined,
   })
+  // PC를 다시 켠 뒤처럼 지키던 다리를 아무도 쥐고 있지 않으면, 지킴이를 다시 세운다. 이 세션의 다리는 이 세션이 연다.
+  if (keepsBridges()) setTimeout(() => void reviveKept(home, sessionId).catch(() => {}), 2000).unref?.()
   let exiting = false
   const exit = () => {
     if (exiting) return
@@ -61,6 +69,11 @@ async function stdio() {
   process.stdin.on('close', exit)
   process.on('SIGINT', exit)
   process.on('SIGTERM', exit)
+  // 터미널 창을 닫으면 SIGHUP 이 온다. 그때도 마지막 상태를 저장하고 끝낸다.
+  try {
+    process.on('SIGHUP', exit)
+  } catch {}
+  await session.ready
   await session.server.connect(new StdioServerTransport())
 }
 
