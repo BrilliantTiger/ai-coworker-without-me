@@ -8,8 +8,11 @@ AI Co-worker Without Me has no server run by its authors and collects nothing. I
 
 Only when you open a bridge or connect with a code, and only to the sessions you connected (and, with a group code, the rest of that group):
 
-- What your AI sends: questions, the background it attaches, answers, notes that it is asking you, agreements, and your decisions from a question window (the option you picked and anything you wrote there).
-- Your session's name (project folder, Claude Code or Codex, computer name) and the addresses and port in your connection code.
+- What your AI sends: questions, the background it attaches, answers, notices, notes that it is asking you, attached files, agreements, and your decisions from a question window (the option you picked and anything you wrote there).
+- With a group code or a private code: your session's name (project folder, Claude Code or Codex, computer name) and the addresses and port in your connection code.
+- With an outside code (`open_bridge` with `outside: true`): only the relay mailbox URL, public key, one-time token, a mark that it is an outside code, and the checksum in the code, and by default only the AI tool name (`Claude Code` or `Codex`) as your session's name. None of this computer's internal or VPN addresses, `.local` name, `127.0.0.1`, or port is put in the code or sent later. An outside code is always private (the session that joins is neither connected with nor told about any other session, and no other session is told about it, its name or its address; a question to "everyone" does not go to it), travels only through your configured relay, and blocks this computer's name, account name, home folder or paths under it, project folder path, and internal or VPN addresses from leaving in messages, files, agreements or logs towards that peer. The same check covers everything your session says about itself: its name, model and reasoning effort, whether your AI wrote them or they were set from the conversation view.
+- What that check refuses: every address in the private and VPN ranges (`10.x`, `172.16`–`172.31.x`, `192.168.x`, `100.64`–`100.127.x`), also one that is not this computer's (an example in a document, another machine's address), and any text that contains this computer's account name, also when it names an account on another machine. A file goes to an outside session only when it is UTF-8 text that passes the check; text in another encoding (UTF-16 and so on) and files that are not text are refused, because their content cannot be checked.
+- A session that joins with an outside code sends nothing about its machine either: no address and no port of its computer in its greeting (the address list is empty and the port field repeats the relay's port from the code), and as its name only the AI tool name or a name its human chose, also when that session already had a bridge open for colleagues. What it sends afterwards passes the same check. A session on version 0.12 that joins with an outside code still sends its usual name (project folder, tool, computer name), its addresses and its port in its greeting; the maker shows the name as given and drops the addresses and the port without storing them.
 - Which AI tool your session is (Claude Code or Codex), and its model and reasoning effort when known. The sessions you connect to see them.
 
 Messages go straight to the other computer over your office network or VPN. If you set a relay server, they can also pass through that relay, which whoever runs it sets up. Everything is encrypted end to end (NaCl box), so the relay cannot read or change it. The relay sees only a mailbox number, when something passed and how large it was. It holds a request in memory for up to 40 seconds until the other session picks it up and writes nothing to disk.
@@ -17,6 +20,16 @@ Messages go straight to the other computer over your office network or VPN. If y
 Update check: when coworker runs as an installed plugin, it reads the plugin manifest from GitHub (raw.githubusercontent.com, this project's release branch) shortly after it starts and every six hours, to see whether a newer release exists. GitHub sees your IP address, as with any download. Nothing about you or your conversations is sent. If a newer release exists, coworker runs the plugin update command of your app (Claude Code or Codex). Turn this off with the plugin setting Auto update = off, or `COWORKER_AUTO_UPDATE=off`. The coworker app (the `serve` that the directory plugin connects to) reads the same manifest on the same schedule. If a newer release exists, it downloads that release's `coworker.js` from GitHub (github.com, this project's releases) and replaces its own file. Turn this off with `COWORKER_AUTO_UPDATE=off`.
 
 Before anything is sent, values that look like secrets (keys, tokens, passwords) are blocked and nothing goes out.
+
+## What the maker of an outside code learns about the session that joins
+
+- The name it gives: the AI tool name only, or a name its human chose, from a session on this version; the usual name with project folder and computer name from a session on version 0.12.
+- Its AI tool, model and reasoning effort as it states them, and the list of what its version can do.
+- Its public key and the short id made from it, and a token it hands over for rejoining.
+- Everything it sends: questions, background, answers, notices, agreements, and, only if the bridge was opened to take files from outside sessions, files with their names; each with the time it arrived.
+- Nothing else. The addresses and the port that a session puts in its greeting are dropped and not stored, and the maker never sends to an address that session names: the session comes to the maker's relay mailbox and picks up what is for it. The maker therefore does not ask it for its connection log or for the state of its question window. The maker never sees the network address of the session that joins. Whoever runs the relay sees that address, with the times and sizes of what passed, and never the content.
+
+What a session that joined with an outside code may leave on the maker's computer is limited: at most 5 such sessions at a time on one bridge, and from each at most 20 conversations, 200 messages, 64 KiB in one message and 2 MiB in total; more is refused and that session is told why. Its files are refused unless the bridge was opened to take them, and then at most 20 MiB for each session. With these defaults one outside session leaves under 8 MiB on the maker's computer. The numbers are settings (`COWORKER_OUTSIDE_MAX_SESSIONS`, `…_CONVERSATIONS`, `…_MESSAGES`, `…_MESSAGE_KB`, `…_TOTAL_MB`, `…_FILES_MB`).
 
 What you send also reaches the other person's AI session, under the terms of their Claude or Codex account.
 
@@ -46,13 +59,26 @@ AI Co-worker Without Me는 만든 사람이 운영하는 서버가 없고, 아�
 
 브릿지를 열거나 코드로 연결했을 때만, 연결한 세션(그룹 코드면 그 그룹)에만 간다.
 
-- AI가 보내는 것: 질문, 질문에 붙인 배경, 답, 사람에게 확인 중이라는 알림, 합의문, 질문 창에서 내가 정한 것(고른 보기와 거기에 쓴 말).
-- 세션 이름(프로젝트 폴더, Claude Code나 Codex, 컴퓨터 이름)과 연결 코드에 든 주소와 포트.
+- AI가 보내는 것: 질문, 질문에 붙인 배경, 답, 알림, 사람에게 확인 중이라는 알림, 붙여 보낸 파일, 합의문, 질문 창에서 내가 정한 것(고른 보기와 거기에 쓴 말).
+- 그룹 코드·개인용 코드로 이었을 때: 세션 이름(프로젝트 폴더, Claude Code나 Codex, 컴퓨터 이름)과 연결 코드에 든 주소와 포트.
+- 외부용 코드(`open_bridge`의 `outside: true`)로 이었을 때: 코드에는 중계 서버의 우편함 주소, 공개키, 일회용 토큰, 외부용 코드라는 표시, 확인용 글자만 들어가고, 세션 이름은 기본으로 AI 도구 이름(`Claude Code`나 `Codex`)만 나간다. 이 PC의 사내·VPN 주소, `.local` 이름, `127.0.0.1`, 포트는 코드에도 그 뒤의 통신에도 들어가지 않는다. 외부용 코드는 언제나 개인용 코드라서 다른 세션과는 이어지지도 서로 알려 주지도 않으며(이름도 알리지 않고, 「모두에게」 묻는 질문도 가지 않는다), 설정한 중계 서버로만 오가고, 글·파일·합의문·연결 기록에 이 컴퓨터의 이름, 계정 이름, 홈 폴더와 그 아래 경로, 프로젝트 폴더 경로, 사내·VPN 주소가 들어 있으면 보내기 전에 막는다. 이 세션이 자기에 관해 알리는 것(이름, 모델, effort)도 같은 확인을 거친다. AI가 적었든 대화 보기 화면에서 적었든 같다.
+- 그 확인이 막는 것: 사설·VPN 대역의 모든 주소(`10.x`, `172.16`~`172.31.x`, `192.168.x`, `100.64`~`100.127.x`). 이 컴퓨터의 주소가 아니어도(문서의 예시, 다른 컴퓨터의 주소) 막는다. 그리고 이 컴퓨터의 계정 이름이 든 모든 글. 다른 컴퓨터의 계정을 말한 것이어도 막는다. 외부 세션에게 가는 파일은 UTF-8 글이고 이 확인을 통과한 것만 보낸다. 다른 인코딩의 글(UTF-16 등)과 글이 아닌 파일은 내용을 확인할 수 없어서 보내지 않는다.
+- 외부용 코드로 들어가는 세션도 자기 컴퓨터에 관한 것을 보내지 않는다. 인사에 이 컴퓨터의 주소와 포트를 적지 않고(주소 목록은 비우고, 포트 자리에는 코드에 있던 중계 서버의 포트를 그대로 적는다), 이름은 AI 도구 이름이나 사람이 정한 이름만 보낸다. 동료용 브릿지를 이미 열어 둔 세션이어도 같다. 그 뒤에 보내는 것도 같은 확인을 거친다. 0.12 판 세션이 외부용 코드로 들어가면 인사에 평소의 이름(프로젝트 폴더, 도구, 컴퓨터 이름)과 자기 주소·포트를 적어 보낸다. 코드를 만든 쪽은 그 이름은 받은 대로 보이고, 주소와 포트는 저장하지 않고 버린다.
 - 이 세션이 어느 AI 도구인지(Claude Code나 Codex), 그리고 알 수 있으면 모델과 effort. 연결한 세션이 본다.
 
 메시지는 사내망이나 VPN으로 상대 PC에 바로 간다. 중계 서버를 설정했으면 그 서버를 거칠 수도 있다. 중계 서버는 띄운 사람이 마련한다. 모든 내용은 양 끝에서 암호화(NaCl box)하므로 중계 서버는 읽거나 고치지 못한다. 중계 서버가 아는 것은 우편함 번호, 언제 얼마만큼 오갔는지뿐이다. 요청은 상대 세션이 가져갈 때까지 메모리에 최대 40초 두고, 디스크에는 아무것도 쓰지 않는다.
 
 보내기 전에 비밀값으로 보이는 것(열쇠, 토큰, 비밀번호)을 찾으면 막고 아무것도 보내지 않는다.
+
+## 외부용 코드를 만든 쪽이, 그 코드로 들어온 세션에 관해 알게 되는 것
+
+- 그 세션이 알려 주는 이름: 이 판의 세션이면 AI 도구 이름이나 사람이 정한 이름뿐이고, 0.12 판의 세션이면 프로젝트 폴더와 컴퓨터 이름이 든 평소의 이름이다. 어느 쪽이든 한 줄, 80자까지만 두고, 보이지 않는 글자는 빼며 대괄호는 소괄호로 바꾼다. 이 이름은 그 세션이 정한 글일 뿐이어서, 만든 쪽은 그 세션을 이름이 아니라 「외부 세션」 표시와 짧은 ID로 가린다.
+- 그 세션이 적은 대로의 AI 도구, 모델, effort, 그리고 그 판이 할 수 있는 것의 목록.
+- 그 세션의 공개키와 거기서 만든 짧은 ID, 다시 들어올 때 쓰라고 건넨 토큰.
+- 그 세션이 보낸 모든 것: 질문, 배경, 답, 알림, 합의문, 그리고 외부 세션의 파일을 받기로 하고 연 브릿지에서만 파일과 그 이름. 각각 도착한 시각과 함께 남는다.
+- 그 밖에는 없다. 세션이 인사에 적어 보낸 주소와 포트는 버리고 저장하지 않으며, 만든 쪽은 그 세션이 적어 준 어떤 주소로도 보내지 않는다. 그 세션이 만든 쪽의 중계 서버 우편함에 와서 자기 앞으로 온 것을 가져간다. 그래서 만든 쪽은 그 세션에 연결 기록이나 질문 창 상태를 묻지 않는다. 만든 쪽은 들어온 세션의 네트워크 주소를 보지 못한다. 그 주소와 오간 시각·크기는 중계 서버를 운영하는 쪽이 보고, 내용은 보지 못한다.
+
+외부용 코드로 들어온 세션이 만든 쪽 컴퓨터에 남길 수 있는 양에는 한도가 있다. 한 브릿지에 그런 세션은 한 번에 5개까지이고, 세션마다 대화 20개, 글 200개, 글 하나에 64 KiB, 모두 합쳐 2 MiB까지다. 넘으면 받지 않고 그 세션에 까닭을 알린다. 파일은 받기로 하고 연 브릿지에서만 받고, 그때도 세션마다 20 MiB까지다. 이 기본값에서 외부 세션 하나가 만든 쪽 컴퓨터에 남기는 것은 8 MiB를 넘지 않는다. 숫자는 설정으로 바꾼다(`COWORKER_OUTSIDE_MAX_SESSIONS`, `…_CONVERSATIONS`, `…_MESSAGES`, `…_MESSAGE_KB`, `…_TOTAL_MB`, `…_FILES_MB`).
 
 보낸 내용은 상대의 AI 세션에도 들어간다. 그쪽은 상대가 쓰는 Claude나 Codex 계정의 약관을 따른다.
 

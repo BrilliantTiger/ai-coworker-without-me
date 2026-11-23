@@ -47,6 +47,8 @@ const KIND: Record<string, string> = { question: '새 질문', answer: '새 답'
 
 const count = (value: unknown) => (typeof value === 'number' && value > 0 ? Math.floor(value) : 0)
 const word = (value: unknown, max: number) => (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '')
+// 외부용 코드로 이어진 세션은 이름 뒤에 표시를 붙인다. 그 이름은 그쪽이 정한 글이라 동료의 이름과 같을 수도 있다.
+const marked = (name: string, outside: unknown) => (outside === true ? `${name} (외부)` : name)
 const aboutOf = (value: unknown): About => {
   const v = (value ?? {}) as Record<string, unknown>
 
@@ -132,7 +134,7 @@ function fromPage(d: Record<string, unknown>, now: number): Pick<Bridge, 'waitin
     rooms.add(ask && c.startedBy === 'me' ? `ask:${String(ask.id)}` : String(c.id))
     messages += turns.length
     for (const m of turns) {
-      all.push({ id: String(m.id ?? ''), at: String(m.at ?? ''), from: m.from === 'me' ? 'me' : 'peer', peer: word(c.peerName, 80), kind: word(m.kind, 20), text: word(m.text, 400), category: word(c.category, 30), isNotice: m.noAnswer === true, isHuman: m.human === true })
+      all.push({ id: String(m.id ?? ''), at: String(m.at ?? ''), from: m.from === 'me' ? 'me' : 'peer', peer: marked(word(c.peerName, 80), c.outside), kind: word(m.kind, 20), text: word(m.text, 400), category: word(c.category, 30), isNotice: m.noAnswer === true, isHuman: m.human === true })
     }
     if (c.status === 'checking_with_your_human') waiting.yourHuman += 1
     else if (c.status === 'peer_checking_with_their_human') waiting.theirHuman += 1
@@ -160,10 +162,10 @@ async function look($: EngineInterface, api: string, now: number): Promise<Bridg
   const s = status.ok ? JSON.parse(status.text) : undefined
   const url = typeof s?.link === 'string' && /^http:\/\/[\w.:\[\]-]+\/[\w-]+$/.test(s.link) ? s.link : api.replace('//127.0.0.1:', '//localhost:')
   if (s && !s.open) return undefined
-  const links: Link[] = (Array.isArray(s?.links) ? s.links : []).map((l: Record<string, unknown>) => ({ name: word(l?.name, 80), state: l?.state === 'connected' ? 'connected' : 'reconnecting', about: aboutOf(l?.about) }))
+  const links: Link[] = (Array.isArray(s?.links) ? s.links : []).map((l: Record<string, unknown>) => ({ name: marked(word(l?.name, 80), l?.outside), state: l?.state === 'connected' ? 'connected' : 'reconnecting', about: aboutOf(l?.about) }))
 
   if (s && Array.isArray(s.recent)) {
-    const recent: Recent[] = s.recent.map((m: Record<string, unknown>) => ({ id: String(m?.id ?? ''), from: m?.from === 'me' ? 'me' : 'peer', peer: word(m?.peer, 80), kind: word(m?.kind, 20), text: word(m?.text, 400), category: word(m?.category, 30), isNotice: m?.noAnswer === true, isHuman: m?.human === true }))
+    const recent: Recent[] = s.recent.map((m: Record<string, unknown>) => ({ id: String(m?.id ?? ''), from: m?.from === 'me' ? 'me' : 'peer', peer: marked(word(m?.peer, 80), m?.outside), kind: word(m?.kind, 20), text: word(m?.text, 400), category: word(m?.category, 30), isNotice: m?.noAnswer === true, isHuman: m?.human === true }))
 
     return {
       api,

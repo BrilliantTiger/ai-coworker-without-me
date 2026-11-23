@@ -1,4 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { outsideLimitsFrom } from './bridge'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -36,11 +37,16 @@ async function isInitialize(req: Request) {
 }
 
 // 세션 이름에 붙일 프로젝트 폴더. 앱은 세션이 어느 폴더에서 켜졌는지 모르므로, 클라이언트가 알려 주는 폴더(roots)를 쓴다.
-async function rootsFolder(server: McpServer) {
+async function rootsFolderPath(server: McpServer) {
   if (!server.server.getClientCapabilities()?.roots) return undefined
   const { roots } = await server.server.listRoots(undefined, { timeout: 3000 })
   const uri = roots[0]?.uri
-  return uri?.startsWith('file:') ? basename(fileURLToPath(uri)) : undefined
+  return uri?.startsWith('file:') ? fileURLToPath(uri) : undefined
+}
+
+async function rootsFolder(server: McpServer) {
+  const path = await rootsFolderPath(server)
+  return path ? basename(path) : undefined
 }
 
 export async function serve({ home }: { home: string }) {
@@ -86,8 +92,10 @@ export async function serve({ home }: { home: string }) {
       portsText: process.env.COWORKER_PORTS,
       relay: process.env.COWORKER_RELAY || undefined,
       relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+      outsideLimits: outsideLimitsFrom(process.env),
       viewerAddress: process.env.COWORKER_VIEWER_ADDRESS || undefined,
       folder: rootsFolder,
+      folderPath: rootsFolderPath,
       app: updating ? { downloaded: () => downloaded, restartCommand } : undefined,
       // 세션이 닫히거나 앱이 멈춰도 다리가 이어지게 지킴이를 세운다. 새 세션이 「브릿지 이어받아」로 지킴이에게서 넘겨받는다.
       keep: keepsBridges() ? id => startKeeper(home, id) : undefined,

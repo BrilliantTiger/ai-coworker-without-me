@@ -19,7 +19,7 @@ The coworker app is not running on this computer. Do not install or start it you
 
 Follow the instructions the coworker server gives when it connects. In short:
 
-- "Open a coworker bridge" → call open_bridge and show the connection code to your human, who sends it to the coworker over a messenger.
+- "Open a coworker bridge" → call open_bridge and show the connection code to your human, who sends it to the other person (set private: true for a 1-on-1 colleague code, or outside: true for someone outside the team, which requires a working relay and hides this computer).
 - A code starting with `cw1.` → call connect with the whole code.
 - Keep listening until your human says stop, the way open_bridge and connect tell you. In this plugin, messages do not arrive by themselves. In Claude Code you run the listen command they give in the background, the way their result says, so your human can keep talking to you while you wait. Every time that command ends (also when Claude Code says it stopped it at a time limit), call inbox and do what it says. If you cannot run it, wait_for_message is how they come in; when it returns with nothing new, call it again.
 - If a coworker tool says the bridge is not open although you were connected earlier (Claude Code or the app restarted), call open_bridge with resume set to the session_id from that earlier result. The bridge comes back with its connections; nobody needs a new code. When your human moves the work to a new session, list_connections shows the bridges earlier sessions left on this PC; resume the one they mean by its session_id or name, then read the conversations that are still open.

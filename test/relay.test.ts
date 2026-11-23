@@ -1,11 +1,13 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { Server } from 'bun'
+import { connect as tcp, type Socket } from 'node:net'
 import { Bridge, type BridgeEvent } from '../src/bridge'
 import { boxOf, startRelay } from '../src/relay'
 
 // 서로 바로 닿지 않는 두 PC를 흉내 낸다. 각자 주소를 하나도 내놓지 않아서 중계 서버로만 닿는다.
 const servers: Server<undefined>[] = []
 const bridges: Bridge[] = []
+const sockets: Socket[] = []
 let nextPort = 17800
 
 function relay(key?: string) {
@@ -31,6 +33,7 @@ async function next(b: Bridge, type: BridgeEvent['type']) {
 }
 
 afterEach(() => {
+  for (const k of sockets.splice(0)) k.destroy()
   for (const b of bridges.splice(0)) b.shutdown()
   for (const s of servers.splice(0)) s.stop(true)
 })
@@ -170,3 +173,98 @@ test('both sides restart and still find each other through the relay, because ea
   await a2.reply(thread, 'yes')
   expect(await next(b2, 'message')).toMatchObject({ kind: 'answer', text: 'yes' })
 }, 20_000)
+
+test('one sender cannot fill a mailbox: its waiting requests are capped, and another sender still gets in', async () => {
+  const url = relay()
+  const secret = 'owner-secret'
+  const box = boxOf(secret)
+  // 주인이 한 번 다녀가 우편함을 연다. 그 뒤로는 꺼내 가지 않아서 넣은 요청이 그대로 기다린다.
+  await fetch(`${url}/v1/inbox/${box}`, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: '{"wait":0}' })
+  // 프록시 뒤에서는 보낸 쪽을 X-Forwarded-For 로 안다(이 시험의 연결은 루프백에서 온다).
+  const put = (from: string) =>
+    Promise.race([
+      fetch(`${url}/v1/box/${box}`, { method: 'POST', headers: { 'x-forwarded-for': from }, body: '{}' }).then(r => r.status),
+      Bun.sleep(700).then(() => 'waiting' as const),
+    ])
+  const flood: Promise<number | 'waiting'>[] = []
+  for (let i = 0; i < 60; i++) {
+    if (i % 20 === 0) await Bun.sleep(30)
+    flood.push(put('203.0.113.5'))
+  }
+  const results = await Promise.all(flood)
+  expect(results.filter(r => r === 'waiting').length).toBe(50)
+  expect(results.filter(r => r === 503).length).toBe(10)
+  // 다른 보낸 쪽의 요청은 받아서 기다리게 한다.
+  expect(await put('203.0.113.9')).toBe('waiting')
+  // 같은 보낸 쪽은 여전히 거절된다.
+  expect(await put('203.0.113.5')).toBe(503)
+})
+
+// 본문을 늦게 보내는 보낸 쪽을 손으로 만든다. 요청 줄과 본문의 앞 절반만 보내 둔다.
+// answers 에는 중계 서버가 돌려준 답의 첫 줄이, closed 에는 중계 서버가 끊은 연결의 수가 쌓인다.
+function lateBodies(url: string, box: string, n: number) {
+  const answers: string[] = []
+  const state = { closed: 0 }
+  const mine = Array.from({ length: n }, () => {
+    const k = tcp(Number(new URL(url).port), '127.0.0.1')
+    sockets.push(k)
+    k.on('error', () => {})
+    k.on('data', d => answers.push(String(d).split('\r\n')[0]!))
+    k.on('close', () => state.closed++)
+    k.write(`POST /v1/box/${box} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 10\r\n\r\n12345`)
+    return k
+  })
+  return { answers, state, finish: () => mine.forEach(k => k.write('67890')) }
+}
+
+async function until(ok: () => boolean | Promise<boolean>, ms: number) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (await ok()) return true
+    await Bun.sleep(25)
+  }
+  return false
+}
+
+function mailbox(url: string, secret: string) {
+  const box = boxOf(secret)
+  const take = async () => {
+    const res = await fetch(`${url}/v1/inbox/${box}`, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: '{"wait":0}' })
+    return ((await res.json()) as { items: unknown[] }).items
+  }
+  return { box, take }
+}
+
+test('a request counts from the moment it arrives, also while its body is still on the way: late bodies do not pass the share of one sender', async () => {
+  const url = relay()
+  const { box, take } = mailbox(url, 'owner-of-late-bodies')
+  await take()
+  // 한 보낸 쪽이 요청 120개를 열어 두고 본문을 다 보내지 않는다. 그러다 한꺼번에 마저 보낸다.
+  const late = lateBodies(url, box, 120)
+  await Bun.sleep(300)
+  late.finish()
+  // 받아 준 것은 주인이 가져간다: 한 보낸 쪽의 몫인 50개다. 몫을 넘는 70개는 자리가 없다는 답을 받는다.
+  const taken: unknown[] = []
+  await until(async () => taken.push(...(await take())) >= 50, 5000)
+  await until(() => late.answers.length >= 70, 5000)
+  expect(taken.length).toBe(50)
+  expect(late.answers.filter(a => a.includes(' 503 ')).length).toBe(70)
+  expect(late.answers.length).toBe(70)
+}, 20_000)
+
+test('a request whose body does not arrive in time is dropped, and its place is free again', async () => {
+  const server = startRelay({ port: 0, hostname: '127.0.0.1', holdMs: 30_000, bodyMs: 1000 })
+  servers.push(server)
+  const url = `http://127.0.0.1:${server.port}`
+  const { box, take } = mailbox(url, 'owner-of-stalled-bodies')
+  await take()
+  // 한 보낸 쪽이 자기 몫만큼 요청을 열어 두고 본문을 끝내 보내지 않는다.
+  const stalled = lateBodies(url, box, 50)
+  // 중계 서버가 그 연결을 끊는다. 끊는 시각은 몇 초 단위로만 맞는다.
+  expect(await until(() => stalled.state.closed >= 50, 15_000)).toBe(true)
+  expect((await take()).length).toBe(0)
+  // 자리가 다시 났다: 같은 보낸 쪽의 온전한 요청을 받는다.
+  void fetch(`${url}/v1/box/${box}`, { method: 'POST', body: '{}' }).catch(() => {})
+  expect(await until(async () => (await take()).length === 1, 3000)).toBe(true)
+}, 30_000)
+

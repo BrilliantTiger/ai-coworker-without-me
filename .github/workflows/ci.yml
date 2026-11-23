@@ -35,6 +35,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Fetch the v0.12.1 tag
+        # The checkout holds one commit and no tags. test/outside.test.ts starts the released bundle of v0.12.1
+        # (git show v0.12.1:plugin/coworker.js) to check that a session on that version still connects.
+        run: git fetch --no-tags --depth=1 origin +refs/tags/v0.12.1:refs/tags/v0.12.1
       - name: Install bun
         # oven-sh/setup-bun v2.2.0
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6

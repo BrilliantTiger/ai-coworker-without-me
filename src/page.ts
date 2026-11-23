@@ -115,6 +115,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 90px; transition: o
 .peers:empty { display: none; }
 .nopeer { grid-column: 2 / 4; margin: 0; padding-left: 24px; font-size: 13px; color: var(--muted); text-wrap: pretty; }
 .nopeer[hidden] { display: none; }
+#keykinds[hidden], #keycode[hidden], #keycopy[hidden], #keyagain[hidden] { display: none; }
 .sess { position: relative; display: flex; align-items: center; gap: 11px; min-width: 0; padding: 7px 10px; border-radius: 12px; border: 1px solid transparent; background: none; text-align: left; }
 .sess.me { grid-column: 1; padding: 0; gap: 13px; max-width: 280px; }
 button.sess { width: 100%; cursor: pointer; }
@@ -405,6 +406,10 @@ dialog p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
 <dialog id="keybox" aria-labelledby="keytitle">
   <h2 id="keytitle">접근키 (연결 코드)</h2>
   <p id="keyhelp"></p>
+  <div class="row" id="keykinds" hidden>
+    <button class="chip main" id="keygroup" type="button">동료용 접근키 만들기</button>
+    <button class="chip main" id="keyoutside" type="button">외부용 접근키 만들기</button>
+  </div>
   <div class="code" id="keycode" tabindex="0"></div>
   <p id="keyinfo" role="status"></p>
   <div class="row">
@@ -482,6 +487,10 @@ function el(tag, cls, text) {
   if (cls) e.className = cls
   if (text !== undefined) e.textContent = text
   return e
+}
+// 외부용 코드로 이어진 세션은 이름 뒤에 표시를 붙여 보인다. 그 이름은 그쪽이 정한 글이라 동료의 이름과 같을 수도 있다.
+function nameOf(c) {
+  return c.peerName + (c.outside ? ' (외부)' : '')
 }
 function put(node, text) {
   if (node.textContent !== text) node.textContent = text
@@ -641,7 +650,7 @@ const net = (() => {
         else if (WAIT[ph] && !toward.has(c.peer)) toward.set(c.peer, 'back')
       }
       const who = about => (about ? [about.app, about.model, about.effort].filter(Boolean).join(' · ') : '')
-      fill(me, data.me.name, data.me.open ? '이 세션 · 포트 ' + data.me.port : '이 세션 · 브릿지 닫힘', who(data.me.about))
+      fill(me, data.me.name, data.me.open ? (data.me.outside_only ? '이 세션 · 외부용 전용' : '이 세션 · 포트 ' + data.me.port) : '이 세션 · 브릿지 닫힘', who(data.me.about))
       me.node.classList.toggle('closed', !data.me.open)
       for (const l of (data.links || []).slice(0, 16)) {
         const t = tile(l.key, 'peer'), down = l.state !== 'connected'
@@ -650,7 +659,7 @@ const net = (() => {
         t.node.classList.toggle('down', down)
         t.wire.classList.toggle('down', down)
         const state = down ? '다시 붙는 중' : l.via === 'relay' ? '중계로 연결됨' : l.via === 'pickup' ? '상대가 가져가는 중' : '연결됨'
-        fill(t, l.name, [state, who(l.about)].filter(Boolean).join(' · '), '')
+        fill(t, l.name, [l.outside ? '외부 세션' : '', state, who(l.about)].filter(Boolean).join(' · '), '')
       }
       for (const c of (data.connecting || []).slice(0, 4)) {
         const key = ':in:' + c.name, t = tile(key, 'ghost')
@@ -884,7 +893,7 @@ function toast(n) {
   b.type = 'button'
   b.append(
     el('span', 'tk k-' + (n.m.noAnswer ? 'note' : kindOf(n.m.kind)), '새 ' + (n.m.noAnswer ? '알림' : KIND[n.m.kind] ?? n.m.kind)),
-    el('span', 'tw', (n.m.from === 'me' ? '나 → ' + n.c.peerName : n.c.peerName + ' → 나') + (n.c.category ? ' · ' + n.c.category : '')),
+    el('span', 'tw', (n.m.from === 'me' ? '나 → ' + nameOf(n.c) : nameOf(n.c) + ' → 나') + (n.c.category ? ' · ' + n.c.category : '')),
     el('span', 'ts', n.c.subject),
   )
   b.addEventListener('click', () => {
@@ -1005,7 +1014,7 @@ function bubble(c, m, everyone) {
   who.append(el('span', '', m.noAnswer ? '알림 · 답 필요 없음' : KIND[m.kind] ?? m.kind))
   if (m.human) who.append(el('span', 'hum', '사람이 정함'))
   const shared = everyone && m.from === 'me' && m.kind === 'question'
-  who.append(el('span', 'dir', shared ? '나 → ' + everyone.join(', ') : m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'), at)
+  who.append(el('span', 'dir', shared ? '나 → ' + everyone.join(', ') : m.from === 'me' ? '나 → ' + nameOf(c) : nameOf(c) + ' → 나'), at)
   const text = el('div', 'text', m.text)
   b.append(who, text)
   if (m.context) {
@@ -1048,7 +1057,7 @@ const PERSON = { waiting_for_peer: ['wait', '기다리는 중'], no_answer_yet: 
 function paint(v, room, live, index, news) {
   const convs = room.convs, c = convs[0], group = convs.length > 1
   const mine = c.startedBy === 'me', first = c.messages[0]
-  const names = convs.map(one => one.peerName)
+  const names = convs.map(nameOf)
   v.peers = convs.map(one => one.peer)
   v.category = c.category || ''
   put(v.cat, v.category)
@@ -1068,7 +1077,7 @@ function paint(v, room, live, index, news) {
   put(v.isub, c.subject)
   put(v.icat, v.category)
   put(v.iwho, names.join(', '))
-  const where = convs.map(one => one.peerName + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
+  const where = convs.map(one => nameOf(one) + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
   const mode = c.ask ? ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
   const others = c.ask ? (group ? ' ·' + mode : ' · 함께 받은 사람: ' + c.ask.to.join(', ') + mode) : ''
   put(v.meta, (mine ? '받는 쪽: ' : '보낸 쪽: ') + where + (first ? ' · 시작 ' + time(first.at) : '') + others)
@@ -1095,9 +1104,9 @@ function paint(v, room, live, index, news) {
       if (changed && (ph === 'answered' || ph === 'answered_by_me' || ph === 'agreed')) fx(v.tick, [{ strokeDashoffset: 16 }, { strokeDashoffset: 0 }], { duration: 450, delay: 180, easing: 'ease-out', fill: 'backwards' })
     }
   }
-  put(v.tlabel, !WAIT[ph] ? '' : group ? WAIT[ph] + ': ' + pending.map(one => one.peerName).join(', ') : WAIT[ph])
+  put(v.tlabel, !WAIT[ph] ? '' : group ? WAIT[ph] + ': ' + pending.map(nameOf).join(', ') : WAIT[ph])
   // 받은 사람마다 답했는지. 여럿에게 보낸 질문에만 붙는다.
-  const people = group ? convs.map((one, i) => [one.peerName, (PERSON[phases[i]] || ['', PHASE[phases[i]] ?? phases[i]])]) : []
+  const people = group ? convs.map((one, i) => [nameOf(one), (PERSON[phases[i]] || ['', PHASE[phases[i]] ?? phases[i]])]) : []
   const sig = JSON.stringify(people)
   if (v.people.dataset.sig !== sig) {
     v.people.dataset.sig = sig
@@ -1199,10 +1208,10 @@ function applyFilter(byPerson) {
 }
 function syncFilters(groups, links) {
   const seen = new Map()
-  for (const l of links) seen.set(l.key, { name: l.name, n: 0 })
+  for (const l of links) seen.set(l.key, { name: l.name + (l.outside ? ' (외부)' : ''), n: 0 })
   for (const room of groups)
     for (const c of room.convs) {
-      const one = seen.get(c.peer) || { name: c.peerName, n: 0 }
+      const one = seen.get(c.peer) || { name: nameOf(c), n: 0 }
       one.n++
       seen.set(c.peer, one)
     }
@@ -1252,18 +1261,56 @@ function syncCats(groups) {
 // 접근키(연결 코드)를 화면에서 만든다. 사람을 더할 때, 그리고 끊긴 상대가 다시 들어오게 할 때 쓴다.
 const keybox = byId('keybox'), keycode = byId('keycode'), keycopy = byId('keycopy'), issueButton = byId('issue')
 let keyFor = ''
+let keyKind = ''
 let hasKey = false
-async function issueKey(name) {
+// 접근키는 두 가지다. 어느 것을 만들었는지 사람이 알 수 있게 제목과 설명에 적는다.
+// 동료용(그룹 코드)에는 이 컴퓨터의 주소와 이름이 들어 있다. 외부용 코드는 중계 서버로만 이어지고 이 컴퓨터에 관한 것을 담지 않는다.
+const KEY_KIND = {
+  group: {
+    title: '동료용 접근키 (그룹 코드)',
+    help: '함께 일하는 동료에게만 보내세요. 이 코드에는 이 컴퓨터의 사내·VPN 주소와 컴퓨터 이름이 들어 있고, 이 코드로 들어온 세션은 이 그룹의 다른 세션과도 이어집니다. 동료가 자기 AI에게 「이 코드로 연결해줘」라고 하면 이어집니다.',
+  },
+  outside: {
+    title: '외부용 접근키 (외부용 코드)',
+    help: '팀 밖의 사람에게 보내는 코드입니다. 중계 서버로만 이어지고, 이 컴퓨터의 주소·포트·이름은 들어 있지 않습니다. 이 코드로 들어온 세션은 이 세션하고만 이어집니다. 받은 사람이 자기 AI에게 「이 코드로 연결해줘」라고 하면 이어집니다.',
+  },
+}
+const KEY_ERROR = {
+  relay: '중계 서버에 닿지 않아 외부용 접근키를 만들지 못했습니다. 중계 서버가 켜져 있는지, 설정한 주소와 키가 맞는지 확인한 뒤 다시 눌러 주세요. 이 컴퓨터의 주소가 든 다른 코드로 바꾸어 만들지 않았습니다.',
+  outside_only: '이 브릿지는 외부용으로만 열려 있어서 동료용 접근키를 만들지 않습니다. 동료용 접근키는 다른 세션에서 만드세요.',
+  unsafe: '이 세션의 이름이나 모델 소개에 이 컴퓨터에 관한 정보가 들어 있어서 외부용 접근키를 만들지 않았습니다. AI에게 이름을 바꿔 달라고 하세요.',
+  failed: '접근키를 만들지 못했습니다. 다시 눌러 주세요.',
+}
+// kind 를 주지 않으면: 이 브릿지가 한 가지만 만들 수 있으면 그것을 만들고, 둘 다 만들 수 있으면 사람이 고를 때까지 아무것도 만들지 않는다.
+async function issueKey(name, kind) {
   keyFor = name
   hasKey = false
-  put(byId('keyhelp'), name ? name + ' 쪽에 이 접근키를 다시 보내세요. 그쪽 AI가 이 코드로 다시 연결하면 이어집니다.' : '함께할 동료에게 이 접근키를 보내세요. 동료가 자기 AI에게 「이 코드로 연결해줘」라고 하면 이어집니다.')
-  put(keycode, '만드는 중…')
+  const kinds = (lastData && lastData.me && lastData.me.codes) || ['group']
+  if (!kind && kinds.length === 1) kind = kinds[0]
+  keyKind = kind || ''
+  byId('keykinds').hidden = !!kind
+  byId('keycopy').hidden = byId('keyagain').hidden = keycode.hidden = !kind
   put(byId('keyinfo'), '')
+  if (!kind) {
+    put(byId('keytitle'), '접근키 (연결 코드)')
+    put(byId('keyhelp'), '어떤 접근키를 만들지 고르세요. 동료용에는 이 컴퓨터의 사내·VPN 주소와 이름이 들어가고, 외부용은 중계 서버로만 이어지며 이 컴퓨터에 관한 것을 담지 않습니다. 고르기 전에는 아무 코드도 만들지 않습니다.')
+    if (!keybox.open) keybox.showModal()
+    return
+  }
+  put(byId('keytitle'), KEY_KIND[kind].title)
+  put(byId('keyhelp'), (name ? name + ' 쪽에 이 접근키를 다시 보내세요. ' : '') + KEY_KIND[kind].help)
+  put(keycode, '만드는 중…')
   if (!keybox.open) keybox.showModal()
   try {
-    const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1' } })
-    if (!res.ok) throw new Error(await whyNot(res, '접근키를 만들 수 없습니다'))
+    const res = await fetch(location.pathname + '/code', { method: 'POST', headers: { 'x-coworker-viewer': '1', 'content-type': 'application/json' }, body: JSON.stringify({ kind }) })
+    if (!res.ok) {
+      // 만들지 못한 까닭을 세션이 알려 주면 그 말을 쓴다(중계 서버, 외부용 전용, 이름에 든 정보). 그 밖에는 응답 번호로 안다.
+      const told = await res.clone().json().catch(() => null)
+      throw new Error((told && KEY_ERROR[told.error]) || (await whyNot(res, '접근키를 만들 수 없습니다')))
+    }
     const made = await res.json()
+    // 만든 코드의 종류가 고른 것과 다르면 보여 주지 않는다.
+    if (made.kind !== kind) throw new Error(KEY_ERROR.failed)
     hasKey = true
     put(keycode, made.code)
     put(byId('keyinfo'), '한 사람만, 한 번만 쓸 수 있습니다. ' + shortTime(made.expires) + '까지 쓸 수 있습니다.')
@@ -1273,8 +1320,10 @@ async function issueKey(name) {
     put(byId('keyinfo'), e instanceof TypeError ? UNREACHED : e.message)
   }
 }
+byId('keygroup').addEventListener('click', () => issueKey(keyFor, 'group'))
+byId('keyoutside').addEventListener('click', () => issueKey(keyFor, 'outside'))
 issueButton.addEventListener('click', () => issueKey(''))
-byId('keyagain').addEventListener('click', () => issueKey(keyFor))
+byId('keyagain').addEventListener('click', () => issueKey(keyFor, keyKind))
 byId('keyclose').addEventListener('click', () => keybox.close())
 keybox.addEventListener('click', e => {
   if (e.target === keybox) keybox.close()
@@ -1305,7 +1354,7 @@ function syncDowns(links) {
       put(timer, l.since ? clock(Date.now() - Date.parse(l.since)) : '')
       text.append(l.name + '에 닿지 않습니다. 스스로 다시 붙는 중 · ', timer)
       again.type = 'button'
-      again.addEventListener('click', () => issueKey(l.name))
+      again.addEventListener('click', () => issueKey(l.name, l.outside ? 'outside' : 'group'))
       row.append(text, again)
       return row
     }),
