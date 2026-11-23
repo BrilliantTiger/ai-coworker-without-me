@@ -525,3 +525,45 @@ test('an agreement from a session whose key text is not in the usual form is sav
   expect(shown.file).toBeUndefined()
   expect(shown.not_saved).toMatch(/not be saved|could not be saved/)
 }, 20_000)
+
+test('a bridge for outside sessions that a keeper opens again listens where it listened before, and the keeper opens no other port when that one is held', async () => {
+  const relayUrl = relay()
+  const opts = options(relayUrl)
+  const maker = new Bridge({ name: 'Claude Code', outsideName: 'Claude Code', outsideOnly: true, ...opts })
+  bridges.push(maker)
+  maker.open(undefined, { outsideOnly: true })
+  expect(await maker.relayReady(3000)).toBe('ok')
+  expect((await hand('stranger-one').join(maker.newCode({ outside: true }))).payload.type).toBe('hello_ack')
+  const port = maker.port
+  // 운영체제가 고른 번호다. 방화벽에 열어 둔 범위의 번호가 아니다.
+  expect(port < opts.ports[0] || port > opts.ports[1]).toBe(true)
+  const saved = JSON.parse(JSON.stringify(maker.snapshot()))
+  maker.shutdown()
+
+  // 세션이 죽은 뒤 지킴이가 이어 연다: 쓰던 번호 그대로, 외부용 전용 그대로.
+  const kept = Bridge.restore(saved, { ...opts, keeper: true })
+  bridges.push(kept)
+  expect(kept.port).toBe(port)
+  expect(kept.isOutsideOnly).toBe(true)
+
+  // 그 번호를 다른 프로세스가 쥐고 있으면(여기서는 방금 연 지킴이), 지킴이는 다른 번호를 열지 않고 물러난다.
+  // 그래야 한 다리를 두 프로세스가 함께 쥐지 않는다.
+  let second: Bridge | undefined
+  let why = ''
+  try {
+    second = Bridge.restore(saved, { ...opts, keeper: true })
+    bridges.push(second)
+  } catch (e) {
+    why = String((e as Error).message)
+  }
+  expect(second).toBeUndefined()
+  expect(why).toContain(String(port))
+
+  // 세션이 다시 켜질 때는 그 번호가 막혀 있어도 열린다: 운영체제가 고른 다른 번호로, 이 PC 안에서만.
+  const session = Bridge.restore(saved, opts)
+  bridges.push(session)
+  expect(session.port).not.toBe(port)
+  expect(session.port < opts.ports[0] || session.port > opts.ports[1]).toBe(true)
+  expect(session.isOutsideOnly).toBe(true)
+})
+
