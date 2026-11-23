@@ -488,6 +488,10 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text
   return e
 }
+// 외부용 코드로 이어진 세션은 이름 뒤에 표시를 붙여 보인다. 그 이름은 그쪽이 정한 글이라 동료의 이름과 같을 수도 있다.
+function nameOf(c) {
+  return c.peerName + (c.outside ? ' (외부)' : '')
+}
 function put(node, text) {
   if (node.textContent !== text) node.textContent = text
 }
@@ -655,7 +659,7 @@ const net = (() => {
         t.node.classList.toggle('down', down)
         t.wire.classList.toggle('down', down)
         const state = down ? '다시 붙는 중' : l.via === 'relay' ? '중계로 연결됨' : l.via === 'pickup' ? '상대가 가져가는 중' : '연결됨'
-        fill(t, l.name, [state, who(l.about)].filter(Boolean).join(' · '), '')
+        fill(t, l.name, [l.outside ? '외부 세션' : '', state, who(l.about)].filter(Boolean).join(' · '), '')
       }
       for (const c of (data.connecting || []).slice(0, 4)) {
         const key = ':in:' + c.name, t = tile(key, 'ghost')
@@ -889,7 +893,7 @@ function toast(n) {
   b.type = 'button'
   b.append(
     el('span', 'tk k-' + (n.m.noAnswer ? 'note' : kindOf(n.m.kind)), '새 ' + (n.m.noAnswer ? '알림' : KIND[n.m.kind] ?? n.m.kind)),
-    el('span', 'tw', (n.m.from === 'me' ? '나 → ' + n.c.peerName : n.c.peerName + ' → 나') + (n.c.category ? ' · ' + n.c.category : '')),
+    el('span', 'tw', (n.m.from === 'me' ? '나 → ' + nameOf(n.c) : nameOf(n.c) + ' → 나') + (n.c.category ? ' · ' + n.c.category : '')),
     el('span', 'ts', n.c.subject),
   )
   b.addEventListener('click', () => {
@@ -1010,7 +1014,7 @@ function bubble(c, m, everyone) {
   who.append(el('span', '', m.noAnswer ? '알림 · 답 필요 없음' : KIND[m.kind] ?? m.kind))
   if (m.human) who.append(el('span', 'hum', '사람이 정함'))
   const shared = everyone && m.from === 'me' && m.kind === 'question'
-  who.append(el('span', 'dir', shared ? '나 → ' + everyone.join(', ') : m.from === 'me' ? '나 → ' + c.peerName : c.peerName + ' → 나'), at)
+  who.append(el('span', 'dir', shared ? '나 → ' + everyone.join(', ') : m.from === 'me' ? '나 → ' + nameOf(c) : nameOf(c) + ' → 나'), at)
   const text = el('div', 'text', m.text)
   b.append(who, text)
   if (m.context) {
@@ -1053,7 +1057,7 @@ const PERSON = { waiting_for_peer: ['wait', '기다리는 중'], no_answer_yet: 
 function paint(v, room, live, index, news) {
   const convs = room.convs, c = convs[0], group = convs.length > 1
   const mine = c.startedBy === 'me', first = c.messages[0]
-  const names = convs.map(one => one.peerName)
+  const names = convs.map(nameOf)
   v.peers = convs.map(one => one.peer)
   v.category = c.category || ''
   put(v.cat, v.category)
@@ -1073,7 +1077,7 @@ function paint(v, room, live, index, news) {
   put(v.isub, c.subject)
   put(v.icat, v.category)
   put(v.iwho, names.join(', '))
-  const where = convs.map(one => one.peerName + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
+  const where = convs.map(one => nameOf(one) + (one.peerAddr ? ' (' + one.peerAddr + ')' : '')).join(', ')
   const mode = c.ask ? ' (' + (ANSWERS[c.ask.answers] ?? c.ask.answers) + ')' : ''
   const others = c.ask ? (group ? ' ·' + mode : ' · 함께 받은 사람: ' + c.ask.to.join(', ') + mode) : ''
   put(v.meta, (mine ? '받는 쪽: ' : '보낸 쪽: ') + where + (first ? ' · 시작 ' + time(first.at) : '') + others)
@@ -1100,9 +1104,9 @@ function paint(v, room, live, index, news) {
       if (changed && (ph === 'answered' || ph === 'answered_by_me' || ph === 'agreed')) fx(v.tick, [{ strokeDashoffset: 16 }, { strokeDashoffset: 0 }], { duration: 450, delay: 180, easing: 'ease-out', fill: 'backwards' })
     }
   }
-  put(v.tlabel, !WAIT[ph] ? '' : group ? WAIT[ph] + ': ' + pending.map(one => one.peerName).join(', ') : WAIT[ph])
+  put(v.tlabel, !WAIT[ph] ? '' : group ? WAIT[ph] + ': ' + pending.map(nameOf).join(', ') : WAIT[ph])
   // 받은 사람마다 답했는지. 여럿에게 보낸 질문에만 붙는다.
-  const people = group ? convs.map((one, i) => [one.peerName, (PERSON[phases[i]] || ['', PHASE[phases[i]] ?? phases[i]])]) : []
+  const people = group ? convs.map((one, i) => [nameOf(one), (PERSON[phases[i]] || ['', PHASE[phases[i]] ?? phases[i]])]) : []
   const sig = JSON.stringify(people)
   if (v.people.dataset.sig !== sig) {
     v.people.dataset.sig = sig
@@ -1204,10 +1208,10 @@ function applyFilter(byPerson) {
 }
 function syncFilters(groups, links) {
   const seen = new Map()
-  for (const l of links) seen.set(l.key, { name: l.name, n: 0 })
+  for (const l of links) seen.set(l.key, { name: l.name + (l.outside ? ' (외부)' : ''), n: 0 })
   for (const room of groups)
     for (const c of room.convs) {
-      const one = seen.get(c.peer) || { name: c.peerName, n: 0 }
+      const one = seen.get(c.peer) || { name: nameOf(c), n: 0 }
       one.n++
       seen.set(c.peer, one)
     }

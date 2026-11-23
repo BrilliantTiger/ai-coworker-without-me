@@ -204,12 +204,12 @@ export class Viewer {
     const counts = { conversations: new Set(threads.map(t => (t.ask && t.startedBy === 'me' ? `ask:${t.ask.id}` : t.id))).size, messages: threads.reduce((n, t) => n + t.messages.length, 0) }
     // 가장 최근에 오간 글 몇 개. 띠가 새로 받은 질문과 답을 펼쳐 보인다(2026-11-17). 글은 앞부분만 준다.
     const recent = threads
-      .flatMap(t => t.messages.map(m => ({ id: m.id, thread: t.id, at: m.at, from: m.from, peer: t.peerName, kind: m.kind, text: m.text.slice(0, RECENT_TEXT), category: t.category, noAnswer: m.noAnswer || undefined, human: m.human || undefined })))
+      .flatMap(t => t.messages.map(m => ({ id: m.id, thread: t.id, at: m.at, from: m.from, peer: t.peerName, kind: m.kind, text: m.text.slice(0, RECENT_TEXT), category: t.category, noAnswer: m.noAnswer || undefined, human: m.human || undefined, outside: t.outside || undefined })))
       .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
       .slice(-RECENT)
     // 정한 주소에서 열려 있으면 띠가 사람에게 보일 링크도 함께 준다.
     const link = this.outsideHost() ? { link: this.url } : {}
-    return { name: me.name, about: me.about, open: me.open, ...link, links: this.bridge.links().map(l => ({ name: l.name, state: l.state, about: l.about })), connecting: this.bridge.connecting().length, waiting, counts, recent }
+    return { name: me.name, about: me.about, open: me.open, ...link, links: this.bridge.links().map(l => ({ name: l.name, state: l.state, about: l.about, outside: l.outside })), connecting: this.bridge.connecting().length, waiting, counts, recent }
   }
 
   // 이 화면(또는 이 PC의 채팅창 위 띠)에서 온 요청인지. 표시 헤더가 있어야 하고, 브라우저가 알려 주는 출처가 이 화면이어야 한다.

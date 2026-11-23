@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
-import { Bridge, parsePorts, pathInside, routeId, type SavedBridge } from './bridge'
+import { Bridge, outsideLimitsFrom, parsePorts, pathInside, routeId, type SavedBridge } from './bridge'
 import { LinkLog } from './linklog'
 import { osNotify } from './notify'
 import { listSaved, readSaved, savedPath, stillRunning, waitUntilStopped } from './resume'
@@ -199,6 +199,7 @@ async function guard(home: string, id: string): Promise<number> {
         ports: parsePorts(process.env.COWORKER_PORTS),
         relay: process.env.COWORKER_RELAY || undefined,
         relayKey: process.env.COWORKER_RELAY_KEY || undefined,
+        outsideLimits: outsideLimitsFrom(process.env),
         saveTo: path,
         nudgeMs: Number(process.env.COWORKER_NUDGE_MS) || undefined,
         tickMs: Number(process.env.COWORKER_TICK_MS) || undefined,

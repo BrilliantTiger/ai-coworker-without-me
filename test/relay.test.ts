@@ -253,7 +253,7 @@ test('a request counts from the moment it arrives, also while its body is still 
 }, 20_000)
 
 test('a request whose body does not arrive in time is dropped, and its place is free again', async () => {
-  const server = startRelay({ port: 0, hostname: '127.0.0.1', holdMs: 30_000, bodyMs: 1000 } as Parameters<typeof startRelay>[0])
+  const server = startRelay({ port: 0, hostname: '127.0.0.1', holdMs: 30_000, bodyMs: 1000 })
   servers.push(server)
   const url = `http://127.0.0.1:${server.port}`
   const { box, take } = mailbox(url, 'owner-of-stalled-bodies')

@@ -24,10 +24,13 @@ export type RelayOptions = {
   holdMs?: number
   // 우편함 주인이 이 시간 안에 다녀가지 않으면 없는 우편함으로 본다.
   aliveMs?: number
+  // 요청의 본문이 다 오기까지 기다리는 시간. 초 단위로 올려 쓰고, 끊는 시각은 몇 초 단위로만 맞는다.
+  bodyMs?: number
 }
 
 type Request_ = { id: string; body: string; source: string; reply: (status: number, body: string) => void }
-type Box = { queue: Request_[]; waiting: Map<string, Request_>; lastSeen: number; wake?: () => void }
+// arriving: 본문이 아직 오는 중인 요청의 수. 보낸 쪽마다 센다.
+type Box = { queue: Request_[]; waiting: Map<string, Request_>; arriving: Map<string, number>; lastSeen: number; wake?: () => void }
 
 const MAX_BODY = 1 << 20
 const MAX_QUEUE = 200
@@ -38,10 +41,13 @@ const MAX_PER_SOURCE = 50
 const LOCAL_SOURCE = /^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|::1$|f[cd][0-9a-f]{2}:|fe80:)/i
 const MAX_BOXES = 10_000
 const MAX_INBOX_WAIT = 25_000
+// 요청의 본문은 이 시간 안에 다 와야 한다.
+const MAX_BODY_WAIT = 10_000
 
 export function startRelay(options: RelayOptions = {}): Server<undefined> {
   const holdMs = options.holdMs ?? 40_000
   const aliveMs = options.aliveMs ?? 60_000
+  const bodySeconds = Math.max(1, Math.ceil((options.bodyMs ?? MAX_BODY_WAIT) / 1000))
   const boxes = new Map<string, Box>()
   const key = options.key ? Buffer.from(options.key) : undefined
   let seq = 0
@@ -88,16 +94,35 @@ export function startRelay(options: RelayOptions = {}): Server<undefined> {
 
       // 보내는 쪽: 상대 우편함에 넣고 답을 기다린다.
       if (action === 'box') {
+        // 본문은 정한 시간 안에 다 와야 한다. 그동안 조용한 연결은 끊는다. 받아 주지 않은 요청의 연결도 같다.
+        server.timeout(req, bodySeconds)
         const box = boxes.get(id)
         if (!box || Date.now() - box.lastSeen > aliveMs) return text(404, 'no such session')
-        // 꺼내 가서 답을 기다리는 것까지 센다. 그러지 않으면 우편함 번호를 아는 쪽이 계속 밀어 넣어 메모리를 채울 수 있다.
-        if (box.queue.length + box.waiting.size >= MAX_QUEUE) return text(503, 'that session has too many waiting requests')
+        // 꺼내 가서 답을 기다리는 것과, 본문이 아직 오는 중인 것까지 센다. 그러지 않으면 우편함 번호를 아는 쪽이 계속 밀어 넣어 메모리를 채울 수 있다.
+        // 요청은 온 때부터 센다. 본문이 다 온 때부터 세면, 본문을 늦게 보내는 요청들이 상한을 지나간다.
+        let arriving = 0
+        for (const n of box.arriving.values()) arriving += n
+        if (box.queue.length + box.waiting.size + arriving >= MAX_QUEUE) return text(503, 'that session has too many waiting requests')
         const source = sourceOf(req, server)
-        let mine = 0
+        const coming = box.arriving.get(source) ?? 0
+        let mine = coming
         for (const q of box.queue) if (q.source === source) mine++
         for (const q of box.waiting.values()) if (q.source === source) mine++
         if (mine >= MAX_PER_SOURCE) return text(503, 'too many waiting requests from one sender for that session')
-        const body = await req.text()
+        box.arriving.set(source, coming + 1)
+        let body: string
+        try {
+          body = await req.text()
+        } catch {
+          // 본문이 다 오지 않았다: 보낸 쪽이 끊었거나, 기다리는 시간이 지나 이쪽이 끊었다.
+          return text(408, 'the request body did not arrive')
+        } finally {
+          const left = (box.arriving.get(source) ?? 1) - 1
+          if (left > 0) box.arriving.set(source, left)
+          else box.arriving.delete(source)
+        }
+        // 본문을 다 받았다. 이제부터는 주인이 답할 때까지 조용히 기다리는 연결이므로 시간으로 끊지 않는다.
+        server.timeout(req, 0)
         if (body.length > MAX_BODY) return text(413, 'too large')
         return await new Promise<Response>(resolve => {
           const r: Request_ = {
@@ -123,7 +148,7 @@ export function startRelay(options: RelayOptions = {}): Server<undefined> {
       let box = boxes.get(id)
       if (!box) {
         if (boxes.size >= MAX_BOXES) return text(503, 'relay is full')
-        box = { queue: [], waiting: new Map(), lastSeen: Date.now() }
+        box = { queue: [], waiting: new Map(), arriving: new Map(), lastSeen: Date.now() }
         boxes.set(id, box)
       }
       box.lastSeen = Date.now()

@@ -30,7 +30,10 @@ export function parsePorts(text: string | undefined): [number, number] {
 export const routeId = (key: string) => Buffer.from(key, 'base64').toString('base64url').slice(0, 16)
 // 연결된 세션마다 붙는 짧은 ID. 이름이 같은 세션이 여럿일 때 하나를 집어 부를 수 있다.
 export const peerId = (key: string) => routeId(key).slice(0, 6)
-const labelOf = (p: { key: string; name: string }) => `${p.name} [${peerId(p.key)}]`
+// 외부용 코드로 이어진 세션은 이름 뒤에 (outside) 를 붙여 보인다. 그 이름은 그쪽이 정한 글이라 동료의 이름과 같을 수도 있다. ID는 늘 맨 끝에 둔다.
+const labelOf = (p: { key: string; name: string; outside?: boolean }) => `${p.name}${p.outside ? ' (outside)' : ''} [${peerId(p.key)}]`
+// 소식에 붙이는 표시. 외부용 코드로 이어진 세션에 관한 소식이다.
+const outsideMark = (p: { outside?: boolean } | undefined) => (p?.outside ? { outside: true as const } : {})
 const CLOCK_FIX =
   "Messages are kept and sent once the clocks agree. Turn on automatic date and time on this PC and ask the coworker to do the same (macOS: System Settings > General > Date & Time; Windows: Settings > Time & language > Date & time > Set time automatically)."
 const isLoopback = (addr: string) => addr.startsWith('127.') || addr === '::1' || addr === 'localhost'
@@ -265,6 +268,8 @@ export type Thread = {
   id: string
   peer: string
   peerName: string
+  // 외부용 코드로 이어진 세션과의 대화다. 그 세션이 떠난 뒤에도 표시가 남는다.
+  outside?: boolean
   peerAddr?: string
   subject: string
   startedBy: 'me' | 'peer'
@@ -303,11 +308,14 @@ export type AskProgress = { id: string; answers: AnswerMode; asked: string[]; an
 export type BridgeEvent =
   // again: 이미 이어져 있던 상대가 다시 켜져 돌아왔다.
   // about: 그 세션이 어느 AI 도구이고 무슨 모델을 어떤 강도로 쓰는지. 상대가 알려 준 만큼만 있다.
-  | { type: 'connected'; peer: string; via?: string; again?: boolean; about?: About; at: string }
+  // outside: 외부용 코드로 이어진 세션이다. 그 세션의 이름은 그쪽이 정한 글이라 동료의 이름과 같을 수도 있다. 이름이 아니라 이 표시로 가린다.
+  | { type: 'connected'; peer: string; via?: string; again?: boolean; about?: About; outside?: boolean; at: string }
   | {
       type: 'message'
       thread: string
       from: string
+      // 외부용 코드로 이어진 세션이 보냈다.
+      outside?: boolean
       kind: MessageKind
       text: string
       context?: string
@@ -327,7 +335,7 @@ export type BridgeEvent =
       files?: { name: string; size: number; sha256: string; saved_to?: string; verified: boolean; problem?: string }[]
       at: string
     }
-  | { type: 'peer_closed'; peer: string; at: string }
+  | { type: 'peer_closed'; peer: string; outside?: boolean; at: string }
   // 상대의 AI 세션이 닫혀 있다(연결은 그대로다). 그 PC의 지킴이가 글을 받아 두고, 세션이 다시 열리면 그쪽 AI가 읽는다.
   | { type: 'peer_session_closed'; peer: string; since: string; at: string }
   | { type: 'undelivered'; to: string; thread?: string; reason: string; at: string }
@@ -616,6 +624,22 @@ const counted = (t: Thread) => t.messages.filter(m => m.kind === 'question' || m
 const memberOf = (p: Peer): Member => ({ key: p.key, name: p.name, addrs: p.addrs, port: p.port })
 // 상대가 알려 준 이름과 주소. 이름은 화면과 AI에게 그대로 가므로 길이를 자르고, 주소는 몇 개까지만 받는다.
 const MAX_NAME = 200
+// 외부용 코드로 이어진 세션의 이름은 그쪽이 정한 글이다. 사람과 AI에게 한 줄로, 80자까지만 보인다.
+// 보이지 않는 글자와 글 방향을 바꾸는 글자는 빼고, 줄바꿈 같은 제어 글자와 여러 빈칸은 빈칸 하나로 줄이고, 대괄호는 소괄호로 바꾼다: 대괄호는 이쪽이 세션의 ID를 적는 자리다.
+const MAX_OUTSIDE_NAME = 80
+export const cleanOutsideName = (name: unknown) =>
+  Array.from(
+    (typeof name === 'string' ? name : '')
+      .normalize('NFKC')
+      .replace(/[\p{Cf}\p{Co}\p{Cs}\p{Cn}\u115f\u1160\u2800\u3164\uffa0]/gu, '')
+      .replace(/\[/g, '(')
+      .replace(/\]/g, ')')
+      .replace(/[\p{Cc}\s]+/gu, ' ')
+      .trim(),
+  )
+    .slice(0, MAX_OUTSIDE_NAME)
+    .join('')
+    .trim() || 'outside session'
 const MAX_ADDRS = 32
 const isHelloFields = (p: { name?: unknown; addrs?: unknown; port?: unknown }) =>
   typeof p.name === 'string' &&
@@ -848,7 +872,7 @@ export class Bridge {
     for (const q of saved.asking ?? []) if (q && isThreadId(q.thread)) b.asking.set(q.thread, q)
     if (options.keeper) b.awaySince = now()
     try {
-      b.open(saved.port, { outsideOnly: b.outsideOnly })
+      b.open(saved.port, { outsideOnly: b.outsideOnly, same: true })
     } catch (e) {
       // 지킴이는 쓰던 포트로만 연다. 새 포트를 열지 않는다. 그 포트를 못 열면 다른 프로세스가 이 다리를 쥐고 있는 것이다.
       if (options.keeper) throw e
@@ -995,6 +1019,12 @@ export class Bridge {
     return peer?.outside && !peer.host && !this.outsideFiles ? CAN.filter(c => c !== 'files') : CAN
   }
 
+  // 이 키의 짧은 ID가 이 다리의 ID나, 이미 이어진 다른 세션의 ID와 같은지.
+  private shortIdTaken(key: string) {
+    const id = peerId(key)
+    return id === peerId(this.key) || [...this.peers.keys()].some(k => k !== key && peerId(k) === id)
+  }
+
   // 이쪽이 만든 외부용 코드로 들어와 있는 세션.
   private joinedOutside() {
     return [...this.peers.values()].filter(p => p.outside && !p.host)
@@ -1044,7 +1074,8 @@ export class Bridge {
   }
 
   // 포트를 열고 받기 시작한다. 포트를 지정하지 않으면 정해 둔 범위에서 비어 있는 번호를 쓴다.
-  open(port?: number, options?: { outsideOnly?: boolean }) {
+  // same: 다시 켜는 것이다. port 는 이 다리가 전에 쓰던 번호다.
+  open(port?: number, options?: { outsideOnly?: boolean; same?: boolean }) {
     if (this.server) {
       // 외부용으로만 연 브릿지는 닫을 때까지 그대로다. 열려 있는 동안에는 어떤 요청으로도 사내망에서 받게 바꾸지 않는다.
       if (options?.outsideOnly === false && this.outsideOnly) throw new Error(OUTSIDE_ONLY)
@@ -1057,7 +1088,10 @@ export class Bridge {
       // 외부용으로만 여는 브릿지는 이 PC 안에서만 받는다(같은 PC의 다른 세션이 이어받을 때만 쓴다). 방화벽에 열어 둔 범위의 번호를 쓸 까닭이 없다.
       // 그 범위의 번호는 같은 PC의 다른 브릿지가 모든 주소로 받고 있어도 127.0.0.1 로는 또 열려서, 그 브릿지로 가던 같은 PC 연결을 가로챈다.
       // 그래서 정해 준 번호와 범위를 쓰지 않고 운영체제가 비어 있는 번호를 고르게 한다. 이 번호는 코드에도 인사에도 들어가지 않는다.
-      if (!this.listen(0, bindHost)) throw new Error('cannot listen on this computer (127.0.0.1)')
+      // 다시 켤 때만은 쓰던 번호(전에 운영체제가 골라 준 것)를 먼저 연다. 지킴이와 다시 켠 세션이 같은 번호를 두고 다투어야 한쪽만 이 다리를 쥔다.
+      if (options?.same && port) {
+        if (!this.listen(port, bindHost)) throw new Error(`port ${port} is already in use`)
+      } else if (!this.listen(0, bindHost)) throw new Error('cannot listen on this computer (127.0.0.1)')
     } else if (port) {
       if (!this.listen(port, bindHost)) throw new Error(`port ${port} is already in use; pick another port or leave it empty`)
     } else {
@@ -1130,6 +1164,11 @@ export class Bridge {
     const outside = isOutsideCode(code)
     if (this.server && this.outsideOnly && !outside) throw new Error(OUTSIDE_ONLY)
     if (outside) this.assertOutsideSafe({ name: this.outsideName ?? this.nameFor(true), ...this.about })
+    // 코드를 만든 세션의 짧은 ID가 이미 이어진 세션의 것과 같으면 잇지 않는다. 이으면 그 ID가 두 세션을 가리킨다.
+    if (outside && !this.peers.has(code.key) && this.shortIdTaken(code.key))
+      throw new Error(
+        `cannot connect: the short id made from the key in that code ([${peerId(code.key)}]) is already the id of a session connected here, so the two could not be told apart. Nothing was sent. Ask whoever gave you the code for a code from a new session`,
+      )
     if (!this.server) this.open()
     const known = this.peers.get(code.key)
     if (known) {
@@ -1145,7 +1184,7 @@ export class Bridge {
     }
     const peer: Peer = {
       key: code.key,
-      name: code.name,
+      name: outside ? cleanOutsideName(code.name) : code.name,
       addrs: code.addrs,
       port: code.port,
       outside: outside || undefined,
@@ -1162,18 +1201,18 @@ export class Bridge {
       if (e instanceof DeliveryError && e.reason === 'rejected')
         throw new Error('the other session refused this code; it was already used, expired, or that bridge was reopened. Ask for a new code')
       if (this.clockOff.has(code.key))
-        throw new Error(`${code.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`)
-      throw new Error(`cannot reach ${code.name} at ${code.addrs.join(', ')} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`)
+        throw new Error(`${peer.name} answered, but the clocks of the two PCs differ by more than two hours, so it cannot be used. ${CLOCK_FIX}`)
+      throw new Error(`cannot reach ${peer.name} at ${code.addrs.join(', ')} port ${code.port}. Check that its bridge is open and that the network or VPN lets the two PCs talk`)
     }
     if (reply.type === 'refused') {
       this.forgetGiven(peer)
-      throw new Error(`${code.name} did not take this connection: ${cleanReason(reply.reason)}`)
+      throw new Error(`${peer.name} did not take this connection: ${cleanReason(reply.reason)}`)
     }
     if (reply.type !== 'hello_ack') {
       this.forgetGiven(peer)
       throw new Error('unexpected answer from the other session')
     }
-    peer.name = String(reply.name).slice(0, MAX_NAME)
+    peer.name = outside ? cleanOutsideName(reply.name) : String(reply.name).slice(0, MAX_NAME)
     peer.private = !!reply.private || outside
     peer.token ??= code.token
     if (peer.given) this.used.set(peer.given, { key: peer.key, private: peer.private, outside: outside || undefined })
@@ -1254,6 +1293,7 @@ export class Bridge {
       id: randomUUID().slice(0, 8),
       peer: peer.key,
       peerName: peer.name,
+      ...outsideMark(peer),
       peerAddr: whereIs(peer),
       subject: firstLine(question),
       startedBy: 'me',
@@ -1484,6 +1524,7 @@ export class Bridge {
       return {
         id: t.id,
         with: t.peerName,
+        outside: t.outside || undefined,
         subject: t.subject,
         category: t.category,
         status: t.status,
@@ -1672,6 +1713,14 @@ export class Bridge {
       const outsideToken = typeof payload.token === 'string' && !!(this.tokens.get(payload.token)?.outside || this.used.get(payload.token)?.outside)
       if (!invited && !relayed && outsideToken) return forbidden
       const why = invited ? undefined : this.whyRefused(payload.token, from)
+      // 짧은 ID가 이미 쓰이고 있으면 들이지 않는다. 들이면 그 ID가 두 세션을 가리켜, ID로 부른 글이 다른 세션에 갈 수 있다. 코드는 쓰지 않는다.
+      if (!invited && outsideToken && !why && this.shortIdTaken(from)) {
+        this.logEvery('id', 'refused_stranger', { id: peerId(from), reason: 'its short id is already in use on this bridge' })
+        return answer({
+          type: 'refused',
+          reason: 'the short id made from the key of your session is already in use on that bridge, so the two sessions could not be told apart. This code was not used up: use it from a new session',
+        })
+      }
       // 외부 세션은 정한 수까지만 이어 둔다. 꽉 찼으면 코드를 쓰지 않고 까닭을 알려 준다. 자리가 나면 같은 코드로 들어온다.
       if (!invited && outsideToken && !why && this.joinedOutside().length >= this.limits.sessions) {
         this.logEvery('full', 'refused_stranger', { reason: `${this.limits.sessions} outside sessions are connected, the most this bridge takes` })
@@ -1694,7 +1743,7 @@ export class Bridge {
       const isPrivate = !!token?.private || outside
       const added: Peer = {
         key: from,
-        name: payload.name.slice(0, MAX_NAME),
+        name: outside ? cleanOutsideName(payload.name) : payload.name.slice(0, MAX_NAME),
         about: cleanAbout(payload.about),
         can: cleanCan(payload.can),
         addrs,
@@ -1814,7 +1863,7 @@ export class Bridge {
     if (isToken(hello.rejoin)) peer.token = hello.rejoin
     this.noteAway(peer, hello.away)
     // 「돌아왔다」는 소식은 AI가 아직 읽지 않은 것이 있으면 또 쌓지 않는다.
-    if (hello.back && !this.events.some(e => e.type === 'connected' && e.again && e.peer === peer.name)) this.emit({ type: 'connected', peer: peer.name, again: true, at: now() })
+    if (hello.back && !this.events.some(e => e.type === 'connected' && e.again && e.peer === peer.name)) this.emit({ type: 'connected', peer: peer.name, again: true, ...outsideMark(peer), at: now() })
     else this.changed()
     void this.flush()
     this.learn(peer, hello.about, hello.can)
@@ -1919,7 +1968,7 @@ export class Bridge {
     this.ended = this.ended.filter(e => e.id !== peerId(peer.key))
     // 바로 저장한다. 연결하자마자 프로세스가 죽어도 다시 켜면 이 상대에게 다시 붙는다.
     this.save()
-    if (options.emit) this.emit({ type: 'connected', peer: peer.name, via: options.via, again: options.again || undefined, about: peer.about, at: now() })
+    if (options.emit) this.emit({ type: 'connected', peer: peer.name, via: options.via, again: options.again || undefined, about: peer.about, ...outsideMark(peer), at: now() })
     else this.changed()
     void this.pollLoop(peer.key)
     return true
@@ -2007,7 +2056,7 @@ export class Bridge {
     if (by) return this.changed()
     const id = peerId(peer.key)
     this.ended = [...this.ended.filter(e => e.id !== id), { name: peer.name, id, at: now() }].slice(-MAX_ENDED)
-    this.emit({ type: 'peer_closed', peer: peer.name, at: now() })
+    this.emit({ type: 'peer_closed', peer: peer.name, ...outsideMark(peer), at: now() })
   }
 
   // 다시 붙어 보기 전에 기다린다. 그사이 상대에게서 무엇이든 오면 기다림을 끝내고 바로 다시 붙어 본다.
@@ -2188,6 +2237,7 @@ export class Bridge {
         id: msg.thread,
         peer: peer.key,
         peerName: peer.name,
+        ...outsideMark(peer),
         peerAddr: whereIs(peer),
         subject: (typeof msg.subject === 'string' && msg.subject.trim() ? msg.subject : firstLine(msg.text)).slice(0, 200),
         startedBy: 'peer',
@@ -2227,7 +2277,7 @@ export class Bridge {
       if (msg.kind === 'answer' && thread.ask.answers === 'one' && !this.closedAsks.has(thread.ask.id)) this.closeSiblings(thread.ask, peer, thread.id)
       ask = this.askProgress(thread.ask)
     }
-    this.emit({ type: 'message', thread: thread.id, from: peer.name, kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...(agreement && !file ? { not_saved: AGREEMENT_NOT_SAVED } : {}), ...(files ? { files: files.map(seenFile) } : {}), ...human, ...(notice ? { no_answer_needed: true } : {}), ...(thread.category ? { category: thread.category } : {}), at: now() })
+    this.emit({ type: 'message', thread: thread.id, from: peer.name, ...outsideMark(peer), kind: msg.kind, text, context, status: thread.status, ask, agreement, file, ...(agreement && !file ? { not_saved: AGREEMENT_NOT_SAVED } : {}), ...(files ? { files: files.map(seenFile) } : {}), ...human, ...(notice ? { no_answer_needed: true } : {}), ...(thread.category ? { category: thread.category } : {}), at: now() })
     return undefined
   }
 
@@ -2975,10 +3025,10 @@ export class Bridge {
     const names = (Array.isArray(to) ? to : to === undefined ? [] : [to]).map(n => n.trim()).filter(Boolean)
     if (names.some(n => EVERYONE.includes(n.toLowerCase()))) {
       if (this.peers.size === 0) throw new Error(NO_PEERS)
-      // 「모두」는 이쪽 그룹과 동료다. 외부용 코드로 이어진 세션은 이름으로 물을 때만 묻는다.
+      // 「모두」는 이쪽 그룹과 동료다. 외부용 코드로 이어진 세션은 그 세션을 집어서 물을 때만 묻는다.
       const own = [...this.peers.values()].filter(p => !p.outside)
       if (own.length === 0)
-        throw new Error(`"everyone" means the sessions of your own side, and none is connected. A session connected through an outside code is asked only by name: ${[...this.peers.values()].map(labelOf).join(', ')}`)
+        throw new Error(`"everyone" means the sessions of your own side, and none is connected. A session connected through an outside code is asked only when you say which one, by the id in brackets or by name: ${[...this.peers.values()].map(labelOf).join(', ')}`)
       return this.withoutLeftBehind(own)
     }
     if (names.length === 0) return [await this.resolvePeer(undefined)]
@@ -2999,8 +3049,15 @@ export class Bridge {
     const byId = peers.find(p => wanted === peerId(p.key) || wanted.endsWith(`[${peerId(p.key)}]`))
     if (byId) return byId
     const needle = wanted.toLowerCase()
-    const exact = peers.filter(p => p.name.toLowerCase() === needle)
-    const matches = exact.length ? exact : peers.filter(p => p.name.toLowerCase().includes(needle))
+    const fits = peers.filter(p => p.name.toLowerCase().includes(needle))
+    const exact = fits.filter(p => p.name.toLowerCase() === needle)
+    const matches = exact.length ? exact : fits
+    // 외부용 코드로 이어진 세션은 이름을 스스로 정한다. 동료의 이름이나 그 일부일 수도, 다른 외부 세션과 같은 이름일 수도 있다.
+    // 그래서 그런 세션은, 그 말에 걸리는 세션이 그것 하나뿐일 때만 이름으로 고른다. 아니면 짐작하지 않고 ID로 고르게 한다.
+    if (fits.length > 1 && matches.some(p => p.outside))
+      throw new Error(
+        `"${to}" matches more than one session, and a session connected through an outside code chose its own name: ${fits.map(labelOf).join(', ')}. Say which one by the id in brackets`,
+      )
     if (matches.length === 1) return matches[0]!
     if (matches.length === 0) throw new Error(`no connected session matches "${to}". Connected: ${peers.map(labelOf).join(', ')}`)
     if (new Set(matches.map(p => p.name)).size > 1) throw new Error(`"${to}" matches more than one session: ${matches.map(labelOf).join(', ')}`)

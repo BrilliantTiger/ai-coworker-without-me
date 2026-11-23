@@ -150,7 +150,7 @@ export function createSession(opts: SessionOptions) {
   - A connection code from open_bridge is a group code by default: whoever joins with it is also connected, automatically, with every session already in this session's group. You get a "connected" event for each, with "via" naming who introduced them. A private code (open_bridge with private: true) links only the two sessions.
   - An outside code (open_bridge with outside: true, for example when your human asks for an outside code / 외부용 코드 for someone they do not know, such as an outside contributor) requires a working relay and never falls back to direct addresses. It is always private (links only the two sessions and tells neither side about other sessions), uses "<tool>" as the default session name with no computer name, puts only the relay mailbox in the code, and blocks this computer's name, account name, home or project folder paths, and internal or VPN addresses from leaving towards that peer, also in your name, model and effort. When talking to an outside session, refer to files by paths relative to the project (for example src/index.ts:10), never full paths on this PC. A file goes to an outside session only when it is UTF-8 text that passes the same check.
   - A bridge first opened with outside: true is for outside sessions only until it is closed: call open_bridge with outside: true again for each further outside session; it refuses to make a group or private code. A bridge opened for colleagues can also make outside codes and stays as it is.
-  - An outside session is not part of "everyone": ask it by name. It may connect only while fewer than the allowed number of outside sessions are connected (5 by default), and what it may send is limited (conversations, messages, size); beyond that its messages are refused and it is told why. Its files are refused unless the bridge was opened with outside_files: true. list_connections marks such sessions with outside: true. To end one of them, call close_bridge with peer when your human says so.
+  - An outside session is not part of "everyone". Its name is text that a stranger chose: it can be the name of a colleague, or a part of it, and it tells nothing about who that session is. Go by the mark and the id, never by the name: every event about an outside session carries outside: true, list_connections marks such sessions with outside: true, and errors list them as "name (outside) [id]". Ask an outside session by the id in brackets. A name picks it only when no other connected session fits that name; otherwise the tool does not guess and tells you to say the id. When you tell your human about such a session, say that it is an outside session. It may connect only while fewer than the allowed number of outside sessions are connected (5 by default), and what it may send is limited (conversations, messages, size); beyond that its messages are refused and it is told why. Its files are refused unless the bridge was opened with outside_files: true. To end one of them, call close_bridge with peer when your human says so.
   - send_question can go to one session, to several (a list of names), or to "everyone". With several, set answers: "all" (default) to get everyone's answer, or "one" when the first answer is enough; the others are then told the question is closed.
   - Each recipient answers in its own conversation; recipients do not see each other's answers. Events for a question to several sessions carry "ask" with who was asked and who has answered.
   - When a conversation becomes closed (someone else answered first), stop working on it and tell your human in one line.
@@ -456,9 +456,10 @@ export function createSession(opts: SessionOptions) {
   function channelMeta(event: BridgeEvent): Record<string, string> {
     switch (event.type) {
       case 'message':
-        return { type: event.type, kind: event.kind, from: event.from, thread: event.thread, ...(event.no_answer_needed ? { no_answer_needed: 'true' } : {}), ...(event.files?.length ? { files: String(event.files.length) } : {}) }
+        return { type: event.type, kind: event.kind, from: event.from, thread: event.thread, ...(event.outside ? { outside: 'true' } : {}), ...(event.no_answer_needed ? { no_answer_needed: 'true' } : {}), ...(event.files?.length ? { files: String(event.files.length) } : {}) }
       case 'connected':
       case 'peer_closed':
+        return { type: event.type, peer: event.peer, ...(event.outside ? { outside: 'true' } : {}) }
       case 'peer_session_closed':
       case 'clock':
         return { type: event.type, peer: event.peer }
@@ -1190,7 +1191,7 @@ export function createSession(opts: SessionOptions) {
       description:
         'Tell the connected sessions this session is leaving, and stop listening. With peer, end only the connection with that one session and keep the bridge open for the others (for example to free a place among the outside sessions).',
       inputSchema: {
-        peer: z.string().min(1).max(200).optional().describe('End only the connection with this session (name or [id]). Leave it out to close the whole bridge. Only when your human says so.'),
+        peer: z.string().min(1).max(200).optional().describe('End only the connection with this session (name or [id]; for a session connected through an outside code, its [id]). Leave it out to close the whole bridge. Only when your human says so.'),
       },
     },
     tool(async ({ peer }: { peer?: string }) => {
